@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 komf-api-models = { workspace = true }
 komf-core = { workspace = true }
 komf-mediaserver = { workspace = true }

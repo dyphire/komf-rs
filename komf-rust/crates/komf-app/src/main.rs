@@ -6,6 +6,12 @@ use komf_app::app_context::{init_logging, AppContext, APP_CONTEXT};
 use komf_app::server;
 use std::sync::Arc;
 
+/// mimalloc 全局分配器：页面重置 + decommit 主动归还 OS。
+/// 根治 glibc malloc 释放内存不归还导致的 RSS 只升不降（如 ehentai 翻译库
+/// 解析等峰值分配后的"僵尸内存"）。
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> anyhow::Result<()> {
     // 对齐 Kotlin Application.kt：`AppContext(configDir ?: configFile)`
     // —— KOMF_CONFIG_DIR 环境变量优先，其次才是第一个命令行参数。

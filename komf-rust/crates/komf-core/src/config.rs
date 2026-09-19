@@ -233,6 +233,15 @@ pub struct EHentaiConfig {
     /// 示例：`{{title}}{% if translator %} [{{ translator }}]{% endif %}`
     #[serde(default)]
     pub title_template: String,
+    /// EhTagTranslation 标签翻译（hentai-assistant ehtranslator.py 对齐）：
+    /// false（默认）→ 不翻译；true → 由应用内部统一管理翻译库更新
+    /// （缓存到 workDir/ehentai/db.text.json，启动加载 + 每 24h 检查下载）并在标签处理时应用翻译。
+    #[serde(default)]
+    pub tag_translation_enabled: bool,
+    /// 标签翻译库下载 URL（缺省 EhTagTranslation 官方 release：
+    /// https://github.com/EhTagTranslation/Database/releases/latest/download/db.text.json）。
+    #[serde(default)]
+    pub tag_translation_url: Option<String>,
     /// 搜索域名："e-hentai"（默认）| "exhentai"（仅用于搜索；需 ipb cookie）。
     #[serde(default = "default_ehentai_search_domain")]
     pub search_domain: String,
@@ -275,6 +284,8 @@ impl Default for EHentaiConfig {
             translator_keywords: Vec::new(),
             male_only_tags_file: None,
             title_template: String::new(),
+            tag_translation_enabled: false,
+            tag_translation_url: None,
             search_domain: default_ehentai_search_domain(),
             ipb_member_id: None,
             ipb_pass_hash: None,

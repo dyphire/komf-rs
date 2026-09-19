@@ -81,6 +81,7 @@ jobs:
             binary_source: komf-app
             binary_name: komf-app
             docker_runtime: true
+            cross: false
           - runner: ubuntu-latest
             platform: linux
             artifact_suffix: linux-arm64-gnu
@@ -90,6 +91,7 @@ jobs:
             binary_source: komf-app
             binary_name: komf-app
             docker_runtime: true
+            cross: true
           - runner: windows-latest
             platform: windows
             artifact_suffix: windows-amd64-msvc
@@ -134,17 +136,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cross
-        if: matrix.platform == 'linux'
+        if: matrix.cross
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross --locked
+          cargo install cross --version 0.2.5 --locked
 
       - name: Build Rust release binary with cross
-        if: matrix.platform == 'linux'
+        if: matrix.cross
         run: |
           cross build --manifest-path komf-rust/Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
 
       - name: Build Rust release binary
-        if: matrix.platform != 'linux'
+        if: ${{ !matrix.cross }}
         run: |
           cargo build --manifest-path komf-rust/Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
 
