@@ -254,7 +254,7 @@ pub struct ProvidersConfigDto {
     pub yen_press: Option<ProviderConfigDto>,
     pub kodansha: Option<ProviderConfigDto>,
     pub viz: Option<ProviderConfigDto>,
-    pub bangumi: Option<ProviderConfigDto>,
+    pub bangumi: Option<BangumiConfigDto>,
     pub hentag: Option<ProviderConfigDto>,
     pub webtoons: Option<ProviderConfigDto>,
     pub e_hentai: Option<EHentaiConfigDto>,
@@ -307,6 +307,36 @@ pub struct EHentaiConfigDto {
     pub search_domain: Option<String>,
     pub ipb_member_id: Option<String>,
     pub ipb_pass_hash: Option<String>,
+}
+
+/// Bangumi 配置 DTO：通用 ProviderConfigDto 字段 + archive 离线数据源段。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BangumiConfigDto {
+    pub priority: Option<i32>,
+    pub enabled: Option<bool>,
+    pub series_metadata: Option<SeriesMetadataConfigDto>,
+    pub book_metadata: Option<BookMetadataConfigDto>,
+    /// `Option<Option<T>>` 三态（对应 Kotlin PatchValue）：缺省=保持；null=清空；有值=设置。
+    /// 注：不用 `#[serde(flatten)]` 展开 ProviderConfigDto —— flatten 下 `Option<Option<T>>`
+    /// 的 JSON null 会反序列化失败（serde 限制），显式展开后三态 null 正常。
+    #[serde(default, deserialize_with = "deserialize_tri_state")]
+    pub name_matching_mode: Option<Option<KomfNameMatchingMode>>,
+    pub media_type: Option<KomfMediaType>,
+    pub author_roles: Option<Vec<KomfAuthorRole>>,
+    pub artist_roles: Option<Vec<KomfAuthorRole>>,
+    pub tag_whitelist: Option<Vec<String>>,
+    pub tag_whitelist_file: Option<String>,
+    pub archive: Option<BangumiArchiveConfigDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BangumiArchiveConfigDto {
+    pub enabled: Option<bool>,
+    pub dir: Option<String>,
+    pub update_interval_hours: Option<u64>,
+    pub idle_release_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

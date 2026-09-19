@@ -1,7 +1,7 @@
 //! 配置 DTO 映射 —— 对应 `AppConfigMapper.kt` / `AppConfigUpdateMapper.kt`。
 use komf_api_models::common::*;
 use komf_api_models::config::*;
-use komf_core::config::{EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
+use komf_core::config::{BangumiConfig, EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
 use komf_core::model::{AuthorRole, MediaType, ReadingDirection, UpdateMode};
 use komf_core::util::NameSimilarityMatcher;
 use komf_mediaserver::config::{
@@ -389,7 +389,44 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
         yen_press: Some(to_provider_dto(&config.yen_press)),
         kodansha: Some(default_provider_config_dto()),
         viz: Some(to_provider_dto(&config.viz)),
-        bangumi: Some(to_provider_dto(&config.bangumi)),
+        bangumi: Some(BangumiConfigDto {
+            priority: Some(config.bangumi.provider.priority),
+            enabled: Some(config.bangumi.provider.enabled),
+            series_metadata: Some(to_series_metadata_dto(&config.bangumi.provider.series_metadata)),
+            book_metadata: Some(to_book_metadata_dto(&config.bangumi.provider.book_metadata)),
+            name_matching_mode: config
+                .bangumi
+                .provider
+                .name_matching_mode
+                .map(|m| Some(to_name_matching_mode_dto(m))),
+            media_type: Some(to_media_type_dto(config.bangumi.provider.media_type)),
+            author_roles: Some(
+                config
+                    .bangumi
+                    .provider
+                    .author_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
+            artist_roles: Some(
+                config
+                    .bangumi
+                    .provider
+                    .artist_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
+            tag_whitelist: Some(config.bangumi.provider.tag_whitelist.clone()),
+            tag_whitelist_file: config.bangumi.provider.tag_whitelist_file.clone(),
+            archive: Some(BangumiArchiveConfigDto {
+                enabled: Some(config.bangumi.archive.enabled),
+                dir: config.bangumi.archive.dir.clone(),
+                update_interval_hours: Some(config.bangumi.archive.update_interval_hours),
+                idle_release_secs: config.bangumi.archive.idle_release_secs,
+            }),
+        }),
         hentag: Some(default_provider_config_dto()),
         webtoons: Some(to_provider_dto(&config.webtoons)),
         e_hentai: Some(to_ehentai_dto(&config.e_hentai)),
@@ -928,11 +965,40 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
             .as_ref()
             .map(|d| from_provider_dto(d, &base.viz))
             .unwrap_or_else(|| base.viz.clone()),
-        bangumi: dto
-            .bangumi
-            .as_ref()
-            .map(|d| from_provider_dto(d, &base.bangumi))
-            .unwrap_or_else(|| base.bangumi.clone()),
+        bangumi: BangumiConfig {
+            provider: dto
+                .bangumi
+                .as_ref()
+                .map(|d| {
+                    from_provider_dto(
+                        &ProviderConfigDto {
+                            priority: d.priority,
+                            enabled: d.enabled,
+                            series_metadata: d.series_metadata.clone(),
+                            book_metadata: d.book_metadata.clone(),
+                            name_matching_mode: d.name_matching_mode.clone(),
+                            media_type: d.media_type,
+                            author_roles: d.author_roles.clone(),
+                            artist_roles: d.artist_roles.clone(),
+                            tag_whitelist: d.tag_whitelist.clone(),
+                            tag_whitelist_file: d.tag_whitelist_file.clone(),
+                        },
+                        &base.bangumi.provider,
+                    )
+                })
+                .unwrap_or_else(|| base.bangumi.provider.clone()),
+            archive: dto
+                .bangumi
+                .as_ref()
+                .and_then(|d| d.archive.as_ref())
+                .map(|a| komf_core::config::BangumiArchiveConfig {
+                    enabled: a.enabled.unwrap_or(base.bangumi.archive.enabled),
+                    dir: a.dir.clone().or_else(|| base.bangumi.archive.dir.clone()),
+                    update_interval_hours: a.update_interval_hours.unwrap_or(base.bangumi.archive.update_interval_hours),
+                    idle_release_secs: a.idle_release_secs.or(base.bangumi.archive.idle_release_secs),
+                })
+                .unwrap_or_else(|| base.bangumi.archive.clone()),
+        },
         webtoons: dto
             .webtoons
             .as_ref()
@@ -1367,10 +1433,10 @@ mod tests {
         let mut config = AppConfig::default();
         config.metadata_providers.mal_client_id = Some("secret-mal".to_string());
         config.metadata_providers.comic_vine_api_key = Some("secret-cv".to_string());
-        config.metadata_providers.default_providers.bangumi.name_matching_mode =
+        config.metadata_providers.default_providers.bangumi.provider.name_matching_mode =
             Some(NameSimilarityMatcher::ClosestMatch);
-        config.metadata_providers.default_providers.bangumi.media_type = MediaType::Manga;
-        config.metadata_providers.default_providers.bangumi.priority = 10;
+        config.metadata_providers.default_providers.bangumi.provider.media_type = MediaType::Manga;
+        config.metadata_providers.default_providers.bangumi.provider.priority = 10;
         config.komga.metadata_update.default.post_processing.series_title_language =
             Some("en".to_string());
 
@@ -1382,7 +1448,7 @@ mod tests {
         let updated = apply_config_update(config.clone(), &request);
         assert_eq!(updated.metadata_providers.mal_client_id, None);
         assert_eq!(updated.metadata_providers.comic_vine_api_key, None);
-        assert_eq!(updated.metadata_providers.default_providers.bangumi.name_matching_mode, None);
+        assert_eq!(updated.metadata_providers.default_providers.bangumi.provider.name_matching_mode, None);
         assert_eq!(updated.komga.metadata_update.default.post_processing.series_title_language, None);
 
         // 有值 → 设置
@@ -1393,7 +1459,7 @@ mod tests {
         let updated = apply_config_update(config.clone(), &request);
         assert_eq!(updated.metadata_providers.mal_client_id.as_deref(), Some("new-mal"));
         assert_eq!(
-            updated.metadata_providers.default_providers.bangumi.name_matching_mode,
+            updated.metadata_providers.default_providers.bangumi.provider.name_matching_mode,
             Some(NameSimilarityMatcher::Exact)
         );
         assert_eq!(
@@ -1406,7 +1472,7 @@ mod tests {
         let updated = apply_config_update(config.clone(), &request);
         assert_eq!(updated.metadata_providers.mal_client_id.as_deref(), Some("secret-mal"));
         assert_eq!(
-            updated.metadata_providers.default_providers.bangumi.name_matching_mode,
+            updated.metadata_providers.default_providers.bangumi.provider.name_matching_mode,
             Some(NameSimilarityMatcher::ClosestMatch)
         );
         assert_eq!(
@@ -1414,8 +1480,8 @@ mod tests {
             Some("en")
         );
         // 缺省不触碰无关字段
-        assert_eq!(updated.metadata_providers.default_providers.bangumi.media_type, MediaType::Manga);
-        assert_eq!(updated.metadata_providers.default_providers.bangumi.priority, 10);
+        assert_eq!(updated.metadata_providers.default_providers.bangumi.provider.media_type, MediaType::Manga);
+        assert_eq!(updated.metadata_providers.default_providers.bangumi.provider.priority, 10);
 
         // 顶层 nameMatchingMode：Kotlin getOrNull() 语义 —— null 不生效（保持原值）
         let request: KomfConfigUpdateRequest =
@@ -1443,8 +1509,8 @@ mod tests {
         .unwrap();
         let updated = apply_config_update(config, &request);
         assert!(!updated.metadata_providers.library_providers.contains_key("lib-a"));
-        assert_eq!(updated.metadata_providers.library_providers["lib-b"].bangumi.priority, 7);
-        assert_eq!(updated.metadata_providers.library_providers["lib-c"].bangumi.priority, 3);
+        assert_eq!(updated.metadata_providers.library_providers["lib-b"].bangumi.provider.priority, 7);
+        assert_eq!(updated.metadata_providers.library_providers["lib-c"].bangumi.provider.priority, 3);
         assert!(!updated.komga.metadata_update.library.contains_key("lib-a"));
         assert_eq!(
             updated.komga.metadata_update.library["lib-b"].library_type,

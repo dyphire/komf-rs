@@ -75,14 +75,18 @@ async fn main() {
     // 4) Bangumi（公开 API）
     {
         let p = komf_core::providers::bangumi::create_provider(
-            &ProviderConfig {
-                priority: 4,
-                enabled: true,
-                ..Default::default()
+            &komf_core::config::BangumiConfig {
+                provider: ProviderConfig {
+                    priority: 4,
+                    enabled: true,
+                    ..Default::default()
+                },
+                archive: komf_core::config::BangumiArchiveConfig::default(),
             },
             matcher,
             None,
             &http,
+            None,
         );
         run(&p, "Bangumi").await;
     }
