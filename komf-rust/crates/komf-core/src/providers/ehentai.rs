@@ -431,6 +431,208 @@ const EH_TAG_BLACKLIST: &[&str] = &[
     "caption",
 ];
 
+// ---------------------------------------------------------------------------
+// EhTagTranslation 标签翻译 —— hentai-assistant src/providers/ehtranslator.py 对齐
+// ---------------------------------------------------------------------------
+
+/// EhTagTranslation 数据库（db.text.json）：
+/// ```json
+/// {"data": [{"namespace": "female", "data": {"anal": {"name": "肛门", ...}}}]}
+/// ```
+/// 按 namespace(小写) → tag(小写) → 中文名 组织；`name` 缺失时无翻译项。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TagTranslator {
+    tagsdict: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+}
+
+impl TagTranslator {
+    /// 从 db.text.json 流式加载；文件缺失/解析失败/空库 → None（等效禁用，调用方用原名）。
+    ///
+    /// 流式解析（serde_json::from_reader + 派生结构，仅读 name 字段，忽略 intro 等）：
+    /// 直接构建最终双层 HashMap（组 data 经 into_iter move 转移，无双份拷贝）
+    pub(crate) fn load(path: &std::path::Path) -> Option<Self> {
+        #[derive(serde::Deserialize)]
+        struct TagInfo {
+            name: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct NamespaceGroup {
+            namespace: String,
+            #[serde(default)]
+            data: std::collections::HashMap<String, TagInfo>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Db {
+            #[serde(default)]
+            data: Vec<NamespaceGroup>,
+        }
+        let file = std::fs::File::open(path).ok()?;
+        let reader = std::io::BufReader::new(file);
+        let db: Db = serde_json::from_reader(reader).ok()?;
+        let mut tagsdict = std::collections::HashMap::new();
+        for group in db.data {
+            let namespace = group.namespace.trim().to_lowercase();
+            if namespace.is_empty() {
+                continue;
+            }
+            let mut map = std::collections::HashMap::new();
+            for (tag, info) in group.data {
+                let name = info.name.as_deref().map(remove_emoji).and_then(|n| {
+                    let n = n.trim().to_string();
+                    if n.is_empty() { None } else { Some(n) }
+                });
+                if let Some(name) = name {
+                    map.insert(tag.trim().to_lowercase(), name);
+                }
+            }
+            if !map.is_empty() {
+                tagsdict.insert(namespace, map);
+            }
+        }
+        if tagsdict.is_empty() {
+            None
+        } else {
+            Some(Self { tagsdict })
+        }
+    }
+
+    /// 翻译（对齐 ehtranslator.get_translation）：
+    /// 先按 namespace 精确查；未命中（或 namespace=None）全局遍历所有 namespace。
+    /// 命中返回中文名；未命中返回 None（调用方保留原名）。
+    pub(crate) fn translate(&self, text: &str, namespace: Option<&str>) -> Option<String> {
+        let key = text.trim().to_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        if let Some(ns) = namespace.map(|n| n.trim().to_lowercase()) {
+            if let Some(name) = self.tagsdict.get(&ns).and_then(|m| m.get(&key)) {
+                return Some(name.clone());
+            }
+        }
+        for map in self.tagsdict.values() {
+            if let Some(name) = map.get(&key) {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// 库是否为空（无任何命名空间）。
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.tagsdict.is_empty()
+    }
+}
+
+/// 去除 emoji（对齐 hentai-assistant utils.remove_emoji；按常见 emoji Unicode 块/变体过滤）。
+fn remove_emoji(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let cp = u32::from(*c);
+            !(matches!(cp,
+                // 表情符号主区块 U+1F000–U+1FAFF、装饰 U+2600–U+27BF、杂项 U+2B00–U+2BFF、
+                // 变体选择符-16（U+FE0F）、零宽连接符（U+200D）
+                0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0xFE0F | 0x200D))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 标签翻译库更新机制（应用内部统一接管；对齐 hentai-assistant ehtranslator.py）
+// ---------------------------------------------------------------------------
+
+/// 默认下载地址（EhTagTranslation 官方 release；对齐 hentai-assistant DB_URL）。
+pub(crate) const DEFAULT_TAG_TRANSLATION_URL: &str =
+    "https://github.com/EhTagTranslation/Database/releases/latest/download/db.text.json";
+
+/// 定期检查间隔：每 24 小时（对齐 hentai-assistant CHECK_INTERVAL_HOURS=24）。
+pub(crate) const TAG_TRANSLATION_UPDATE_HOURS: u64 = 24;
+
+/// 翻译库缓存路径（缺省 workDir/ehentai/db.text.json）。
+fn tag_translation_db_path(work_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    work_dir
+        .map(|d| d.join("ehentai").join("db.text.json"))
+        .unwrap_or_default()
+}
+
+/// 翻译库 meta 路径（记录 last_checked，供过期判断）。
+fn tag_translation_meta_path(work_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    work_dir
+        .map(|d| d.join("ehentai").join("db_meta.json"))
+        .unwrap_or_default()
+}
+
+/// meta 是否在 interval 内更新过（对齐 hentai-assistant load_or_update_on_startup；
+/// 文件缺失/解析失败 → false=需要更新）。
+fn tag_translation_meta_fresh(meta_path: &std::path::Path, interval: std::time::Duration) -> bool {
+    let raw = match std::fs::read_to_string(meta_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let ts = match json.get("last_checked").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return false,
+    };
+    let checked = match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(_) => return false,
+    };
+    match chrono::Utc::now().signed_duration_since(checked).to_std() {
+        Ok(elapsed) => elapsed < interval,
+        Err(_) => false,
+    }
+}
+
+/// 下载翻译库到 db_path 并写 meta；返回是否成功。
+/// 失败（网络/非 200/非 JSON）→ false，调用方回退本地已有缓存。
+async fn download_tag_translation_db(
+    client: &reqwest::Client,
+    url: &str,
+    db_path: &std::path::Path,
+    meta_path: &std::path::Path,
+) -> bool {
+    let resp = match client.get(url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::warn!("tag translation download HTTP {}", r.status());
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("tag translation download failed: {e}");
+            return false;
+        }
+    };
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("tag translation read body failed: {e}");
+            return false;
+        }
+    };
+    // 校验 JSON 可解析（避免把坏内容写入缓存）
+    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+        tracing::warn!("tag translation download is not valid JSON, ignored");
+        return false;
+    }
+    if let Some(dir) = db_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::write(db_path, &bytes).is_err() {
+        tracing::warn!("tag translation db write failed");
+        return false;
+    }
+    if let Some(dir) = meta_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let meta = serde_json::json!({ "last_checked": chrono::Utc::now().to_rfc3339() });
+    let _ = std::fs::write(meta_path, meta.to_string());
+    true
+}
+
 /// ehwiki Fetish_Listing 的 male-only 标签（内置回退；json 文件缺失/下载失败时使用。
 /// 优先从 male_only_taglist.json 读取，一致）
 const DEFAULT_MALE_ONLY_TAGS: &[&str] = &[
@@ -1152,6 +1354,9 @@ pub struct EHentaiMetadataMapper {
     translator_keywords: Vec<String>,
     /// male-only 标签（json 加载或内置回退）。
     male_only_tags: std::sync::Arc<Vec<String>>,
+    /// EhTagTranslation 标签翻译共享槽（None=禁用；标签处理时命中则用中文名）。
+    /// 应用内部定期更新机制会重建并替换槽内翻译器（同步 RwLock，短临界区）。
+    tag_translator: Option<std::sync::Arc<std::sync::RwLock<Option<TagTranslator>>>>,
 }
 
 impl EHentaiMetadataMapper {
@@ -1176,11 +1381,12 @@ impl EHentaiMetadataMapper {
                     .collect(),
             ),
             String::new(),
+            None,
         )
     }
 
     /// 完整构造（生产路径）：title_priority、translator_keywords（空→默认）、male_only_tags。
-    pub fn with_options(
+    pub(crate) fn with_options(
         metadata_config: crate::config::SeriesMetadataConfig,
         author_roles: Vec<AuthorRole>,
         artist_roles: Vec<AuthorRole>,
@@ -1189,6 +1395,7 @@ impl EHentaiMetadataMapper {
         translator_keywords: Vec<String>,
         male_only_tags: std::sync::Arc<Vec<String>>,
         title_template: String,
+        tag_translator: Option<std::sync::Arc<std::sync::RwLock<Option<TagTranslator>>>>,
     ) -> Self {
         let translator_keywords = if translator_keywords.is_empty() {
             DEFAULT_TRANSLATOR_KEYWORDS
@@ -1212,6 +1419,7 @@ impl EHentaiMetadataMapper {
             title_template,
             translator_keywords,
             male_only_tags,
+            tag_translator,
         }
     }
 
@@ -1365,8 +1573,9 @@ impl EHentaiMetadataMapper {
             Vec::new()
         };
 
-        // 增强（parse_eh_tags 对齐，无翻译）：命名空间白名单 + 黑名单 +
-        // male-only 过滤 + 保序去重；language 走 BCP47 映射不进 tags；无命名空间标签丢弃。
+        // 增强（parse_eh_tags 对齐）：命名空间白名单 + 黑名单 + male-only 过滤 +
+        // EhTagTranslation 标签翻译（tag_translation_enabled 时命中替换中文名）+ 保序去重；
+        // language 走 BCP47 映射不进 tags；无命名空间标签丢弃。
         let tags: Vec<String> = if cfg.tags {
             let mut seen = std::collections::HashSet::new();
             raw_tags
@@ -1378,20 +1587,35 @@ impl EHentaiMetadataMapper {
                     if name_l.is_empty() {
                         return None;
                     }
+                    // 翻译辅助：命中翻译库 → 中文名；未命中 → 原名。
+                    // 对齐 ehtranslator.get_translation：tag 命名空间全局查（无 namespace），
+                    // 其余按命名空间查，未命中回退全局遍历。
+                    let tr = |n: &str, with_ns: Option<&str>| -> String {
+                        if let Some(shared) = &self.tag_translator {
+                            if let Ok(guard) = shared.read() {
+                                if let Some(translator) = guard.as_ref() {
+                                    if let Some(name) = translator.translate(n, with_ns) {
+                                        return name;
+                                    }
+                                }
+                            }
+                        }
+                        n.to_string()
+                    };
                     match ns_l.as_str() {
                         "language" => None,
                         "parody" => {
                             if name_l == "original" || name_l == "various" {
                                 None
                             } else {
-                                Some(format!("parody:{name}"))
+                                Some(format!("parody:{}", tr(name, Some("parody"))))
                             }
                         }
-                        "character" => Some(format!("character:{name}")),
-                        "female" | "mixed" | "location" => Some(name.to_string()),
+                        "character" => Some(format!("character:{}", tr(name, Some("character")))),
+                        "female" | "mixed" | "location" => Some(tr(name, Some(&ns_l))),
                         "male" => {
                             if self.male_only_tags.iter().any(|m| m == &name_l) {
-                                Some(name.to_string())
+                                Some(tr(name, Some("male")))
                             } else {
                                 None
                             }
@@ -1400,7 +1624,8 @@ impl EHentaiMetadataMapper {
                             if EH_TAG_BLACKLIST.iter().any(|b| *b == name_l) {
                                 None
                             } else {
-                                Some(name.to_string())
+                                let with_ns = if ns_l == "tag" { None } else { Some(ns_l.as_str()) };
+                                Some(tr(name, with_ns))
                             }
                         }
                         _ => None,
@@ -1461,7 +1686,7 @@ impl EHentaiMetadataMapper {
             }
         };
         // 增强（超 Kotlin）：titleTemplate 非空时按参考实现 模板渲染覆盖主标题
-        // （变量：title=主标题、title_jpn、translator=汉化组、writer/penciller=标题驱动作者）。
+        // （变量：title=按 titlePriority 选出的主标题、translator=汉化组、writer/penciller=标题驱动作者）。
         let title = if !self.title_template.is_empty() {
             let mut vars = std::collections::HashMap::new();
             // title 变量即按 titlePriority 选出的主标题（title_jpn 非空且 priority=jpn → 日文，否则英文）
@@ -1739,6 +1964,49 @@ pub fn create_provider(
                 .unwrap_or_default()
         });
     let male_only_tags = load_male_only_tags(&male_tags_path, http_client);
+    // EhTagTranslation 标签翻译（hentai-assistant 对齐）：enabled 时由应用内部统一管理更新。
+    // 同步先加载本地缓存（workDir/ehentai/db.text.json）；后台任务每 24h 检查 meta 过期/缺文件
+    // → 从配置 URL（缺省官方 release）下载 → 写缓存 → 重建翻译器 → 替换共享槽。
+    let tag_translator = if config.tag_translation_enabled {
+        let tt_path = tag_translation_db_path(work_dir);
+        let tt_meta = tag_translation_meta_path(work_dir);
+        let url = config
+            .tag_translation_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TAG_TRANSLATION_URL.to_string());
+        let shared: std::sync::Arc<std::sync::RwLock<Option<TagTranslator>>> =
+            std::sync::Arc::new(std::sync::RwLock::new(TagTranslator::load(&tt_path)));
+        // 后台周期任务：立即检查一次，之后每 24h（对齐 CHECK_INTERVAL_HOURS）。
+        let task_client = http_client.clone();
+        let task_shared = shared.clone();
+        let task_db = tt_path.clone();
+        let task_meta = tt_meta.clone();
+        let task_url = url.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(TAG_TRANSLATION_UPDATE_HOURS * 3600);
+            loop {
+                let need = !tag_translation_meta_fresh(&task_meta, interval) || !task_db.exists();
+                if need {
+                    if download_tag_translation_db(&task_client, &task_url, &task_db, &task_meta)
+                        .await
+                    {
+                        if let Some(tr) = TagTranslator::load(&task_db) {
+                            if let Ok(mut guard) = task_shared.write() {
+                                *guard = Some(tr);
+                                tracing::info!("ehentai tag translation refreshed");
+                            }
+                        }
+                    } else if !task_db.exists() {
+                        tracing::warn!("ehentai tag translation download failed, will retry");
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+        Some(shared)
+    } else {
+        None
+    };
     // 搜索域名规范化："exhentai" → exhentai.org，其余 → e-hentai.org（仅搜索用）
     let search_domain = ehentai_search_domain(&config.search_domain);
     let client = EHentaiClient::with_options(
@@ -1772,6 +2040,7 @@ pub fn create_provider(
             config.translator_keywords.clone(),
             male_only_tags,
             config.title_template.clone(),
+            tag_translator,
         ),
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
@@ -1979,6 +2248,195 @@ impl MetadataProvider for EHentaiMetadataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 临时 db.text.json（EhTagTranslation 格式：{"data":[{"namespace":..,"data":{..}}]}）。
+    fn write_test_db() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ehentai_test_db_{}.json",
+            std::process::id()
+        ));
+        let json = r#"{"data":[
+            {"namespace":"female","data":{
+                "anal":{"name":"肛门","intro":""},
+                "ahegao":{"name":"阿嘿颜"}
+            }},
+            {"namespace":"parody","data":{
+                "original":{"name":"原创"}
+            }},
+            {"namespace":"character","data":{
+                "hatsune miku":{"name":"初音ミク 🎵"}
+            }},
+            {"namespace":"male","data":{
+                "dilf":{"name":"大叔"}
+            }},
+            {"namespace":"reclass","data":{
+                "manga":{"name":"漫画"}
+            }}
+        ]}"#;
+        std::fs::write(&path, json).unwrap();
+        path
+    }
+
+    #[test]
+    fn tag_translator_load_and_translate() {
+        let path = write_test_db();
+        let tr = TagTranslator::load(&path).expect("load db");
+        // 按 namespace 精确查
+        assert_eq!(tr.translate("anal", Some("female")).as_deref(), Some("肛门"));
+        // 大小写/空白容错
+        assert_eq!(
+            tr.translate("  AHEGAO ", Some("Female")).as_deref(),
+            Some("阿嘿颜")
+        );
+        // namespace 未命中 → 全局遍历
+        assert_eq!(tr.translate("hatsune miku", None).as_deref(), Some("初音ミク"));
+        assert_eq!(
+            tr.translate("hatsune miku", Some("female")).as_deref(),
+            Some("初音ミク")
+        );
+        // 未命中 → None
+        assert_eq!(tr.translate("nonexistent", Some("female")), None);
+        assert_eq!(tr.translate("nonexistent", None), None);
+        // 去 emoji（对齐 hentai-assistant remove_emoji）
+        assert_eq!(
+            tr.translate("hatsune miku", Some("character")).as_deref(),
+            Some("初音ミク")
+        );
+        // 空 key → None
+        assert_eq!(tr.translate("   ", Some("female")), None);
+        // 文件缺失 → None（等效禁用）
+        assert!(TagTranslator::load(std::path::Path::new("no_such_db.json")).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tag_translator_malformed_db() {
+        let path = std::env::temp_dir().join(format!(
+            "ehentai_test_db_bad_{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(TagTranslator::load(&path).is_none());
+        // 空 data → None
+        std::fs::write(&path, r#"{"data":[]}"#).unwrap();
+        assert!(TagTranslator::load(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn mapper_with_translator() -> EHentaiMetadataMapper {
+        let path = write_test_db();
+        let tr = TagTranslator::load(&path).expect("load db");
+        EHentaiMetadataMapper::with_options(
+            crate::config::SeriesMetadataConfig {
+                tags: true,
+                ..Default::default()
+            },
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec!["en".to_string(), "ja".to_string()],
+            "jpn".to_string(),
+            Vec::new(),
+            std::sync::Arc::new(vec!["dilf".to_string()]),
+            String::new(),
+            Some(std::sync::Arc::new(std::sync::RwLock::new(Some(tr)))),
+        )
+    }
+
+    #[test]
+    fn to_series_metadata_tags_translated() {
+        let mapper = mapper_with_translator();
+        let mut b = book_with_jpn(1, "Title", None);
+        b.tags = Some(vec![
+            "parody:original".to_string(),      // 黑名单 → 丢弃
+            "parody:to love ru".to_string(),    // 未命中 → 原名
+            "female:anal".to_string(),          // 命中 → 肛门（无前缀）
+            "character:hatsune miku".to_string(), // 命中 → 初音ミク（character 前缀）
+            "male:dilf".to_string(),            // male-only 命中 → 大叔
+            "male:catgirl".to_string(),         // 非 male-only → 丢弃
+            "other:extraneous ads".to_string(), // 黑名单 → 丢弃
+            "tag:gore".to_string(),             // 未命中 → 原名
+            "language:chinese".to_string(),     // 不进 tags
+        ]);
+        let meta = mapper.to_series_metadata(&b, None, None);
+        assert_eq!(
+            meta.metadata.tags,
+            vec![
+                "parody:to love ru",
+                "肛门",
+                "character:初音ミク",
+                "大叔",
+                "gore",
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_translation_meta_fresh_checks() {
+        let dir = std::env::temp_dir().join(format!("ehentai_meta_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let meta = dir.join("db_meta.json");
+        let hour = std::time::Duration::from_secs(3600);
+        // 缺失 → 需要更新
+        assert!(!tag_translation_meta_fresh(&meta, hour));
+        // 1 小时前 → fresh（间隔 24h）
+        let t = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        std::fs::write(&meta, format!(r#"{{"last_checked":"{t}"}}"#)).unwrap();
+        assert!(tag_translation_meta_fresh(&meta, hour * 24));
+        // 48 小时前 → 过期
+        let t2 = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        std::fs::write(&meta, format!(r#"{{"last_checked":"{t2}"}}"#)).unwrap();
+        assert!(!tag_translation_meta_fresh(&meta, hour * 24));
+        // 坏格式 → 需要更新
+        std::fs::write(&meta, "{bad").unwrap();
+        assert!(!tag_translation_meta_fresh(&meta, hour * 24));
+        // 缺 last_checked 字段 → 需要更新
+        std::fs::write(&meta, r#"{"foo":1}"#).unwrap();
+        assert!(!tag_translation_meta_fresh(&meta, hour * 24));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tag_translation_db_paths_defaults() {
+        let work = std::path::Path::new("/tmp/work");
+        assert_eq!(
+            tag_translation_db_path(Some(work)),
+            std::path::PathBuf::from("/tmp/work/ehentai/db.text.json")
+        );
+        assert_eq!(
+            tag_translation_meta_path(Some(work)),
+            std::path::PathBuf::from("/tmp/work/ehentai/db_meta.json")
+        );
+        assert_eq!(
+            DEFAULT_TAG_TRANSLATION_URL,
+            "https://github.com/EhTagTranslation/Database/releases/latest/download/db.text.json"
+        );
+    }
+
+    #[test]
+    fn to_series_metadata_tags_untranslated_when_disabled() {
+        // 无 translator（默认）→ 全部原名
+        let mapper = EHentaiMetadataMapper::with_options(
+            crate::config::SeriesMetadataConfig {
+                tags: true,
+                ..Default::default()
+            },
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec!["en".to_string(), "ja".to_string()],
+            "jpn".to_string(),
+            Vec::new(),
+            std::sync::Arc::new(vec!["dilf".to_string()]),
+            String::new(),
+            None,
+        );
+        let mut b = book_with_jpn(1, "Title", None);
+        b.tags = Some(vec![
+            "female:anal".to_string(),
+            "male:dilf".to_string(),
+        ]);
+        let meta = mapper.to_series_metadata(&b, None, None);
+        assert_eq!(meta.metadata.tags, vec!["anal", "dilf"]);
+    }
 
     fn book(gid: i32, token: &str, title: &str, rating: Option<f64>) -> EHentaiBook {
         EHentaiBook {
@@ -2400,6 +2858,7 @@ mod tests {
             Vec::new(),
             std::sync::Arc::new(vec![]),
             "{{title}}{% if translator %} [{{ translator }}]{% endif %}".to_string(),
+            None,
         );
         // 调试：直接验证 find_translator 对 title_jpn 的行为
         let tr_debug = EHentaiParser::find_translator(
@@ -2428,6 +2887,7 @@ mod tests {
             vec!["中国翻訳".to_string()],
             std::sync::Arc::new(vec![]),
             "{{title}}{% if translator %} [{{ translator }}]{% endif %}".to_string(),
+            None,
         );
         let meta2 = mapper2.to_series_metadata(&book, None, None);
         let t2 = meta2.metadata.title.expect("title");
@@ -2846,6 +3306,7 @@ mod tests {
             vec!["汉化组A".to_string()],
             std::sync::Arc::new(vec![]),
             String::new(),
+            None,
         );
         let bz = book_with_jpn(4, "Title [汉化组A]", None);
         assert!(custom.book_matches_forced_language(&bz, "zh"));
@@ -2864,6 +3325,7 @@ mod tests {
             vec![],
             std::sync::Arc::new(vec![]),
             String::new(),
+            None,
         );
         let b = book_with_jpn(1, "English Title", Some("日本語タイトル"));
         let meta = mapper.to_series_metadata(&b, None, None);
@@ -2901,6 +3363,7 @@ mod tests {
             vec![],
             std::sync::Arc::new(vec![]),
             String::new(),
+            None,
         );
         let r2 = mapper_title.to_series_search_result(&b, "");
         assert_eq!(r2.title, "English Title");

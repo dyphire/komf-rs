@@ -14,7 +14,7 @@ Rust 实现位于 [`komf-rust/`](komf-rust/README.md)，是独立隔离的 Cargo
 - Discord webhook + Apprise 通知（Velocity 模板）
 - ComicInfo 读写、书籍排序、评分标签、阅读方向覆盖
 - 配置热更新（`PATCH /api/config`）、任务跟踪、元数据搜索/识别/匹配/重置端点
-- 浏览器扩展 / 用户脚本兼容的配置界面
+- 用户脚本兼容的配置界面
 
 ## 元数据 provider
 
@@ -83,13 +83,12 @@ copy application.example.yml application.yml # Windows
 ### Docker
 
 ```sh
-docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust
-docker run -d -p 8085:8085 \
+docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
+ -p 8085:8085 \
  -v /path/to/config:/config \ # 存放 application.yml 的目录
- --name komf komf-rust
 ```
 
-镜像将 `/config` 暴露为卷（`KOMF_CONFIG_DIR=/config`），把你的 `application.yml` 放到那里即可。健康检查探测 `GET /`。
+镜像发布在 `ghcr.io/dyphire/komf-rs`（`latest` + 版本 tag），将 `/config` 暴露为卷（`KOMF_CONFIG_DIR=/config`），把你的 `application.yml` 放到那里即可。如需本地构建，执行 `docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust` 并把镜像名换成 `komf-rust`。
 
 ## 配置
 
@@ -165,7 +164,8 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ### 健康检查
 
-- `GET /`
+- `GET /` —— 服务正常时返回 `200`，响应体为 `komf-rs`。
+- Docker 镜像 `HEALTHCHECK` 通过 `wget -qO- http://127.0.0.1:8085/` 探测（`--interval=30s --timeout=5s --start-period=15s --retries=3`），与 Dockerfile 一致。
 
 ## Web UI 集成
 
@@ -175,10 +175,10 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ## 与 Kotlin 版的差异
 
-- **eHentai provider**（来自 [PR #284](https://github.com/Snd-R/komf/pull/284)）在 Rust 版可用；画廊搜索需要能访问 e-hentai.org（通常需代理）。PR 之上的扩展：可配置 `searchDomain`（`e-hentai` / `exhentai`，仅搜索请求域名）+ exhentai cookie 自动预热与 403 自动刷新（`ipbMemberId`/`ipbPassHash`）、`titlePriority`、`translatorKeywords`、`maleOnlyTagsFile`，以及参考实现 风格的系列标题 `titleTemplate`。
+- **eHentai provider**（来自 [PR #284](https://github.com/Snd-R/komf/pull/284)）在 Rust 版可用；画廊搜索需要能访问 e-hentai.org（通常需代理）。PR 之上的扩展：可配置 `searchDomain`（`e-hentai` / `exhentai`，仅搜索请求域名）+ exhentai cookie 自动预热与 403 自动刷新（`ipbMemberId`/`ipbPassHash`）、`titlePriority`、`translatorKeywords`、`maleOnlyTagsFile`，以及参考实现 hentai-assistant 风格的系列标题 `titleTemplate`。
 - **Bangumi provider** 增强了内置 154 项标签白名单（源自 KomgaBangumi.user.js）、通过 `tagWhitelist`/`tagWhitelistFile` 配置额外白名单、动态标签计数阈值（3~35）+ 前 10 增强、搜索显示与匹配双向的 mediaType 过滤（库级覆盖优先）、`score:N` 标签解析为数值评分，以及尊重 `seriesTitleLanguage` 的 name_cn 处理。
 - **搜索标题提取**可按库配置（`searchTitleExtraction`）：括号/标题正则、作者分隔符、标题拆分符、符号归一与字符映射均可自定义，不再硬编码。
-  
-  
 
+## 鸣谢
 
+- [EhTagTranslation/Database](https://github.com/EhTagTranslation/Database) —— eHentai provider 使用的标签翻译数据库

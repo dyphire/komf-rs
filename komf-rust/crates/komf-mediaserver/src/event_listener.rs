@@ -116,7 +116,7 @@ impl MediaServerEventListener for MetadataEventHandler {
             let job_id = self
                 .services
                 .metadata_service_for(&library_id.0)
-                .match_series_metadata(&series_id)
+                .match_series_metadata_no_links_skip(&series_id)
                 .await;
             job_ids.push(job_id);
         }
