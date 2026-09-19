@@ -177,8 +177,10 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 - **eHentai provider**（来自 [PR #284](https://github.com/Snd-R/komf/pull/284)）在 Rust 版可用；画廊搜索需要能访问 e-hentai.org（通常需代理）。PR 之上的扩展：可配置 `searchDomain`（`e-hentai` / `exhentai`，仅搜索请求域名）+ exhentai cookie 自动预热与 403 自动刷新（`ipbMemberId`/`ipbPassHash`）、`titlePriority`、`translatorKeywords`、`maleOnlyTagsFile`，以及参考实现 hentai-assistant 风格的系列标题 `titleTemplate`。
 - **Bangumi provider** 增强了内置 154 项标签白名单（源自 KomgaBangumi.user.js）、通过 `tagWhitelist`/`tagWhitelistFile` 配置额外白名单、动态标签计数阈值（3~35）+ 前 10 增强、搜索显示与匹配双向的 mediaType 过滤（库级覆盖优先）、`score:N` 标签解析为数值评分，以及尊重 `seriesTitleLanguage` 的 name_cn 处理。
+- **Bangumi 离线数据源**（移植自 [BangumiKomga](https://github.com/kalxd/BangumiKomga) 的 `bangumi_archive`）：启用 `bangumi.archive.enabled` 后，应用后台下载 bangumi/Archive release（约 400+MB zip）并构建本地 SQLite（FTS5 trigram）索引 + mmap jsonlines。搜索与元数据解析离线优先（series/type/标签/mediaType 过滤、别名感知相似度复用、单行本 relations），索引未就绪或未命中时自动回退在线 API；封面始终走在线 API 获取。可配置 `dir`（缺省 `workDir/bangumi-archive`）与 `updateIntervalHours`（缺省 168）。
 - **搜索标题提取**可按库配置（`searchTitleExtraction`）：括号/标题正则、作者分隔符、标题拆分符、符号归一与字符映射均可自定义，不再硬编码。
 
 ## 鸣谢
 
 - [EhTagTranslation/Database](https://github.com/EhTagTranslation/Database) —— eHentai provider 使用的标签翻译数据库
+- [bangumi/Archive](https://github.com/bangumi/Archive) —— Bangumi provider 离线数据源

@@ -29,6 +29,9 @@ sha1 = { workspace = true }
 image = { workspace = true }
 scraper = { workspace = true }
 percent-encoding = { workspace = true }
+memmap2 = { workspace = true }
+zip = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true }

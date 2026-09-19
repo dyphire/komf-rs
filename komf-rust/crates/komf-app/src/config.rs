@@ -160,7 +160,7 @@ fn warn_about_disabled_providers(config: &AppConfig) {
         || providers.viz.enabled
         || providers.book_walker.enabled
         || providers.manga_dex.enabled
-        || providers.bangumi.enabled
+        || providers.bangumi.provider.enabled
         || providers.comic_vine.enabled
         || providers.manga_baka.enabled
         || providers.webtoons.enabled;
@@ -264,7 +264,7 @@ metadataProviders:
       tagWhitelist: "热血,搞笑, 自定义标签"
 "#;
         let config: AppConfig = serde_yaml::from_str(yml).unwrap();
-        let bangumi = &config.metadata_providers.default_providers.bangumi;
+        let bangumi = &config.metadata_providers.default_providers.bangumi.provider;
         assert_eq!(
             bangumi.tag_whitelist,
             vec!["热血", "搞笑", "自定义标签"]
@@ -282,7 +282,7 @@ metadataProviders:
       tagWhitelist: ["热血", "搞笑"]
 "#;
         let config: AppConfig = serde_yaml::from_str(yml).unwrap();
-        let bangumi = &config.metadata_providers.default_providers.bangumi;
+        let bangumi = &config.metadata_providers.default_providers.bangumi.provider;
         assert_eq!(bangumi.tag_whitelist, vec!["热血", "搞笑"]);
     }
 }

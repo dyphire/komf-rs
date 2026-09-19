@@ -209,6 +209,15 @@ metadataProviders:
       mediaType: MANGA              # 搜索显示与匹配过滤（库级覆盖优先）
       tagWhitelist: []              # 追加到内置 154 项白名单（支持 "a,b" 字符串）
       tagWhitelistFile: null        # 白名单 json 路径；缺省内置 bangumi_tag_whitelist.json
+      archive:                      # bangumi/Archive 离线数据源（BangumiKomga bangumi_archive 移植）
+        enabled: false              #   启用后后台下载 Archive（约 400+MB zip）→ SQLite 索引（FTS5）+ mmap
+                                    #   搜索/元数据离线优先（含别名相似度、单行本 relations）；封面仍在线 API 取
+                                    #   未就绪 / 未命中 → 自动回退在线 API；可关闭本段恢复纯在线
+        dir: null                   #   数据目录（archive_index.db 等）；缺省 workDir/bangumi-archive
+        updateIntervalHours: 168    #   更新检查间隔（小时）；0 = 仅首次构建不检查更新
+        idleReleaseSecs: 60         #   空闲释放 mmap 热页（秒）：距上次查询超过该时长即对 subject.jsonlines
+                                    #   的 mmap 执行 MADV_DONTNEED 释放页缓存（下次查询按需重读），
+                                    #   降低常驻内存（~100MB → 空闲时回落）；0 = 禁用（默认 60）。仅 Linux 生效
     webtoons:
       priority: 130
       enabled: false

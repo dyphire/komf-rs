@@ -5,6 +5,7 @@
 
 pub mod anilist;
 pub mod bangumi;
+pub mod bangumi_archive;
 pub mod bookwalker;
 pub mod comicvine;
 pub mod ehentai;
@@ -339,10 +340,11 @@ fn create_metadata_providers(
         default_name_matcher,
         global.bangumi_token.as_deref(),
         http_client,
+        database_work_dir,
     ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
-            priority: config.bangumi.priority,
+            priority: config.bangumi.provider.priority,
         });
     }
     if let Some(p) = comicvine::create_provider(
