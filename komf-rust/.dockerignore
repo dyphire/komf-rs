@@ -1,0 +1,6 @@
+target/
+.git/
+*.log
+database.sqlite
+application.yml
+ehentai/

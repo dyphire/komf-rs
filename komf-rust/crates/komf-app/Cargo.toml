@@ -1,0 +1,27 @@
+[package]
+name = "komf-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+komf-api-models = { workspace = true }
+komf-core = { workspace = true }
+komf-mediaserver = { workspace = true }
+komf-notifications = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+async-trait = "0.1"
+url = { workspace = true }
+anyhow = { workspace = true }
+async-stream = { workspace = true }

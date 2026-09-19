@@ -1,0 +1,34 @@
+[package]
+name = "komf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zhconv = { version = "0.4.2", features = ["opencc-cn", "opencc-tw"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+async-trait = "0.1"
+komf-api-models = { workspace = true }
+rusqlite = { workspace = true }
+zstd = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+sha1 = { workspace = true }
+image = { workspace = true }
+scraper = { workspace = true }
+percent-encoding = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

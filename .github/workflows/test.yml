@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  pull_request:
+    branches:
+      - 'rust'
+      - 'master'
+    paths:
+      - 'komf-rust/**'
+      - '.github/workflows/test.yml'
+  push:
+    branches:
+      - 'rust'
+      - 'master'
+    paths:
+      - 'komf-rust/**'
+      - '.github/workflows/test.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+      fail-fast: false
+    name: Rust tests - ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: komf-rust
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run cargo nextest
+        env:
+          CARGO_TERM_COLOR: always
+          RUST_BACKTRACE: "1"
+        run: cargo nextest run --workspace --no-fail-fast

@@ -1,0 +1,17 @@
+# Fix cross-compiled binary glibc requirement.
+#
+# cross >= 0.2.5 builds linux-gnu targets on Ubuntu 24.04 base images,
+# producing binaries that require GLIBC_2.39. The runtime images (Debian
+# bookworm-slim, glibc 2.36) and many NAS/older distros cannot run them
+# ("./komf-app: version `GLIBC_2.39' not found").
+#
+# Pin the cross image to 0.2.4 (Ubuntu 20.04/22.04 base, glibc 2.31-2.35,
+# both below 2.39) so the produced binaries are compatible with the Docker
+# base image (bookworm, glibc 2.36) and systems with glibc >= 2.31
+# (Debian 11+, Ubuntu 20.04+).
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.4"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.4"

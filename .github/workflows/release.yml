@@ -1,0 +1,357 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Release notes (use \n for newlines)
+        type: string
+        required: false
+      bump:
+        description: 'Bump type'
+        required: false
+        default: 'next'
+        type: choice
+        options:
+          - 'next'
+          - 'major'
+          - 'minor'
+          - 'patch'
+          - 'current'
+      github_release:
+        description: 'Create Github Release'
+        default: true
+        type: boolean
+      docker_release:
+        description: 'Push Docker images'
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version_current: ${{ steps.versions.outputs.version_current }}
+      version_next: ${{ steps.versions.outputs.version_next }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install svu
+        run: |
+          echo 'deb [trusted=yes] https://apt.fury.io/caarlos0/ /' | sudo tee /etc/apt/sources.list.d/caarlos0.list
+          sudo apt update
+          sudo apt install svu
+      - name: Compute next version for release
+        run: |
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            echo "VERSION_NEXT=$(svu ${{ inputs.bump }})" >> "$GITHUB_ENV"
+          else
+            echo "VERSION_NEXT=0.1.0" >> "$GITHUB_ENV"
+          fi
+      - name: Set Versions
+        id: versions
+        run: |
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            echo "version_current=$(svu current)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version_current=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version_next=${{ env.VERSION_NEXT }}" >> "$GITHUB_OUTPUT"
+
+  binary_release:
+    name: Release binary (${{ matrix.artifact_suffix }})
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            artifact_suffix: linux-amd64-gnu
+            release_package_name: release-package-amd64-gnu
+            arch: amd64
+            target: x86_64-unknown-linux-gnu
+            binary_source: komf-app
+            binary_name: komf-app
+            docker_runtime: true
+          - runner: ubuntu-latest
+            platform: linux
+            artifact_suffix: linux-arm64-gnu
+            release_package_name: release-package-arm64-gnu
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            binary_source: komf-app
+            binary_name: komf-app
+            docker_runtime: true
+          - runner: windows-latest
+            platform: windows
+            artifact_suffix: windows-amd64-msvc
+            release_package_name: release-package-windows-amd64-msvc
+            arch: amd64
+            target: x86_64-pc-windows-msvc
+            binary_source: komf-app.exe
+            binary_name: komf-app.exe
+            docker_runtime: false
+          - runner: macos-14
+            platform: macos
+            artifact_suffix: macos-arm64
+            release_package_name: release-package-macos-arm64
+            arch: arm64
+            target: aarch64-apple-darwin
+            binary_source: komf-app
+            binary_name: komf-app
+            docker_runtime: false
+    env:
+      VERSION: ${{ needs.version.outputs.version_next }}
+      VERSION_NEXT: ${{ needs.version.outputs.version_next }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Remove unnecessary files
+        if: matrix.platform == 'linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Display versions
+        run: |
+          echo "Current version: ${{ needs.version.outputs.version_current }}"
+          echo "Release version: ${VERSION}"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        if: matrix.platform == 'linux'
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build Rust release binary with cross
+        if: matrix.platform == 'linux'
+        run: |
+          cross build --manifest-path komf-rust/Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
+
+      - name: Build Rust release binary
+        if: matrix.platform != 'linux'
+        run: |
+          cargo build --manifest-path komf-rust/Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
+
+      - name: Package release artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          release_dir="dist/komf-${VERSION}-${{ matrix.artifact_suffix }}"
+          release_artifact="${release_dir}.tar.gz"
+          rm -rf "$release_dir"
+          mkdir -p "$release_dir"
+          binary_path="komf-rust/target/${{ matrix.target }}/release/${{ matrix.binary_source }}"
+          test -f "$binary_path"
+          cp "$binary_path" "$release_dir/${{ matrix.binary_name }}"
+          if [[ "${{ matrix.platform }}" != 'windows' ]]; then
+            chmod +x "$release_dir/${{ matrix.binary_name }}"
+          fi
+          tar -czf "$release_artifact" -C dist "$(basename "$release_dir")"
+          if [[ "${{ matrix.docker_runtime }}" == 'true' ]]; then
+            docker_artifact_dir="docker-artifacts/linux-gnu/${{ matrix.arch }}"
+            rm -rf "$docker_artifact_dir"
+            mkdir -p "$docker_artifact_dir"
+            cp "$binary_path" "$docker_artifact_dir/komf-app"
+            chmod +x "$docker_artifact_dir/komf-app"
+          fi
+
+      - name: Verify packaged artifacts
+        run: |
+          set -euo pipefail
+          test -f "dist/komf-${VERSION}-${{ matrix.artifact_suffix }}.tar.gz"
+          if [[ "${{ matrix.docker_runtime }}" == 'true' ]]; then
+            test -f "docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app"
+          fi
+
+      - name: Upload release package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.release_package_name }}
+          path: dist/komf-${{ env.VERSION }}-${{ matrix.artifact_suffix }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload Docker runtime artifact
+        if: matrix.docker_runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-artifacts-${{ matrix.arch }}
+          path: docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          if-no-files-found: error
+
+  github_release:
+    name: Publish GitHub release
+    if: inputs.github_release
+    runs-on: ubuntu-latest
+    needs:
+      - version
+      - binary_release
+    env:
+      VERSION: ${{ needs.version.outputs.version_next }}
+      VERSION_CURRENT: ${{ needs.version.outputs.version_current }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download release package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate changelog
+        if: env.VERSION_CURRENT != ''
+        id: changelog
+        uses: metcalfc/changelog-generator@v5.0.1
+        with:
+          myToken: ${{ secrets.GITHUB_TOKEN }}
+          base-ref: ${{ env.VERSION_CURRENT }}
+          head-ref: ${{ github.sha }}
+
+      - name: Create release notes
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          set -euo pipefail
+          mkdir -p release_notes
+          printf '%b\n' "$RELEASE_NOTES" > release_notes/release_notes.md
+          mapfile -t release_artifacts < <(find dist -maxdepth 1 -type f -name 'komf-*.tar.gz' | sort)
+          if [[ ${#release_artifacts[@]} -eq 0 ]]; then
+            echo "No release artifacts were downloaded" >&2
+            exit 1
+          fi
+          if [[ -n "$CHANGELOG" ]]; then
+            printf '\n%s\n' "$CHANGELOG" >> release_notes/release_notes.md
+          fi
+          {
+            echo ""
+            echo "## Checksums"
+            echo ""
+            for artifact in "${release_artifacts[@]}"; do
+              artifact_name=$(basename "$artifact")
+              artifact_sha256=$(sha256sum "$artifact" | cut -d' ' -f1)
+              printf -- '- `%s`: `%s`\n' "$artifact_name" "$artifact_sha256"
+            done
+          } >> release_notes/release_notes.md
+          echo "Release notes:"
+          cat release_notes/release_notes.md
+          echo ""
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t release_artifacts < <(find dist -maxdepth 1 -type f -name 'komf-*.tar.gz' | sort)
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release edit "${VERSION}" --title "${VERSION}" --notes-file release_notes/release_notes.md
+            gh release upload "${VERSION}" "${release_artifacts[@]}" --clobber
+          else
+            gh release create "${VERSION}" "${release_artifacts[@]}" --target "${GITHUB_SHA}" --title "${VERSION}" --notes-file release_notes/release_notes.md
+          fi
+
+  docker_release:
+    name: Release Docker image
+    if: inputs.docker_release
+    runs-on: ubuntu-latest
+    needs:
+      - version
+      - binary_release
+    env:
+      VERSION: ${{ needs.version.outputs.version_next }}
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Remove unnecessary files
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Display versions
+        run: |
+          echo "Current version: ${{ needs.version.outputs.version_current }}"
+          echo "Release version: ${VERSION}"
+
+      - name: Download amd64 Docker runtime artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-artifacts-amd64
+          path: komf-rust/docker-artifacts/linux-gnu/amd64
+
+      - name: Download arm64 Docker runtime artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-artifacts-arm64
+          path: komf-rust/docker-artifacts/linux-gnu/arm64
+
+      - name: Verify Docker runtime artifacts
+        run: |
+          set -euo pipefail
+          test -f komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
+          test -f komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+
+      - name: Strip Docker runtime artifacts
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+          strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
+          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: image
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${VERSION}"
+            if [[ "${VERSION}" != *-* ]]; then
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: komf-rust
+          file: ./komf-rust/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

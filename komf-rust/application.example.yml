@@ -1,0 +1,244 @@
+# komf-rs 配置模板（默认值 + 注释）。
+#
+# 使用方法：复制为 application.yml 后按需修改：
+#   Linux/macOS: cp application.example.yml application.yml
+#   Windows:     copy application.example.yml application.yml
+# 也可用环境变量 KOMF_CONFIG_DIR 指定配置目录，或把配置文件路径作为第一个参数传给 komf-app。
+# 未创建 application.yml 时，服务以内置默认配置启动（仅监听 8085，无 mediaserver 凭据）。
+# 运行中通过 API `PATCH /api/config` 修改的配置会自动写回 application.yml（不存在则创建）。
+#
+# 以下所有值均为代码内置默认值（省略该字段时行为相同）；注释说明含义。
+# 敏感字段（Komga 账号密码/API Key、e-hentai/exhentai cookie 等）请勿提交到版本库。
+
+komga:
+  baseUri: http://localhost:25600   # Komga 服务地址
+  komgaUser: admin@example.org      # Komga 登录用户名（basic auth 用；配置了 apiKey 可留空）
+  komgaPassword: admin              # Komga 登录密码（basic auth 用）
+  apiKey: ''                        # Komga API Key（推荐；Komga 管理后台生成，非空时优先于账号密码）
+  thumbnailSizeLimit: 1048575       # 缩略图字节数上限（超过则不下载）
+  eventListener:
+    enabled: false                  # SSE 事件监听（自动匹配新入库系列）
+    metadataLibraryFilter: []       # 仅监听这些库（空 = 全部）
+    metadataSeriesExcludeFilter: [] # 跳过这些系列
+    notificationsLibraryFilter: []  # 通知过滤的库
+  metadataUpdate:
+    default:
+      libraryType: MANGA            # 库媒体类型：MANGA / NOVEL / COMIC / WEBTOON
+      aggregate: false              # 多 provider 聚合（主 provider 之外再拉取并合并其余）
+      mergeTags: false              # 聚合时合并 tags
+      mergeGenres: false            # 聚合时合并 genres
+      bookCovers: false             # 更新书籍封面
+      seriesCovers: false           # 更新系列封面
+      overrideExistingCovers: true  # 已存在封面也覆盖
+      lockCovers: true              # 封面写入后加锁
+      updateModes: [API]            # 更新方式：API / DISK
+      overrideComicInfo: false      # DISK 模式覆盖 ComicInfo.xml
+      postProcessing:
+        seriesTitle: false          # 设置系列主标题
+        seriesTitleLanguage: en     # 主标题语言（null = 不设置语言）
+        alternativeSeriesTitles: false # 写入备选标题
+        alternativeSeriesTitleLanguages: [en, ja, ja-ro] # 备选标题语言（BCP 47）
+        fallbackToAltTitle: false   # 主标题缺失时回退备选标题
+        orderBooks: false           # 按卷号排序书籍
+        readingDirectionValue: null # 强制阅读方向：LEFT_TO_RIGHT / RIGHT_TO_LEFT / VERTICAL / WEBTOON
+        languageValue: null         # 强制语言（如 zh / en）
+        scoreTagName: null          # 评分写入的标签名（如 "score:9" → scoreTagName 匹配 "score:"）
+        originalPublisherTagName: null # 原出版社标签名
+        publisherTagNames: []       # 出版社标签映射（tagName + language）
+        alternateTitleLabels:       # alternate titles 的 ROMAJI/NATIVE/LOCALIZED 标签本地化
+          romaji: null              #   None = 默认 "Romaji"（如 "罗马音"）
+          native: null              #   None = 默认 "Native"（如 "原名"）
+          localized: null           #   None = 默认 "Localized"（如 "别名"）
+        linksSkipEnabled: true      # 系列 links 含 provider 识别特征时跳过自动匹配
+        linksMatchEnabled: true     # linksSkipEnabled=false 时直接用 links 拉元数据更新（跳过搜索）
+      searchTitleExtraction:
+        enabled: false              # 括号式标题提取（对系列名生成额外搜索候选）
+        bracketRegex: null          # 括号内容提取正则（如 "\[([^\[\]]+)\]"）
+        authorSeparator: null       # 作者识别分隔符正则（如 "×"）
+        titleSplitters: []          # 标题拆分符列表（支持正则，如 "_"）
+        symbolNormalizeRegex: '[:：•·․,，。''’?？!！~⁓～]' # 符号归一正则（匹配部分替换为空格）
+        charMappings: []            # 单字符映射表（如 [["／","/"]]，键支持正则）
+        cleanupRegex: []            # 整名清洗链（按序替换为空）
+      failedMatchCollectionName: null # Auto-Identify Library 匹配失败系列加入的收藏夹名（Rust 扩展）
+      chineseConversion:            # 简繁转换（Rust 扩展）
+        enabled: false              #   总开关
+        direction: t2s              #   t2s（繁→简）/ s2t（简→繁）
+        search: true                #   应用于搜索关键词
+        matching: true              #   应用于自动匹配（query 与候选双向）
+        update:
+          enabled: true             #   应用于元数据更新
+          fields: [title]           #   应用字段：title / genres / tags / summary
+    library: {}                     # 按库覆盖（komga/kavita 库 id → 同 default 结构）
+
+kavita:
+  baseUri: http://localhost:5000    # Kavita 服务地址
+  apiKey: ''                        # Kavita API Key
+  eventListener:
+    enabled: false                  # SSE 事件监听
+    metadataLibraryFilter: []
+    metadataSeriesExcludeFilter: []
+    notificationsLibraryFilter: []
+  metadataUpdate:
+    default:
+      libraryType: MANGA
+      aggregate: false
+      mergeTags: false
+      mergeGenres: false
+      bookCovers: false
+      seriesCovers: false
+      overrideExistingCovers: true
+      lockCovers: true
+      updateModes: [API]
+      overrideComicInfo: false
+      postProcessing:
+        seriesTitle: false
+        seriesTitleLanguage: en
+        alternativeSeriesTitles: false
+        alternativeSeriesTitleLanguages: [en, ja, ja-ro]
+        fallbackToAltTitle: false
+        orderBooks: false
+        readingDirectionValue: null
+        languageValue: null
+        scoreTagName: null
+        originalPublisherTagName: null
+        publisherTagNames: []
+        alternateTitleLabels:
+          romaji: null
+          native: null
+          localized: null
+        linksSkipEnabled: true
+        linksMatchEnabled: true
+      searchTitleExtraction:
+        enabled: false
+        bracketRegex: null
+        authorSeparator: null
+        titleSplitters: []
+        symbolNormalizeRegex: '[:：•·․,，。''’?？!！~⁓～]'
+        charMappings: []
+        cleanupRegex: []
+      failedMatchCollectionName: null
+      chineseConversion:
+        enabled: false
+        direction: t2s
+        search: true
+        matching: true
+        update:
+          enabled: true
+          fields: [title]
+    library: {}
+
+database:
+  file: ./database.sqlite           # SQLite 数据库文件
+
+metadataProviders:
+  malClientId: null                 # MAL API 客户端 ID（mal provider 必需）
+  comicVineApiKey: null             # Comic Vine API Key（comicVine provider 必需）
+  comicVineSearchLimit: null        # Comic Vine 搜索条数上限（默认 10）
+  comicVineIssueName: null          # 刊名模板（如 "Issue #{number}"）
+  comicVineIdFormat: null           # ID 格式（如 "[cv-{id}]"）
+  bangumiToken: null                # Bangumi API token（可选，显示 NSFW 条目）
+  nameMatchingMode: CLOSEST_MATCH   # EXACT / CONTAINS / CLOSEST_MATCH / DISTANCE
+  defaultProviders:
+    # 通用默认（未列出字段省略时）：enabled=false、mediaType=MANGA、
+    # authorRoles=[WRITER]、artistRoles=[PENCILLER,INKER,COLORIST,LETTERER,COVER]、
+    # seriesMetadata 全 true（useOriginalPublisher=false）、bookMetadata 全 true、tagWhitelist=[]。
+    mangaUpdates:
+      priority: 10
+      enabled: true                 # 默认唯一启用的 provider（公开 API 无需凭据）
+      seriesMetadata:               # 每字段开关（默认全 true；仅列差异时省略）
+        status: true
+        title: true
+        titleSort: true
+        summary: true
+        publisher: true
+        readingDirection: true
+        ageRating: true
+        language: true
+        genres: true
+        tags: true
+        totalBookCount: true
+        authors: true
+        releaseDate: true
+        thumbnail: true
+        books: true
+        links: true
+        score: true
+        useOriginalPublisher: false
+      bookMetadata:                 # 每字段开关（默认全 true）
+        title: true
+        summary: true
+        number: true
+        numberSort: true
+        releaseDate: true
+        authors: true
+        tags: true
+        isbn: true
+        links: true
+        thumbnail: true
+    mangaBaka:
+      priority: 10
+      enabled: false
+      mode: API                     # API / DATABASE
+    bookWalker:
+      priority: 10
+      enabled: false
+    mangaDex:
+      priority: 10
+      enabled: false
+      coverLanguages: [en, ja]      # 封面语言偏好
+    aniList:
+      priority: 40
+      enabled: false
+      tagsScoreThreshold: 60        # 标签评分阈值（≥ 该值的标签才采用）
+      tagsSizeLimit: 15             # 标签数量上限
+    mal:
+      priority: 20
+      enabled: false                # 需 malClientId
+    comicVine:
+      priority: 110
+      enabled: false                # 需 comicVineApiKey
+    yenPress:
+      priority: 50
+      enabled: false
+    viz:
+      priority: 70
+      enabled: false
+    bangumi:
+      priority: 100
+      enabled: false                # 公开 API；可选 bangumiToken
+      mediaType: MANGA              # 搜索显示与匹配过滤（库级覆盖优先）
+      tagWhitelist: []              # 追加到内置 154 项白名单（支持 "a,b" 字符串）
+      tagWhitelistFile: null        # 白名单 json 路径；缺省内置 bangumi_tag_whitelist.json
+    webtoons:
+      priority: 130
+      enabled: false
+    eHentai:
+      priority: 10
+      enabled: false                # 需可访问 e-hentai.org（常需代理）；exhentai 另需 cookie
+      mediaType: MANGA              # 搜索显示与匹配过滤（库级覆盖优先）
+      preferredLanguages: [en, ja]  # 语言偏好（筛选结果）
+      titlePriority: jpn            # "jpn"=日文标题优先（默认）/ "title"=英文标题优先
+      translatorKeywords: []        # 自定义汉化组关键词（空=内置 10 个）
+      maleOnlyTagsFile: null        # male-only 标签 json 路径（缺省 workDir/ehentai/male_only_taglist.json 自动下载）
+      titleTemplate: ''             # 元数据标题模板（空=不启用走 titlePriority）
+                                    #   示例: "{{title}}{% if translator %} [{{ translator }}]{% endif %}"
+      searchDomain: e-hentai        # "e-hentai"（默认）| "exhentai"（仅搜索请求域名）
+      ipbMemberId: null             # exhentai 登录 cookie（searchDomain=exhentai 时必需；403 自动刷新）
+      ipbPassHash: null
+  libraryProviders: {}              # 按库覆盖（库 id → 同 defaultProviders 结构）
+
+notifications:
+  templatesDirectory: ./            # 通知模板目录（velocity）
+  discord:
+    webhooks: null                  # Discord webhook URL 列表
+    embedColor: 1F8B4C              # 嵌入消息颜色（十六进制）
+    seriesCover: false              # 通知附带系列封面
+  apprise:
+    urls: null                      # Apprise URL 列表
+    seriesCover: false              # 通知附带系列封面
+
+server:
+  port: 8085                        # HTTP 监听端口
+
+logLevel: INFO                      # 日志级别：TRACE / DEBUG / INFO / WARN / ERROR
+httpLogLevel: BASIC                 # HTTP 请求日志级别：NONE / BASIC / HEADERS / BODY

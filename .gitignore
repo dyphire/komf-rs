@@ -3,6 +3,11 @@
 build/
 **/build/
 !src/**/build/
+.smoke
+target/
+application.yml
+*.log
+*.sqlite
 
 ### intellij idea ###
 .idea/*

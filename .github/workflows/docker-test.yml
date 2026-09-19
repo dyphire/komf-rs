@@ -1,0 +1,62 @@
+name: Docker Test Image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker-test:
+    name: Build and push test Docker image
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}:test
+    defaults:
+      run:
+        working-directory: komf-rust
+    steps:
+      - name: Remove unnecessary files
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: komf-rust
+
+      - name: Build release binary
+        run: cargo build --locked --release --bin komf-app
+
+      - name: Stage Docker runtime artifact
+        run: |
+          set -euo pipefail
+          mkdir -p docker-artifacts/linux-gnu/amd64
+          cp target/release/komf-app docker-artifacts/linux-gnu/amd64/komf-app
+          chmod +x docker-artifacts/linux-gnu/amd64/komf-app
+          test -f docker-artifacts/linux-gnu/amd64/komf-app
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v7
+        with:
+          context: komf-rust
+          file: ./komf-rust/docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_NAME }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

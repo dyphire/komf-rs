@@ -1,497 +1,182 @@
-# Komga and Kavita Metadata Fetcher
-Download latest version from https://github.com/Snd-R/komf/releases
+# Komga and Kavita Metadata Fetcher (Rust)
 
-## Overview
-Komga and Kavita Metadata Fetcher is a tool that fetches metadata and thumbnails for your digital comic book library.\
-It
-can automatically pick up added series and update their metadata and thumbnail.\
-You can also manually search and
-identify series, or match the entire library or a series.
+**English** | [简体中文](README.zh-CN.md)
 
-### Komga and Kavita webui integration
-Browser web extension will let configure komf and identify series directly from komga or kavita webui
-- [Chrome download]( https://chromewebstore.google.com/detail/komf/bhppjldobkpocplgfcimljjhdjgbpdnh)
-- [Firefox download](https://addons.mozilla.org/en-US/firefox/addon/komf/)
-- deprecated [Komf userscript](https://github.com/Snd-R/komf-userscript) is still functional, but it will not receive new updates
+This is the **Rust rewrite** of [komf](https://github.com/Snd-R/komf), a tool that fetches metadata and thumbnails for your digital comic book library. It automatically picks up added series in **Komga** and **Kavita** and updates their metadata, thumbnails and book-level data. You can also manually search, identify and match series — per series, per library, or for the whole library.
+
+The Rust implementation lives in [`komf-rust/`](komf-rust/README.md) as a fully isolated Cargo workspace: separate dependencies, separate build, separate binary (`komf-app`). It does not read or modify the Kotlin implementation.
+
+## Status
+
+- Komga: REST API + SSE event listener (auto-update, notifications)
+- Kavita: REST API + SignalR event listener (JWT auth, auto-refresh)
+- 12 metadata providers implemented, configurable per provider and per library
+- Discord webhook + Apprise notifications with Velocity templates
+- ComicInfo reading/writing, book ordering, score tags, reading direction override
+- Config hot-reload (`PATCH /api/config`), job tracking, metadata search/identify/match/reset endpoints
+- Browser web extension / userscript compatible configuration UI
+
+## Metadata providers
+
+| Provider                | Search                                  | Series metadata | Book metadata |
+| ----------------------- | --------------------------------------- | --------------- | ------------- |
+| MangaUpdates            | ✅                                       | ✅               | —             |
+| MyAnimeList             | ✅                                       | ✅               | ✅             |
+| AniList                 | ✅                                       | ✅               | —             |
+| MangaDex                | ✅                                       | ✅               | ✅             |
+| BookWalker              | ✅                                       | ✅               | ✅             |
+| Bangumi (bgm.tv)        | ✅                                       | ✅               | ✅             |
+| ComicVine               | ✅                                       | ✅               | ✅             |
+| YenPress                | ✅                                       | ✅               | ✅             |
+| Viz                     | ✅                                       | ✅               | ✅             |
+| Webtoons                | ✅                                       | ✅               | ✅             |
+| MangaBaka               | ✅                                       | ✅               | —             |
+| **eHentai** (Rust-only) | ✅                                       | ✅               | —             |
+| ~~Kodansha~~            | placeholder (unsupported in Kotlin too) |                 |               |
+| ~~Nautiljon~~           | placeholder (unsupported in Kotlin too) |                 |               |
+| ~~Hentag~~              | placeholder (unsupported in Kotlin too) |                 |               |
+
+Providers can be configured globally (`metadataProviders.defaultProviders`) or per library (`metadataProviders.libraryProviders`). Each provider supports priority, enable/disable, media type filtering (`MANGA`/`NOVEL`/`COMIC`/`WEBTOON`), author/artist role mapping, per-field series/book metadata toggles, and provider-specific options (e.g. `coverLanguages`, `tagsScoreThreshold`, `preferredLanguages`). Kodansha, Nautiljon and Hentag are recognized in the configuration for compatibility, but the Kotlin version maps them to `error("Unsupported")` and the Rust version simply does not register them — enabling them has no effect.
 
 ## Building
 
-To build the application, follow these steps:
+Requirements: [Rust](https://rustup.rs/) (stable toolchain).
 
-1. Run `./gradlew :komf-app:clean :komf-app:shadowjar`.
-2. The output will be in `komf-app/build/libs`.
+```sh
+cd komf-rust
+cargo build --release # builds the release binary at target/release/komf-app
+cargo test --workspace # run unit tests
+```
 
 ## Running
 
-To run the application, you can either use the JAR file or Docker Compose.
+The repository does not ship `application.yml` (to avoid committing real credentials); use the template instead:
 
-### Running with JAR
-
-To run the application using the JAR file, follow these steps:
-
-1. Ensure you have Java 17 or higher installed on your system.
-2. Run `java -jar komf-1.0-SNAPSHOT-all.jar <path to config>`.
-
-### Running with Docker Compose
-
-To run the application using Docker Compose, use the following YAML configuration:
-
-```yml
-version: "3.7"
-services:
-  komf:
-    image: sndxr/komf:latest
-    container_name: komf
-    ports:
-      - "8085:8085"
-    user: "1000:1000"
-    environment:
-      - KOMF_KOMGA_BASE_URI=http://komga:25600
-      - KOMF_KOMGA_USER=admin@example.org
-      - KOMF_KOMGA_PASSWORD=admin
-      - KOMF_KAVITA_BASE_URI=http://kavita:5000
-      - KOMF_KAVITA_API_KEY=16707507-d05d-4696-b126-c3976ae14ffb
-      - KOMF_LOG_LEVEL=INFO
-      # optional jvm options. Example config for low memory usage. Runs guaranteed cleanup up every 3600000ms(1hour)
-      - JAVA_TOOL_OPTIONS=-XX:+UnlockExperimentalVMOptions -XX:+UseShenandoahGC -XX:ShenandoahGCHeuristics=compact -XX:ShenandoahGuaranteedGCInterval=3600000 -XX:TrimNativeHeapInterval=3600000
-    volumes:
-      - /path/to/config:/config #path to directory with application.yml and database file
-    restart: unless-stopped
+```sh
+cd komf-rust
+cp application.example.yml application.yml # Linux/macOS
+copy application.example.yml application.yml # Windows
+# edit application.yml: Komga/Kavita credentials, providers, metadata update, ...
+./komf-app [path to config] # path to application.yml or its directory
 ```
 
-### Running with Docker Create
+The template (`application.example.yml`) contains every option with inline comments; sensitive fields (Komga user/password/API key, e-hentai/exhentai cookies) default to empty/placeholder values.
 
-```
-docker create \
-  --name komf \
-  -p 8085:8085 \
-  -u 1000:1000 \
-  -e KOMF_KOMGA_BASE_URI=http://komga:25600 \
-  -e KOMF_KOMGA_USER=admin@example.org \
-  -e KOMF_KOMGA_PASSWORD=admin \
-  -e KOMF_KAVITA_BASE_URI=http://kavita:5000 \
-  -e KOMF_KAVITA_API_KEY=16707507-d05d-4696-b126-c3976ae14ffb \
-  -e KOMF_LOG_LEVEL=INFO \
-  -v /path/to/config:/config \
-  --restart unless-stopped \
-  sndxr/komf:latest
-```
+If no path is given, the `KOMF_CONFIG_DIR` environment variable is used. If neither is set, the service starts with built-in defaults (HTTP on 8085 only, no media-server credentials); configuration changed via `PATCH /api/config` is written back to `./application.yml` (created if missing), and the database defaults to `./database.sqlite`.
 
-- if you don't already have a komga or kavita network you'll need to network create a new one
-    - `docker network create my_network`
-- attach komf and media server to new network:
-    - `docker network connect my_network komga_or_kavita`
-    - `docker network connect my_network komf`
-- start the container `docker start komf`
+Environment variables (same as the Kotlin version):
 
-## Example `application.yml` Config
+| Variable                                       | Description                                                 |
+| ---------------------------------------------- | ----------------------------------------------------------- |
+| `KOMF_KOMGA_BASE_URI`                          | Komga base URL                                              |
+| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                                            |
+| `KOMF_KOMGA_API_KEY`                           | Komga API key (`X-API-Key` auth, takes precedence when set) |
+| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita base URL + API key                                   |
+| `KOMF_SERVER_PORT`                             | HTTP port (default 8085)                                    |
+| `KOMF_LOG_LEVEL`                               | Log level (default INFO)                                    |
+| `KOMF_DISCORD_WEBHOOKS`                        | Comma-separated Discord webhook URLs                        |
+| `KOMF_APPRISE_URLS`                            | Comma-separated Apprise URLs                                |
+| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | Required for MAL provider                                   |
+| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | Required for ComicVine provider                             |
+| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token (shows NSFW items)                            |
 
-```yml
-komga:
-  baseUri: http://localhost:25600 #or env:KOMF_KOMGA_BASE_URI
-  komgaUser: admin@example.org #or env:KOMF_KOMGA_USER
-  komgaPassword: admin #or env:KOMF_KOMGA_PASSWORD
-  eventListener:
-    enabled: false # if disabled will not connect to komga and won't pick up newly added entries
-    metadataLibraryFilter: [ ]  # listen to all events if empty
-    metadataSeriesExcludeFilter: [ ]
-    notificationsLibraryFilter: [ ] # Will send notifications if any notification source is enabled. If empty will send notifications for all libraries
-  metadataUpdate:
-    default:
-      libraryType: "MANGA" # Can be "MANGA", "NOVEL", "COMIC" or "WEBTOON". Hint to help better match book numbers
-      updateModes: [ API ] # can use multiple options at once. available options are API, COMIC_INFO
-      aggregate: false # if enabled will search and aggregate metadata from all configured providers
-      mergeTags: false # if true and aggregate is enabled will merge tags from all providers
-      mergeGenres: false # if true and aggregate is enabled will merge genres from all providers
-      bookCovers: false # update book thumbnails
-      seriesCovers: false # update series thumbnails
-      overrideExistingCovers: true # if false will upload but not select new cover if another cover already exists
-      overrideComicInfo: false # Replace existing ComicInfo file. If false, only append additional data
-      postProcessing:
-        seriesTitle: false # update series title
-        seriesTitleLanguage: "en" # series title update language. If empty chose first matching title
-        fallbackToAltTitle: false # fallback to first alternative tile if series title is not found
-        alternativeSeriesTitles: false # use other title types as alternative title option
-        alternativeSeriesTitleLanguages: # alternative title languages
-          - "en"
-          - "ja"
-          - "ja-ro"
-        orderBooks: false # will order books using parsed volume or chapter number
-        scoreTagName: "score" # adds score tag of specified format e.g. "score: 8" only uses integer part of rating. Can be used in search using query: tag:"score: 8" in komga
-        readingDirectionValue: # override reading direction for all series. should be one of these: LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL, WEBTOON
-        languageValue: # set default language for series. Must use BCP 47 format e.g. "en"
-        #TagName: if specified and if provider has data about publisher in that language then additional tag will be added using format ({TagName}: publisherName)
-        #e.g. originalPublisherTagName: "Original Publisher" will add tag "Original Publisher: Shueisha"
-        originalPublisherTagName:
-        #publisherTagNames:
-        #  - tagName: "English Publisher"
-        #    language: "en"
+### Docker
 
-kavita:
-  baseUri: "http://localhost:5000" #or env:KOMF_KAVITA_BASE_URI
-  apiKey: "16707507-d05d-4696-b126-c3976ae14ffb" #or env:KOMF_KAVITA_API_KEY
-  eventListener:
-    enabled: false # if disabled will not connect to kavita and won't pick up newly added entries
-    metadataLibraryFilter: [ ]  # listen to all events if empty
-    metadataSeriesExcludeFilter: [ ]
-    notificationsLibraryFilter: [ ] # Will send notifications if any notification source is enabled. If empty will send notifications for all libraries
-  metadataUpdate:
-    default:
-      libraryType: "MANGA" # Can be "MANGA", "NOVEL", "COMIC" or "WEBTOON". Hint to help better match book numbers
-      updateModes: [ API ] # can use multiple options at once. available options are API, COMIC_INFO
-      aggregate: false # if enabled will search and aggregate metadata from all configured providers
-      mergeTags: false # if true and aggregate is enabled will merge tags from all providers
-      mergeGenres: false # if true and aggregate is enabled will merge genres from all providers
-      bookCovers: false #update book thumbnails
-      seriesCovers: false #update series thumbnails
-      overrideExistingCovers: true # if false will upload but not select new cover if another cover already exists
-      lockCovers: true # lock cover images so that kavita does not change them
-      postProcessing:
-        seriesTitle: false #update series title
-        seriesTitleLanguage: "en" # series title update language. If empty chose first matching title
-        alternativeSeriesTitles: false # use other title types as alternative title option
-        alternativeSeriesTitleLanguages: # alternative title language. Only first language is used. Use single value for consistency
-          - "ja-ro"
-        orderBooks: false # will order books using parsed volume or chapter number. works only with COMIC_INFO
-        languageValue: # set default language for series. Must use BCP 47 format e.g. "en"
-
-notifications:
-  templatesDirectory: "./" # path to a directory with templates
-  discord:
-    # List of discord webhook urls. Will call these webhooks after series or books were added. 
-    webhooks: # config example: webhooks: ["https://discord.com/api/webhooks/9..."] (env:KOMF_DISCORD_WEBHOOKS - comma separated list of webhooks)
-    seriesCover: false # include series cover in message
-    embedColor: "1F8B4C"
-  apprise:
-    # List of apprise urls. Will call these after series or books were added. 
-    urls:
-    seriesCover: false # include series cover as attachment
-
-database:
-  file: ./database.sqlite # database file location.
-
-metadataProviders:
-  malClientId: "" # required for mal provider. See https://myanimelist.net/forum/?topicid=1973077 env:KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID
-  comicVineApiKey: # required for comicVine provider https://comicvine.gamespot.com/api/ env:KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY
-  comicVineSearchLimit: # define ComicVine search result Limit, default is 10
-  comicVineIssueName: # string that contains "{number}" which will be replaced by the issue number ie. "Issue #{number}". Used when an issue has no name on ComicVine, default is null
-  comicVineIdFormat: # string that contains "{id}" which will serve to parse the ComicVine volume of a given book from its title or folder name ie. "[cv-{id}]" which will correctly identify '.../Uncanny X-Men Omnibus (2006) [cv-27512]' as being [4050-27512](https://comicvine.gamespot.com/uncanny-x-men-omnibus/4050-27512/)
-  bangumiToken: # bangumi provider require a token to show nsfw items https://next.bgm.tv/demo/access-token  env:KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN
-  defaultProviders:
-    mangaUpdates:
-      priority: 10
-      enabled: true
-      mediaType: "MANGA" # filter used in matching. Can be NOVEL, MANGA or WEBTOON. MANGA type includes everything except novels
-      authorRoles: [ "WRITER" ] # roles that will be mapped to author role
-      artistRoles: [ "PENCILLER","INKER","COLORIST","LETTERER","COVER" ] # roles that will be mapped to artist role
-    mal:
-      priority: 20
-      enabled: false
-      mediaType: "MANGA" # filter used in matching. Can be NOVEL, MANGA or WEBTOON. MANGA type includes everything except novels
-    nautiljon:
-      priority: 30
-      enabled: false
-    aniList:
-      priority: 40
-      enabled: false
-      mediaType: "MANGA" # filter used in matching. Can be NOVEL, MANGA or WEBTOON. MANGA type includes everything except novels
-      tagsScoreThreshold: 60 # tags with this score or higher will be included
-      tagsSizeLimit: 15 # amount of tags that will be included
-    yenPress:
-      priority: 50
-      enabled: false
-      mediaType: "MANGA" # filter used in matching. Can be NOVEL or MANGA.
-    kodansha:
-      priority: 60
-      enabled: false
-    viz:
-      priority: 70
-      enabled: false
-    bookWalker:
-      priority: 80
-      enabled: false
-      mediaType: "MANGA" # filter used in matching. Can be NOVEL, MANGA or WEBTOON.
-    mangaDex:
-      priority: 90
-      enabled: false
-      coverLanguages:
-        - "en"
-        - "ja"
-    bangumi: # Chinese metadata provider. https://bgm.tv/
-      priority: 100
-      enabled: false
-    comicVine: # https://comicvine.gamespot.com/ requires API key. Experimental provider, can mismatch issue numbers
-      priority: 110
-      enabled: false
-    hentag:
-      priority: 120
-      enabled: false
-    webtoons:
-      priority: 130
-      enabled: false
-    mangaBaka:
-      priority: 140
-      enabled: false
-      # Datasource used for metadata retrieval. DATABASE mode will only work if MangaBaka database is installed
-      # API or DATABASE 
-      mode: API
-
-server:
-  port: 8085 # or env:KOMF_SERVER_PORT
-
-logLevel: INFO # or env:KOMF_LOG_LEVEL
+```sh
+docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust
+docker run -d -p 8085:8085 \
+ -v /path/to/config:/config \ # directory containing application.yml
+ --name komf komf-rust
 ```
 
-## Metadata update config for a library
+The image exposes `/config` as a volume (`KOMF_CONFIG_DIR=/config`), so place your `application.yml` there. Healthcheck probes `GET /`.
 
-You can configure a set of metadata update options that will only be used with specified library. If no options are
-specified for a library
-then default options will be used. kavita or komga library ids are used as library identifiers
+## Configuration
 
-```yaml
-komga_or_kavita:
-  metadataUpdate:
-    default:
-      aggregate: false
-    library:
-      09PERX1TW8GEK:
-        updateModes: [ API ]
-        aggregate: false
-        bookCovers: false
-        seriesCovers: false
-        postProcessing:
-          seriesTitle: false
-          titleType: LOCALIZED
-          alternativeSeriesTitles: false
-          languageValue:
-      123:
-        aggregate: true
-        seriesCovers: true
-```
+The repository does not include an `application.yml`; all options are documented in the template [`komf-rust/application.example.yml`](komf-rust/application.example.yml) (every field with an inline comment and its code default value; sensitive fields — Komga user/password/API key, e-hentai/exhentai cookies — are empty placeholders).
 
-## Providers config for a library
+To use it:
 
-You can configure a set of metadata providers that will only be used with specified library. If no providers are
-specified for a library
-then default providers will be used. kavita or komga library ids are used as library identifiers
+1. Copy the template to `application.yml` (see [Running](#running) for the exact command).
+2. Edit `application.yml`: fill in your Komga/Kavita credentials and enable the providers you want; each option is explained inline.
+3. Start the service with the config file (path argument or `KOMF_CONFIG_DIR`); without a config file it runs on built-in defaults.
 
-```yaml
-metadataProviders:
-  defaultProviders:
-    mangaUpdates:
-      priority: 10
-      enabled: true
-  libraryProviders:
-    09PERX1TW8GEK:
-      mangaUpdates:
-        priority: 10
-        enabled: true
-      bookWalker:
-        priority: 20
-        enabled: true
-    123:
-      aniList:
-        priority: 10
-        enabled: true
-      mal:
-        priority: 20
-        enabled: true
-```
+Per-provider reference (e-hentai / bangumi) is kept in [`komf-rust/README.md`](komf-rust/README.md).
+
+## Per-library configuration
+
+Any metadata update option or provider can be scoped to a specific library by its id (Komga or Kavita library id) via `metadataUpdate.library.<libraryId>` and `metadataProviders.libraryProviders.<libraryId>` — see the commented placeholders in the template (`application.example.yml`).
 
 ## Metadata aggregation
 
-By default, all metadata will be fetched from the first positive match in configured providers by order of priority. If
-you want to enable metadata aggregation from multiple sources you need to set `aggregateMetadata` to true in the config.
-
-If enabled, initial metadata will be taken from the first positive match in configured providers. Additional search
-request will be made to all the other configured providers and metadata will be aggregated from the results. Metadata
-fields will only be set from another provider if previous provider did not have any data for that particular field. For
-example provider1 did not return thumbnail in that case thumbnail will be taken from provider2
-
-You can configure which fields each provider will have in the config both for series and books. By default, all
-available fields will be fetched. Example of default fields configuration
-
-```yml
-metadataProviders:
-  default:
-    mangaUpdates:
-      priority: 10
-      enabled: true
-      authorRoles: [ "WRITER" ]
-      artistRoles: [ "PENCILLER","INKER","COLORIST","LETTERER","COVER" ]
-      seriesMetadata:
-        status: true
-        title: true
-        titleSort: true
-        summary: true
-        publisher: true
-        readingDirection: true
-        ageRating: true
-        language: true
-        genres: true
-        tags: true
-        totalBookCount: true
-        authors: true
-        thumbnail: true
-        releaseDate: true
-        links: true
-        score: true
-        books: true
-        useOriginalPublisher: true # prefer original publisher and volume information if source has data about multiple providers. If false will use english or other available publisher
-      bookMetadata:
-        title: true
-        summary: true
-        number: true
-        numberSort: true
-        releaseDate: true
-        authors: true
-        tags: true
-        isbn: true
-        links: true
-        thumbnail: true
-```
-
-If you want to disable particular field you just need to set the field value to false
-
-```yml
-metadataProviders:
-  default:
-    mangaUpdates:
-      priority: 10
-      enabled: true
-      seriesMetadata:
-        thumbnail: false
-```
+By default, metadata is fetched from the first positive match in configured providers, in priority order. With `aggregate: true`, metadata from all providers is aggregated: a field is only taken from another provider if the previous one did not provide it.
 
 ## Notifications
 
-if any webhook urls are specified then after new book is added a call to webhooks will be triggered. You can change
-message format by providing your own template files and specifying directory path in `templatesDirectory/discord` or
-`templatesDirectory/apprise`.
-For docker deployments templates should be
-placed in mounted `/config/<discord or apprise>` directory without specifying `templatesDirectory`
+If any webhook URLs are configured, webhooks are called after books are added. Message formats are customizable with Velocity templates placed in `templatesDirectory/discord` or `templatesDirectory/apprise`:
 
-### Discord template file names:
+- Discord: `title.vm`, `title_url.vm`, `description.vm`, `footer.vm`, `field_<index>_name<_inline>.vm`, `field_<index>_value.vm`
+- Apprise: `apprise_title.vm`, `apprise_body.vm`
 
-- title.vm
-- title_url.vm
-- description.vm
-- footer.vm
-- field_<index>_name<_inline>.vm
-- field_<index>_value.vm
-
-### Apprise template file names:
-
-- apprise_title.vm
-- apprise_body.vm
-
-Templates are written using Apache Velocity ([link to docs](https://velocity.apache.org/engine/2.3/user-guide.html)).
-
-```velocity
-## Example of the default description template
-**$series.name**
-
-#if ($series.metadata.summary != "")
-    $series.metadata.summary
-
-#end
-#if($books.size() == 1)
-***new book was added to library $library.name:***
-#else
-***new books were added to library $library.name:***
-#end
-#foreach ($book in $books)
-**$book.name**
-#end
-```
-
-### Template variables
-```typescript
-// Variables available in templates:
-interface Webhook {
-    library: {
-        id: string,
-        name: string
-    },
-    series: {
-        id: string,
-        name: string,
-        bookCount: number,
-        metadata: {
-            status: string,
-            title: string,
-            titleSort: string,
-            alternativeTitles: { label: string, title: string }[],
-            summary: string,
-            readingDirection?: string,
-            publisher?: string,
-            alternativePublishers: string[],
-            ageRating?: number,
-            language?: string,
-            genres: string[],
-            tags: string[],
-            totalBookCount?: number,
-            authors: { name: string, role: string }[],
-            releaseYear: number,
-            liks: { label: string, url: string }[],
-        }
-    },
-    books: {
-        id: string,
-        name: string,
-        number: int,
-        metadata: {
-            title: string,
-            summary: string,
-            number: string,
-            releaseDate: string,
-            authors: { name: string, role: string }
-            tags: string[],
-            isbn?: string,
-            links: { label: string, url: string }[]
-        }
-    }[],
-    mediaServer: string //can be `KOMGA` or `KAVITA`
-}
-```
+For Docker deployments, templates go in the mounted `/config/discord` or `/config/apprise` directory.
 
 ## HTTP Endpoints
 
-Use Komga or Kavita in place of `{media-server}`.
+### Configuration
 
-### Providers
+- `GET /api/config`, `PATCH /api/config` — read / update configuration (hot-reload)
 
-Use the following HTTP endpoints to get information about enabled metadata providers:
+### Jobs
 
-- `GET /{media-server}/providers`: list of enabled metadata providers. Optional `libraryId` parameter can be used for
-  library providers.
+- `GET /api/jobs`, `GET /api/jobs/all` (`DELETE`), `GET /api/jobs/{jobId}/events` (SSE)
 
-### Search
+### Metadata (`{media-server}` = `komga` or `kavita`)
 
-Use the following HTTP endpoint to search for metadata:
-
-- `GET /{media-server}/search?name=...`: search results from enabled metadata providers. Optional `libraryId` parameter
-  can be used for library providers.
-
-### Identify
-
-Use the following HTTP endpoint to set series metadata from specified provider:
-
-- `POST /{media-server}/identify`:
+- `GET /api/{media-server}/metadata/providers` — enabled providers (optional `libraryId`)
+- `GET /api/{media-server}/metadata/search?name=...` — search (optional `libraryId`)
+- `GET /api/{media-server}/metadata/series-cover?providerSeriesId=...`
+- `POST /api/{media-server}/metadata/identify` — set metadata from a provider:
 
 ```json
 {
-  "libraryId": "09TDSWK3Q0XRA",
-  "seriesId": "07XF6HKAWHHV4",
-  "provider": "MANGA_UPDATES",
-  "providerSeriesId": "1"
+ "libraryId": "09TDSWK3Q0XRA",
+ "seriesId": "07XF6HKAWHHV4",
+ "provider": "MANGA_UPDATES",
+ "providerSeriesId": "1"
 }
-
 ```
 
-- `POST /{media-server}/match/library/{libraryId}/series/{seriesId}`: Attempts to match the specified series in the
-  specified library.
-- `POST /{media-server}/match/library/{libraryId}`: Attempts to match all series in the specified library.
-- `POST /{media-server}/reset/library/{libraryId}/series/{seriesId}`: Resets all metadata for the specified series in
-  the specified library.
-- `POST /{media-server}/reset/library/{libraryId}`: Resets all metadata for all series in the specified library.
+- `POST /api/{media-server}/metadata/match/library/{libraryId}` — match all series in a library
+- `POST /api/{media-server}/metadata/match/library/{libraryId}/series/{seriesId}` — match one series
+- `POST /api/{media-server}/metadata/reset/library/{libraryId}` — reset all series metadata
+- `POST /api/{media-server}/metadata/reset/library/{libraryId}/series/{seriesId}` — reset one series
+
+### Media server
+
+- `GET /api/{media-server}/media-server/connected`, `GET /api/{media-server}/media-server/libraries`
+
+### Notifications
+
+- `GET|POST /api/notifications/{discord,apprise}/{templates,send,render}`
+
+### Legacy (no `/api` prefix, kept for compatibility)
+
+- `/config`, `/{media-server}/{providers,search,identify,match,reset}`
+
+### Health check
+
+- `GET /`
+
+## Web UI integration
+
+The userscript let you configure komf and identify series directly from the Komga / Kavita web UI. They talk to the same configuration endpoints exposed by this Rust implementation.
+
+- [Komf userscript](https://github.com/dyphire/komf-userscript)
+
+## Differences from the Kotlin version
+
+- **eHentai provider** (from [PR #284](https://github.com/Snd-R/komf/pull/284)) is available in the Rust version; gallery search requires network access to e-hentai.org (often via proxy). Extensions over the PR: configurable `searchDomain` (`e-hentai` / `exhentai`, search-only) with automatic exhentai cookie warm-up and 403 auto-refresh (`ipbMemberId`/`ipbPassHash`), `titlePriority`, `translatorKeywords`, `maleOnlyTagsFile`, and a style `titleTemplate` for the series title.
+- **Bangumi provider** is enhanced with a built-in 154-entry tag whitelist (from KomgaBangumi.user.js), configurable extras via `tagWhitelist` / `tagWhitelistFile`, dynamic tag count threshold (3~35) + top-10 boost, mediaType filtering for both search display and matching (library-level override wins), `score:N` tag parsing into a numeric score, and name_cn handling that respects `seriesTitleLanguage`.
+- **Search title extraction** is configurable per library (`searchTitleExtraction`): bracket/title regex, author separators, title splitters, symbol normalization and character mappings can be customized instead of being hard-coded.
+
+
