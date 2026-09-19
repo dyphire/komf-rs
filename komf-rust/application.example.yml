@@ -220,6 +220,9 @@ metadataProviders:
       titlePriority: jpn            # "jpn"=日文标题优先（默认）/ "title"=英文标题优先
       translatorKeywords: []        # 自定义汉化组关键词（空=内置 10 个）
       maleOnlyTagsFile: null        # male-only 标签 json 路径（缺省 workDir/ehentai/male_only_taglist.json 自动下载）
+      tagTranslationEnabled: false  # EhTagTranslation 标签翻译（hentai-assistant 对齐）：true 启用
+                                    #   应用内部统一接管更新：缓存 workDir/ehentai/db.text.json，每 24h 检查下载
+      tagTranslationUrl: null      # 翻译库下载 URL（缺省官方 release db.text.json）
       titleTemplate: ''             # 元数据标题模板（空=不启用走 titlePriority）
                                     #   示例: "{{title}}{% if translator %} [{{ translator }}]{% endif %}"
       searchDomain: e-hentai        # "e-hentai"（默认）| "exhentai"（仅搜索请求域名）

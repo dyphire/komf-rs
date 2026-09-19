@@ -8,21 +8,29 @@ permissions:
   packages: write
 
 jobs:
-  docker-test:
-    name: Build and push test Docker image
+  build-binaries:
+    name: Build binary (${{ matrix.arch }})
     runs-on: ubuntu-latest
-    env:
-      IMAGE_NAME: ghcr.io/${{ github.repository }}:test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            cross: true
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            cross: true
     defaults:
       run:
         working-directory: komf-rust
     steps:
+      - uses: actions/checkout@v7
+
       - name: Remove unnecessary files
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-
-      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -32,16 +40,70 @@ jobs:
         with:
           workspaces: komf-rust
 
+      - name: Install cross
+        if: matrix.cross
+        run: |
+          cargo install cross --version 0.2.5 --locked
+
       - name: Build release binary
-        run: cargo build --locked --release --bin komf-app
+        if: ${{ !matrix.cross }}
+        run: cargo build --locked --release --bin komf-app --target ${{ matrix.target }}
+
+      - name: Build release binary with cross
+        if: matrix.cross
+        run: cross build --locked --release --bin komf-app --target ${{ matrix.target }}
 
       - name: Stage Docker runtime artifact
         run: |
           set -euo pipefail
-          mkdir -p docker-artifacts/linux-gnu/amd64
-          cp target/release/komf-app docker-artifacts/linux-gnu/amd64/komf-app
-          chmod +x docker-artifacts/linux-gnu/amd64/komf-app
-          test -f docker-artifacts/linux-gnu/amd64/komf-app
+          binary_path="target/${{ matrix.target }}/release/komf-app"
+          test -f "$binary_path"
+          mkdir -p docker-artifacts/linux-gnu/${{ matrix.arch }}
+          cp "$binary_path" docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          chmod +x docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          test -f docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+
+      - name: Upload Docker runtime artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-artifacts-${{ matrix.arch }}
+          path: komf-rust/docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          if-no-files-found: error
+
+  docker-test:
+    name: Build and push test Docker image
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}:test
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download amd64 Docker runtime artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-artifacts-amd64
+          path: komf-rust/docker-artifacts/linux-gnu/amd64
+
+      - name: Download arm64 Docker runtime artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-artifacts-arm64
+          path: komf-rust/docker-artifacts/linux-gnu/arm64
+
+      - name: Verify Docker runtime artifacts
+        run: |
+          set -euo pipefail
+          test -f komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
+          test -f komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+
+      - name: Strip Docker runtime artifacts
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+          strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
+          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -50,12 +112,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Build and push test image
         uses: docker/build-push-action@v7
         with:
           context: komf-rust
           file: ./komf-rust/docker/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE_NAME }}
           cache-from: type=gha

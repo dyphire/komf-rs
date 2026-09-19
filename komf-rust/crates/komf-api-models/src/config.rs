@@ -298,6 +298,12 @@ pub struct EHentaiConfigDto {
     pub translator_keywords: Option<Vec<String>>,
     pub male_only_tags_file: Option<String>,
     pub title_template: Option<String>,
+    /// EhTagTranslation 标签翻译（hentai-assistant 对齐）：false/未配置 → 不翻译；
+    /// url 指定翻译库下载地址（缺省官方 release；应用内部定期更新，缓存 workDir/ehentai/db.text.json）。
+    #[serde(default)]
+    pub tag_translation_enabled: Option<bool>,
+    #[serde(default)]
+    pub tag_translation_url: Option<String>,
     pub search_domain: Option<String>,
     pub ipb_member_id: Option<String>,
     pub ipb_pass_hash: Option<String>,

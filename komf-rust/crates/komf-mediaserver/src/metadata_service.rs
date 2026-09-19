@@ -295,7 +295,9 @@ impl MetadataService {
         books: &[MediaServerBook],
         tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
     ) -> LinksFetchOutcome {
-        let candidates = links_match_providers(&series.metadata.links);
+        // oneshot 单本系列：书籍级链接（聚合优先，books 回退）参与收集
+        let combined_links = series_links_including_books(series, books);
+        let candidates = links_match_providers(&combined_links);
         if candidates.is_empty() {
             return LinksFetchOutcome::NoCandidates;
         }
@@ -628,8 +630,25 @@ impl MetadataService {
     /// 对应 `matchSeriesMetadata`。返回 jobId，错误通过 job 事件/状态体现。
     /// Rust 扩展：匹配成功（更新了元数据）→ 自动从失败收藏夹移除。
     pub async fn match_series_metadata(&self, series_id: &MediaServerSeriesId) -> MetadataJobId {
+        self.match_series_metadata_impl(series_id, true).await
+    }
+
+    /// SSE 事件触发（on_books_added）专用：匹配**不受 linksSkipEnabled 影响**
+    /// （有 provider 链接不跳过、继续搜索），但**尊重 linksMatchEnabled**（链接直用）。
+    pub async fn match_series_metadata_no_links_skip(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> MetadataJobId {
+        self.match_series_metadata_impl(series_id, false).await
+    }
+
+    async fn match_series_metadata_impl(
+        &self,
+        series_id: &MediaServerSeriesId,
+        apply_links_skip: bool,
+    ) -> MetadataJobId {
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
-        let result = self.match_series_metadata_inner(&tx, series_id).await;
+        let result = self.match_series_metadata_inner(&tx, series_id, apply_links_skip).await;
         if result.as_ref().is_ok_and(|outcome| *outcome == MatchOutcome::Updated) {
             self.maybe_remove_from_failed_collection(series_id).await;
         }
@@ -641,7 +660,7 @@ impl MetadataService {
     /// 移除（由 match_library_metadata 用本地缓存统一维护）。返回匹配结果。
     async fn match_series_metadata_outcome(&self, series_id: &MediaServerSeriesId) -> MatchOutcome {
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
-        let result = self.match_series_metadata_inner(&tx, series_id).await;
+        let result = self.match_series_metadata_inner(&tx, series_id, true).await;
         let outcome = result.as_ref().map(|o| *o).unwrap_or(MatchOutcome::Skipped);
         self.finish_job(&job_id, &tx, result.map(|_| ())).await;
         outcome
@@ -653,6 +672,7 @@ impl MetadataService {
         &self,
         tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
         series_id: &MediaServerSeriesId,
+        apply_links_skip: bool,
     ) -> Result<MatchOutcome, (Option<CoreProviders>, String)> {
         let series = self
             .media_server_client
@@ -698,7 +718,9 @@ impl MetadataService {
             // Rust 扩展（用户需求）：系列 links 已包含任一 provider 识别特征（label/域名）。
             // linksMatchEnabled 优先于 linksSkipEnabled：启用链接直用时不再判断跳过
             // （Identify/Auto-Identify 预期：有链接就直接按链接更新）。
-            let links_match = links_indicate_matched(&series.metadata.links);
+            // oneshot 单本系列：书籍级链接参与已匹配判定（聚合优先，books 回退）
+            let combined_links = series_links_including_books(&series, &books);
+            let links_match = links_indicate_matched(&combined_links);
             let from_link: Option<SeriesAndBookMetadata> = if links_match && self.links_match_enabled {
                 // 链接直用：多 provider 合并（与 identify 共用 fetch_from_links）
                 match self.fetch_from_links(&series, &books, &tx).await {
@@ -707,8 +729,9 @@ impl MetadataService {
                         Some(metadata)
                     }
                     // 有 provider 特征但无可用直用链接：回退按 skip 配置决定
+                    // （SSE 触发 apply_links_skip=false → 不跳过，继续搜索）
                     LinksFetchOutcome::NoCandidates => {
-                        if self.links_skip_enabled {
+                        if self.links_skip_enabled && apply_links_skip {
                             tracing::info!(
                                 "series {series_title} {} already matched (provider link present), skipping",
                                 series.id.0
@@ -722,7 +745,8 @@ impl MetadataService {
                 }
             } else {
                 // 链接直用未启用：按 skip 配置决定（Kotlin 无此行为，Rust 扩展）
-                if links_match && self.links_skip_enabled {
+                // （SSE 触发 apply_links_skip=false → 不跳过，继续搜索）
+                if links_match && self.links_skip_enabled && apply_links_skip {
                     tracing::info!(
                         "series {series_title} {} already matched (provider link present), skipping",
                         series.id.0
@@ -1462,6 +1486,37 @@ impl MetadataServiceProvider {
 ///   Viz / ComicVine / MangaDex / MangaUpdates / MangaBaka 及其第三方来源 label）。
 /// - Bangumi 兼容：label 或 url 含 btv / bgm.tv / bangumi.tv。
 /// - EHentai 兼容：label 或 url 含 exhentai / e-hentai.org / exhentai.org。
+/// oneshot 系列（books 中任一 oneshot=true）时，把书籍级 links 合并进系列级 links
+/// （去重保序：label+url 均相同视为重复）。非 oneshot 系列仅返回系列级 links。
+///
+/// 书籍级 links 来源优先取 `SeriesDto.booksMetadata.links`；该字段为空/缺失时回退
+/// `books`（由调用方 get_books 已获取，遍历内存数组，无额外请求）。
+fn series_links_including_books(
+    series: &MediaServerSeries,
+    books: &[MediaServerBook],
+) -> Vec<WebLink> {
+    let mut out = series.metadata.links.clone();
+    if books.iter().any(|b| b.oneshot) {
+        let book_links: Vec<WebLink> = if !series.books_metadata_links.is_empty() {
+            series.books_metadata_links.clone()
+        } else {
+            books
+                .iter()
+                .flat_map(|b| b.metadata.links.clone())
+                .collect()
+        };
+        for link in book_links {
+            if !out
+                .iter()
+                .any(|x| x.label == link.label && x.url == link.url)
+            {
+                out.push(link.clone());
+            }
+        }
+    }
+    out
+}
+
 fn links_indicate_matched(links: &[WebLink]) -> bool {
     const KNOWN_LABELS: [&str; 17] = [
         "bangumi", "e-hentai", "yenpress", "anilist", "myanimelist", "bookwalker", "webtoon",
@@ -1811,6 +1866,65 @@ mod tests {
             label: label.to_string(),
             url: url.to_string(),
         }
+    }
+
+    #[test]
+    fn oneshot_series_merges_book_links() {
+        use crate::model::{
+            MediaServerBook, MediaServerBookId, MediaServerBookMetadata, MediaServerLibraryId,
+            MediaServerSeries, MediaServerSeriesId,
+        };
+        let series = MediaServerSeries {
+            id: MediaServerSeriesId("s".into()),
+            library_id: MediaServerLibraryId("l".into()),
+            name: "oneshot".into(),
+            books_count: 1,
+            books_metadata_links: vec![link("Bangumi", "https://bgm.tv/subject/123")],
+            metadata: MediaServerSeriesMetadata::default(),
+            url: String::new(),
+            deleted: false,
+        };
+        let oneshot_book = MediaServerBook {
+            id: MediaServerBookId("b".into()),
+            series_id: MediaServerSeriesId("s".into()),
+            library_id: Some(MediaServerLibraryId("l".into())),
+            series_title: "oneshot".into(),
+            name: "oneshot".into(),
+            url: String::new(),
+            number: 1,
+            oneshot: true,
+            metadata: MediaServerBookMetadata {
+                links: vec![link("e-hentai", "https://e-hentai.org/g/4177551/f277732e1c/")],
+                ..Default::default()
+            },
+            deleted: false,
+        };
+        // ① oneshot + 聚合 links 优先：参与判定与收集（books 仅用于 oneshot 判定）
+        let combined = series_links_including_books(&series, &[oneshot_book.clone()]);
+        assert!(links_indicate_matched(&combined));
+        let providers = links_match_providers(&combined);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].0, CoreProviders::Bangumi);
+        assert_eq!(providers[0].1 .0, "123");
+        // 去重：系列级与聚合级同链接只保留一个
+        let mut series_with_link = series.clone();
+        series_with_link.metadata.links = vec![link("Bangumi", "https://bgm.tv/subject/123")];
+        let combined2 = series_links_including_books(&series_with_link, &[oneshot_book.clone()]);
+        assert_eq!(combined2.len(), 1);
+        // ② 聚合缺失（旧 komga）→ 回退 books
+        let mut old_komga = series.clone();
+        old_komga.books_metadata_links = Vec::new();
+        let combined3 = series_links_including_books(&old_komga, &[oneshot_book.clone()]);
+        assert!(links_indicate_matched(&combined3));
+        let providers3 = links_match_providers(&combined3);
+        assert_eq!(providers3.len(), 1);
+        assert_eq!(providers3[0].0, CoreProviders::EHentai);
+        assert_eq!(providers3[0].1 .0, "4177551;f277732e1c");
+        // ③ 非 oneshot（booksCount 无关）：books 均 oneshot=false → 不合并
+        let mut normal_book = oneshot_book;
+        normal_book.oneshot = false;
+        let combined4 = series_links_including_books(&series, &[normal_book]);
+        assert!(!links_indicate_matched(&combined4));
     }
 
     #[test]
