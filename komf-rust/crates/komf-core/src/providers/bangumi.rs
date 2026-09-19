@@ -1,13 +1,15 @@
 //! Bangumi provider
 //!
-use crate::config::ProviderConfig;
+use crate::config::BangumiConfig;
 use crate::model::{
     Author, AuthorRole, BookMetadata, Image, MatchQuery, ProviderBookId, ProviderBookMetadata,
     ProviderSeriesId, ProviderSeriesMetadata, Publisher, PublisherType, SeriesBook, SeriesMetadata,
     SeriesSearchResult, SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
+use crate::providers::bangumi_archive::{ArchiveSubject, BangumiArchiveService, PersonInfo};
 use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
 use crate::util::NameSimilarityMatcher;
+use crate::util::chinese::{ChineseConverter, ChineseDirection};
 use serde::Deserialize;
 
 const BASE_URL: &str = "https://api.bgm.tv";
@@ -169,6 +171,21 @@ impl BangumiClient {
         Ok(response.json().await?)
     }
 
+    /// 封面 URL 候选：顶层 image（search API 有）→ images 各尺寸（详情 API 只有 images）。
+    fn cover_url(subject: &BangumiSubject) -> Option<String> {
+        if let Some(url) = subject.image.clone().filter(|u| !u.is_empty()) {
+            return Some(url);
+        }
+        if let Some(images) = &subject.images {
+            for url in [&images.large, &images.medium, &images.common, &images.small] {
+                if let Some(url) = url.clone().filter(|u| !u.is_empty()) {
+                    return Some(url);
+                }
+            }
+        }
+        None
+    }
+
     pub async fn get_thumbnail(
         &self,
         subject: &BangumiSubject,
@@ -245,6 +262,18 @@ impl BangumiMetadataMapper {
         book_relations: &[BangumiSubjectRelation],
         thumbnail: Option<Image>,
     ) -> ProviderSeriesMetadata {
+        self.to_series_metadata_persons(subject, book_relations, thumbnail, &[])
+    }
+
+    /// 离线 person 增强版：persons 非空时作者/出版社采用 person 实体（name_cn 优先）；
+    /// persons 为空（在线）保持 infobox 解析现状。
+    pub fn to_series_metadata_persons(
+        &self,
+        subject: &BangumiSubject,
+        book_relations: &[BangumiSubjectRelation],
+        thumbnail: Option<Image>,
+        persons: &[PersonInfo],
+    ) -> ProviderSeriesMetadata {
         let cfg = &self.series_metadata_config;
 
         // Kotlin: infoBox = subject.infobox?.associate { it.key to it }
@@ -258,7 +287,17 @@ impl BangumiMetadataMapper {
             })
             .collect();
 
-        let raw_total = subject.volumes.or(subject.eps).or(subject.total_episodes);
+        // 在线：API 顶层 volumes/eps/total_episodes；离线（Archive）无这些字段，
+        // 回退 infobox「册数」（已出版卷数，对齐 js 的 volumes 语义）→「话数」（对齐 eps/total_episodes）。
+        // 键支持繁简变体（册数/冊数/卷数/巻数/册數/冊數/卷數/巻數；话数/話數/话數/話数）。
+        const VOLUME_KEYS: [&str; 8] = ["册数", "冊数", "卷数", "巻数", "册數", "冊數", "卷數", "巻數"];
+        const EPISODE_KEYS: [&str; 4] = ["话数", "話數", "话數", "話数"];
+        let raw_total = subject
+            .volumes
+            .or(subject.eps)
+            .or(subject.total_episodes)
+            .or_else(|| info_box_count(&info_box, &VOLUME_KEYS))
+            .or_else(|| info_box_count(&info_box, &EPISODE_KEYS));
         let total_book_count = raw_total.filter(|c| *c > 0);
 
         let status = cfg
@@ -275,8 +314,16 @@ impl BangumiMetadataMapper {
                         .find(|n| BANGUMI_STATUS_TAGS.contains(n))
                         .and_then(classify_bangumi_status)
                 });
+                // 离线 Archive 漫画 infobox 以「连载结束」为主（「结束」键罕见），
+                // 非空即视为已完结（在线无此键，不受影响）。
+                let serial_ended = info_box
+                    .get("连载结束")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
                 let ended = info_box.contains_key("结束")
                     || info_box.contains_key("完结")
+                    || serial_ended
                     || raw_total.map(|c| c > 0).unwrap_or(false);
                 if ended {
                     status = Some(SeriesStatus::Ended);
@@ -327,7 +374,12 @@ impl BangumiMetadataMapper {
             }
 
             let mut aliases: Vec<(String, Option<String>)> = Vec::new();
+            // 预置主标题（原名/中文名）：别名与其相同则跳过（对齐 js 排除逻辑）
             let mut alias_seen = std::collections::HashSet::new();
+            alias_seen.insert(subject.name.clone());
+            if let Some(cn) = &subject.name_cn {
+                alias_seen.insert(cn.clone());
+            }
             for item in &subject.infobox {
                 let is_alias_key =
                     item.key.as_deref() == Some("别名") || item.key.as_deref() == Some("別名");
@@ -338,7 +390,7 @@ impl BangumiMetadataMapper {
                     if let serde_json::Value::Array(sub_items) = value {
                         for sub in sub_items {
                             let sub_key = sub.get("k").and_then(|k| k.as_str());
-                            if sub_key == Some("别名") || sub_key == Some("別名") {
+                            if sub_key == Some("别名") || sub_key == Some("別名") || sub_key == Some("版本名") {
                                 if let Some(v) = sub.get("v") {
                                     collect_alias_entries(v, &mut aliases, &mut alias_seen, false);
                                 }
@@ -364,58 +416,114 @@ impl BangumiMetadataMapper {
             .flatten();
 
         let authors = if cfg.authors {
-            extract_authors(subject, &self.author_roles, &self.artist_roles)
+            if persons.is_empty() {
+                extract_authors(subject, &self.author_roles, &self.artist_roles)
+            } else {
+                offline_person_authors(persons, &self.author_roles, &self.artist_roles)
+            }
         } else {
             Vec::new()
         };
 
         // Kotlin: 出版社 → ORIGINAL；其他出版社 → LOCALIZED；alternativePublishers = drop(1) + other
-        let mut publishers: Vec<Publisher> = Vec::new();
-        let mut other_publishers: Vec<Publisher> = Vec::new();
-        if cfg.publisher {
-            for (key, kind) in [
-                ("出版社", PublisherType::Original),
-                ("其他出版社", PublisherType::Localized),
-            ] {
-                let target = if kind == PublisherType::Original {
-                    &mut publishers
-                } else {
-                    &mut other_publishers
-                };
-                if let Some(value) = info_box.get(key).and_then(|v| v.as_str()) {
-                    for name in value.split(['，', '、', ',']) {
-                        let name = name.trim();
-                        if !name.is_empty() {
-                            target.push(Publisher {
-                                name: name.to_string(),
-                                r#type: Some(kind),
-                                language_tag: None,
-                            });
+        // 离线（persons 非空）：position=2004（出版社）→ 第一个 ORIGINAL，其余 LOCALIZED（alternative）；
+        // name 采用 name_cn 优先。在线（persons 空）保持 infobox 解析现状。
+        let (publisher, alternative_publishers): (Option<Publisher>, Vec<Publisher>) =
+            if cfg.publisher {
+                if persons.is_empty() {
+                    let mut publishers: Vec<Publisher> = Vec::new();
+                    let mut other_publishers: Vec<Publisher> = Vec::new();
+                    for (key, kind) in [
+                        ("出版社", PublisherType::Original),
+                        ("其他出版社", PublisherType::Localized),
+                    ] {
+                        let target = if kind == PublisherType::Original {
+                            &mut publishers
+                        } else {
+                            &mut other_publishers
+                        };
+                        if let Some(value) = info_box.get(key).and_then(|v| v.as_str()) {
+                            for name in value.split(['，', '、', ',']) {
+                                let name = name.trim();
+                                if !name.is_empty() {
+                                    target.push(Publisher {
+                                        name: name.to_string(),
+                                        r#type: Some(kind),
+                                        language_tag: None,
+                                    });
+                                }
+                            }
                         }
                     }
-                }
-            }
-        }
-        let publisher = publishers.first().cloned();
-        // Kotlin: altPublishers = (publishers.drop(1) + otherPublishers).toSet() —— 保序去重
-        let mut alternative_publishers: Vec<Publisher> = publishers
-            .iter()
-            .skip(1)
-            .cloned()
-            .chain(other_publishers)
-            .collect();
-        {
-            let mut seen: Vec<(String, Option<PublisherType>)> = Vec::new();
-            alternative_publishers.retain(|p| {
-                let key = (p.name.clone(), p.r#type);
-                if seen.contains(&key) {
-                    false
+                    let publisher = publishers.first().cloned();
+                    // Kotlin: altPublishers = (publishers.drop(1) + otherPublishers).toSet() —— 保序去重
+                    let mut alternative_publishers: Vec<Publisher> = publishers
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .chain(other_publishers)
+                        .collect();
+                    let mut seen: Vec<(String, Option<PublisherType>)> = Vec::new();
+                    alternative_publishers.retain(|p| {
+                        let key = (p.name.clone(), p.r#type);
+                        if seen.contains(&key) {
+                            false
+                        } else {
+                            seen.push(key);
+                            true
+                        }
+                    });
+                    (publisher, alternative_publishers)
                 } else {
-                    seen.push(key);
-                    true
+                    // 对齐 Kotlin：publisher 来自 infobox「出版社」（ORIGINAL）+「其他出版社」（LOCALIZED）；
+                    // persons 仅提供 name_cn 映射（离线扩展，匹配到时 name_cn 优先）
+                    let mut publishers: Vec<Publisher> = Vec::new();
+                    let mut other_publishers: Vec<Publisher> = Vec::new();
+                    for (key, kind) in [
+                        ("出版社", PublisherType::Original),
+                        ("其他出版社", PublisherType::Localized),
+                    ] {
+                        let target = if kind == PublisherType::Original {
+                            &mut publishers
+                        } else {
+                            &mut other_publishers
+                        };
+                        if let Some(value) = info_box.get(key).and_then(|v| v.as_str()) {
+                            for name in value.split(['，', '、', ',']) {
+                                let name = name.trim();
+                                if !name.is_empty() {
+                                    target.push(Publisher {
+                                        name: publisher_display_name(persons, name),
+                                        r#type: Some(kind),
+                                        language_tag: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    let publisher = publishers.first().cloned();
+                    // Kotlin: altPublishers = (publishers.drop(1) + otherPublishers).toSet() —— 保序去重
+                    let mut alternative_publishers: Vec<Publisher> = publishers
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .chain(other_publishers)
+                        .collect();
+                    let mut seen: Vec<(String, Option<PublisherType>)> = Vec::new();
+                    alternative_publishers.retain(|p| {
+                        let key = (p.name.clone(), p.r#type);
+                        if seen.contains(&key) {
+                            false
+                        } else {
+                            seen.push(key);
+                            true
+                        }
+                    });
+                    (publisher, alternative_publishers)
                 }
-            });
-        }
+            } else {
+                (None, Vec::new())
+            };
 
         let metadata = SeriesMetadata {
             status,
@@ -484,7 +592,7 @@ impl BangumiMetadataMapper {
             .unwrap_or_else(|| subject.name.clone());
         SeriesSearchResult {
             url: Some(format!("https://bgm.tv/subject/{}", subject.id)),
-            image_url: subject.image.clone().filter(|u| !u.is_empty()),
+            image_url: BangumiClient::cover_url(subject),
             title,
             provider: CoreProviders::Bangumi.as_str().to_string(),
             result_id: subject.id.to_string(),
@@ -498,6 +606,16 @@ impl BangumiMetadataMapper {
         &self,
         book: &BangumiSubject,
         thumbnail: Option<Image>,
+    ) -> ProviderBookMetadata {
+        self.to_book_metadata_persons(book, thumbnail, &[])
+    }
+
+    /// 离线 person 增强版（同系列：persons 非空时作者 name_cn 优先）。
+    pub fn to_book_metadata_persons(
+        &self,
+        book: &BangumiSubject,
+        thumbnail: Option<Image>,
+        persons: &[PersonInfo],
     ) -> ProviderBookMetadata {
         let cfg = &self.book_metadata_config;
 
@@ -536,8 +654,10 @@ impl BangumiMetadataMapper {
                     .and_then(isbn10_to_isbn13)
             });
 
-        // Kotlin: releaseDate = book.date?.let { LocalDate.parse(it) } —— date 即 "YYYY-MM-DD"
-        let release_date = book.date.clone();
+        // Kotlin: releaseDate = book.date?.let { LocalDate.parse(it) }
+        // 对齐 series：归一化（ISO 原样补零；"2019年7月25日"/"2019-07" → ISO 后写入），
+        // 在线/离线（Archive）统一，空值 → None。
+        let release_date = book.date.as_deref().and_then(normalize_bangumi_date);
 
         let metadata = BookMetadata {
             title: cfg.title.then_some(book.name.clone()),
@@ -554,7 +674,11 @@ impl BangumiMetadataMapper {
                 .map(|n| n.start),
             release_date: cfg.release_date.then_some(release_date.clone()).flatten(),
             authors: if cfg.authors {
-                extract_authors(book, &self.author_roles, &self.artist_roles)
+                if persons.is_empty() {
+                    extract_authors(book, &self.author_roles, &self.artist_roles)
+                } else {
+                    offline_person_authors(persons, &self.author_roles, &self.artist_roles)
+                }
             } else {
                 Vec::new()
             },
@@ -580,6 +704,27 @@ impl BangumiMetadataMapper {
             series_id: None,
             metadata,
         }
+    }
+}
+
+/// 别名项 k 的语言代码白名单（Rust 扩展，对齐 js 忽略非语言标签）：
+/// `[非官方|电锯人]` 的 k 是别名类型标签而非语言，写入时 language 应为 None；
+/// 仅真实语言代码（en/zh/hk…）保留为 language。
+fn alias_language(k: &str) -> Option<String> {
+    let lower = k.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "en" | "en-us" | "en-gb" | "ja" | "jp" | "ja-ro" | "zh" | "zh-cn" | "zh-hans"
+        | "zh-hk" | "zh-tw" | "zh-hant" | "zh-sg" | "cn" | "hk" | "tw" | "ko" | "ko-kr"
+        | "fr" | "de" | "es" | "it" | "ru" | "th" | "vi" | "id" | "pt" | "pt-br" | "ar" => {
+            let normalized = match lower.as_str() {
+                "hk" => "zh-hk",
+                "tw" => "zh-tw",
+                "cn" => "zh-cn",
+                other => other,
+            };
+            Some(normalized.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -609,13 +754,9 @@ fn collect_alias_entries(
                     obj => {
                         let name = obj.get("v").and_then(|v| v.as_str()).unwrap_or("");
                         let language = if with_language {
-                            obj.get("k").and_then(|k| k.as_str()).map(|k| {
-                                if k == "hk" {
-                                    "zh-hk".to_string()
-                                } else {
-                                    k.to_string()
-                                }
-                            })
+                            obj.get("k")
+                                .and_then(|k| k.as_str())
+                                .and_then(alias_language)
                         } else {
                             None
                         };
@@ -627,13 +768,9 @@ fn collect_alias_entries(
         obj => {
             let name = obj.get("v").and_then(|v| v.as_str()).unwrap_or("");
             let language = if with_language {
-                obj.get("k").and_then(|k| k.as_str()).map(|k| {
-                    if k == "hk" {
-                        "zh-hk".to_string()
-                    } else {
-                        k.to_string()
-                    }
-                })
+                obj.get("k")
+                    .and_then(|k| k.as_str())
+                    .and_then(alias_language)
             } else {
                 None
             };
@@ -742,6 +879,24 @@ fn regex_capture(text: &str, pattern: &str) -> Option<Vec<String>> {
     )
 }
 
+/// 遍历键变体（繁简）取首个命中数字。
+fn info_box_count(
+    info_box: &std::collections::HashMap<&str, &serde_json::Value>,
+    keys: &[&str],
+) -> Option<i32> {
+    keys.iter()
+        .find_map(|k| info_box.get(*k).and_then(|v| infobox_count(*v)))
+        .filter(|c| *c > 0)
+}
+
+/// 从 infobox 值提取首个数字序列（如 "97话"、"全 11 卷" → 97/11）。
+fn infobox_count(v: &serde_json::Value) -> Option<i32> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"\d+").unwrap());
+    let s = v.as_str()?;
+    re.find(s)?.as_str().parse::<i32>().ok()
+}
+
 fn classify_bangumi_status(value: &str) -> Option<SeriesStatus> {
     let s = value.to_lowercase();
     if s.contains("休刊") || s.contains("停刊") || s.contains("停止连载") || s.contains("长期休载")
@@ -784,10 +939,282 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
     serde_json::from_str(BANGUMI_TAG_WHITELIST_JSON).unwrap_or_default()
 }
 
+/// book release_date 归一化（对齐 series parse_bangumi_date）：
+/// ISO 原样、年月补 -01、中文格式转 ISO、空 → None。
+#[test]
+    fn book_release_date_normalized() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mk = |date: Option<&str>| {
+            let d = match date {
+                Some(d) => format!("\"{d}\"") ,
+                None => "null".to_string(),
+            };
+            let json = format!(
+                r#"{{
+                    "id": 9, "name": "X", "name_cn": null, "summary": null, "tags": [],
+                    "date": {d},
+                    "infobox": []
+                }}"#
+            );
+            let subject: BangumiSubject = serde_json::from_str(&json).unwrap();
+            mapper.to_book_metadata(&subject, None).metadata.release_date
+        };
+        assert_eq!(mk(Some("2019-07-25")), Some("2019-07-25".to_string()));
+        assert_eq!(mk(Some("2019-7-5")), Some("2019-07-05".to_string()));
+        assert_eq!(mk(Some("2019-07")), Some("2019-07-01".to_string()));
+        assert_eq!(mk(Some("2019年7月25日")), Some("2019-07-25".to_string()));
+        assert_eq!(mk(None), None);
+    }
+
+/// 繁简键变体：冊数/巻数/話數 等也能回退（archive 港台条目 infobox 键为繁体）。
+#[test]
+    fn total_book_count_variant_keys() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mk = |infobox: &str| {
+            let json = format!(
+                r#"{{
+                    "id": 9, "name": "X", "name_cn": null, "summary": null, "tags": [],
+                    "volumes": null, "eps": null, "total_episodes": null,
+                    "infobox": {infobox}
+                }}"#
+            );
+            let subject: BangumiSubject = serde_json::from_str(&json).unwrap();
+            mapper.to_series_metadata(&subject, &[], None).metadata.total_book_count
+        };
+        // 繁体册数（冊数/巻数/冊數）
+        assert_eq!(mk(r#"[{"key": "冊数", "value": "12"}]"#), Some(12));
+        assert_eq!(mk(r#"[{"key": "巻数", "value": "8"}]"#), Some(8));
+        // 繁体话数（話數/话數/話数）
+        assert_eq!(mk(r#"[{"key": "話數", "value": "120"}]"#), Some(120));
+        assert_eq!(mk(r#"[{"key": "话數", "value": "33"}]"#), Some(33));
+        // 繁体册数优先于繁体话数
+        assert_eq!(
+            mk(r#"[{"key": "冊数", "value": "12"}, {"key": "話數", "value": "120"}]"#),
+            Some(12)
+        );
+        // 简体键仍工作
+        assert_eq!(mk(r#"[{"key": "册数", "value": "5"}]"#), Some(5));
+    }
+
+/// 话数回退：无 volumes/eps/册数时用 infobox「话数」（对齐 js eps/total_episodes）；
+/// 册数优先于话数；"97话" 等容错解析。
+#[test]
+    fn total_book_count_episodes_fallback() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        // 无册数 → 话数回退（97）
+        let j1 = r#"{
+            "id": 9, "name": "X", "name_cn": null, "summary": null, "tags": [],
+            "volumes": null, "eps": null, "total_episodes": null,
+            "infobox": [{"key": "话数", "value": "97"}]
+        }"#;
+        let s1: BangumiSubject = serde_json::from_str(j1).unwrap();
+        assert_eq!(
+            mapper.to_series_metadata(&s1, &[], None).metadata.total_book_count,
+            Some(97)
+        );
+        // 册数优先于话数（11 vs 97）
+        let j2 = r#"{
+            "id": 9, "name": "X", "name_cn": null, "summary": null, "tags": [],
+            "volumes": null, "eps": null, "total_episodes": null,
+            "infobox": [{"key": "册数", "value": "11"}, {"key": "话数", "value": "97"}]
+        }"#;
+        let s2: BangumiSubject = serde_json::from_str(j2).unwrap();
+        assert_eq!(
+            mapper.to_series_metadata(&s2, &[], None).metadata.total_book_count,
+            Some(11)
+        );
+        // 容错：话数 "97话"、册数 "全 11 卷"
+        let j3 = r#"{
+            "id": 9, "name": "X", "name_cn": null, "summary": null, "tags": [],
+            "volumes": null, "eps": null, "total_episodes": null,
+            "infobox": [{"key": "话数", "value": "97话"}]
+        }"#;
+        let s3: BangumiSubject = serde_json::from_str(j3).unwrap();
+        assert_eq!(
+            mapper.to_series_metadata(&s3, &[], None).metadata.total_book_count,
+            Some(97)
+        );
+        // 在线 volumes 仍优先
+        let j4 = r#"{
+            "id": 9, "name": "X", "name_cn": null, "summary": null, "tags": [],
+            "volumes": 20, "eps": null, "total_episodes": null,
+            "infobox": [{"key": "话数", "value": "97"}]
+        }"#;
+        let s4: BangumiSubject = serde_json::from_str(j4).unwrap();
+        assert_eq!(
+            mapper.to_series_metadata(&s4, &[], None).metadata.total_book_count,
+            Some(20)
+        );
+    }
+
+/// js 行为：infobox 状态键缺失时从 tags 解析状态（BANGUMI_STATUS_TAGS 精确匹配）。
+#[test]
+    fn status_from_tags_fallback() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mk = |tag: &str| {
+            let json = format!(
+                r#"{{
+                    "id": 9,
+                    "name": "X",
+                    "name_cn": null,
+                    "summary": null,
+                    "tags": [{{"name": "{tag}", "count": 100}}, {{"name": "漫画", "count": 1}}],
+                    "infobox": []
+                }}"#
+            );
+            let subject: BangumiSubject = serde_json::from_str(&json).unwrap();
+            let md = mapper.to_series_metadata(&subject, &[], None);
+            md.metadata.status
+        };
+        assert_eq!(mk("已完结"), Some(SeriesStatus::Ended));
+        assert_eq!(mk("完结"), Some(SeriesStatus::Ended));
+        assert_eq!(mk("连载中"), Some(SeriesStatus::Ongoing));
+        assert_eq!(mk("连载"), Some(SeriesStatus::Ongoing));
+        assert_eq!(mk("休刊"), Some(SeriesStatus::Hiatus));
+        // 非状态词 → 不解析
+        assert_eq!(mk("漫画"), None);
+    }
+
+/// 离线 Archive 形态：无 volumes/eps/total_episodes 顶层字段时，
+/// total_book_count 回退 infobox「册数」，status 由「连载结束」非空判定为 Ended。
+#[test]
+    fn archive_status_and_total_book_count() {
+        let json = r#"{
+            "id": 268279,
+            "name": "チェンソーマン",
+            "name_cn": "链锯人",
+            "summary": null,
+            "tags": [],
+            "volumes": null,
+            "eps": null,
+            "total_episodes": null,
+            "infobox": [
+                {"key": "册数", "value": "11"},
+                {"key": "连载开始", "value": "2018-12-03"},
+                {"key": "连载结束", "value": "2020-12-14"}
+            ]
+        }"#;
+        let subject: BangumiSubject = serde_json::from_str(json).unwrap();
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let md = mapper.to_series_metadata(&subject, &[], None);
+        assert_eq!(md.metadata.total_book_count, Some(11));
+        assert_eq!(md.metadata.status, Some(SeriesStatus::Ended));
+
+        // 在线形态：API 顶层 volumes 优先于 infobox 册数
+        let j2 = r#"{
+            "id": 2,
+            "name": "X",
+            "name_cn": null,
+            "summary": null,
+            "tags": [],
+            "volumes": 20,
+            "eps": null,
+            "total_episodes": null,
+            "infobox": [{"key": "册数", "value": "5"}]
+        }"#;
+        let s2: BangumiSubject = serde_json::from_str(j2).unwrap();
+        let md2 = mapper.to_series_metadata(&s2, &[], None);
+        assert_eq!(md2.metadata.total_book_count, Some(20));
+    }
+
+/// 特殊别名结构：`[非官方|电锯人]` 的 k 是标签非语言 → language None；
+/// `[en|xxx]` 语言代码保留；别名与 name/name_cn 相同不写入（对齐 js）。
+#[test]
+    fn alias_tag_not_language_and_title_dedup() {
+        let json = r#"{
+            "id": 268279,
+            "name": "チェンソーマン",
+            "name_cn": "链锯人",
+            "summary": null,
+            "tags": [],
+            "infobox": [
+                {"key": "别名", "value": [
+                    {"k": "非官方", "v": "电锯人"},
+                    {"v": "Chainsaw man"},
+                    {"k": "en", "v": "Chainsaw Man"}
+                ]},
+                {"key": "版本:东立版", "value": [
+                    {"k": "版本名", "v": "鏈鋸人"}
+                ]}
+            ]
+        }"#;
+        let subject: BangumiSubject = serde_json::from_str(json).unwrap();
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let md = mapper.to_series_metadata(&subject, &[], None);
+        let titles: Vec<(String, Option<String>)> = md
+            .metadata
+            .titles
+            .iter()
+            .map(|t| (t.name.clone(), t.language.clone()))
+            .collect();
+        // Native 原名 + zh 中文名 + 别名（非官方→None、纯值→None、en→en、版本名→None）
+        assert!(titles.contains(&("チェンソーマン".to_string(), None)));
+        assert!(titles.contains(&("链锯人".to_string(), Some("zh".to_string()))));
+        assert!(titles.contains(&("电锯人".to_string(), None)));
+        assert!(titles.contains(&("Chainsaw man".to_string(), None)));
+        assert!(titles.contains(&("Chainsaw Man".to_string(), Some("en".to_string()))));
+        assert!(titles.contains(&("鏈鋸人".to_string(), None)));
+        // 与 name_cn 相同的别名不重复写入（js 排除逻辑）
+        let j2 = r#"{
+            "id": 1,
+            "name": "A",
+            "name_cn": "B",
+            "summary": null,
+            "tags": [],
+            "infobox": [{"key": "别名", "value": [{"v": "B"}, {"v": "C"}]}]
+        }"#;
+        let s2: BangumiSubject = serde_json::from_str(j2).unwrap();
+        let md2 = mapper.to_series_metadata(&s2, &[], None);
+        let alt2: Vec<&str> = md2
+            .metadata
+            .titles
+            .iter()
+            .filter(|t| t.r#type == Some(TitleType::Localized))
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(alt2, vec!["C"]);
+    }
+
 /// 嵌套别名收集：
 /// infobox 任意项的 value 数组内 k=="别名" 的子项（如「版本:*」条目），无语言。
 #[test]
-fn nested_aliases_collected_like_js() {
+    fn nested_aliases_collected_like_js() {
     let json = r#"{
             "id": 1902,
             "name": "3月のライオン",
@@ -824,10 +1251,117 @@ fn nested_aliases_collected_like_js() {
         .filter(|t| t.r#type == Some(TitleType::Localized))
         .map(|t| t.name.as_str())
         .collect();
-    // 直接别名 1 条 + 嵌套去重后 2 条（三月的狮子 / 三月的獅子）
+    // 直接别名 1 条 + 嵌套去重后 2 条（三月的狮子 / 三月的獅子）；
+    // 版本名「3月的狮子」与 name_cn 相同 → 被排除（对齐 js：别名与主标题相同不写入）
     assert_eq!(
         localized,
         vec!["March comes in like a lion", "三月的狮子", "三月的獅子"]
+    );
+}
+
+/// 离线 persons：作者/出版社 name_cn 优先（仅离线路径；在线保持 infobox 现状）。
+#[test]
+fn offline_person_authors_and_publishers() {
+    let mapper = BangumiMetadataMapper::new(
+        crate::config::SeriesMetadataConfig::default(),
+        crate::config::BookMetadataConfig::default(),
+        vec![AuthorRole::Writer],
+        vec![AuthorRole::Penciller],
+        vec![],
+    );
+    let subject: BangumiSubject = serde_json::from_str(
+        r#"{"id":268279,"name":"チェンソーマン","name_cn":"链锯人","summary":null,"tags":[],"infobox":[{"key":"作者","value":"藤本タツキ"},{"key":"出版社","value":"集英社"}]}"#,
+    )
+    .unwrap();
+    let persons = vec![
+        PersonInfo {
+            person_id: 23155,
+            name: "藤本タツキ".to_string(),
+            name_cn: Some("藤本树".to_string()),
+            person_type: Some(1),
+            career: vec!["mangaka".to_string()],
+            position: Some(2001),
+            appear_eps: String::new(),
+        },
+        PersonInfo {
+            person_id: 588,
+            name: "白泉社".to_string(),
+            name_cn: Some("白泉社".to_string()),
+            person_type: Some(2),
+            career: Vec::new(),
+            position: Some(2004),
+            appear_eps: String::new(),
+        },
+        PersonInfo {
+            person_id: 7611,
+            name: "尖端出版".to_string(),
+            name_cn: Some("台湾尖端".to_string()),
+            person_type: Some(2),
+            career: Vec::new(),
+            position: Some(2004),
+            appear_eps: String::new(),
+        },
+    ];
+    let md = mapper.to_series_metadata_persons(&subject, &[], None, &persons);
+    // 作者：position=2001 → author_roles + artist_roles，name_cn 优先 → 藤本树
+    assert_eq!(
+        md.metadata.authors,
+        vec![
+            Author { name: "藤本树".to_string(), role: AuthorRole::Writer },
+            Author { name: "藤本树".to_string(), role: AuthorRole::Penciller },
+        ]
+    );
+    // 出版社：对齐 Kotlin —— publisher 来自 infobox「出版社」（ORIGINAL），
+    // persons 仅做 name_cn 映射（匹配到时 name_cn 优先）。
+    // infobox 出版社=集英社，persons 无匹配 → 保持原文
+    assert_eq!(
+        md.metadata.publisher.as_ref().map(|p| p.name.clone()),
+        Some("集英社".to_string())
+    );
+    assert_eq!(md.metadata.publisher.as_ref().and_then(|p| p.r#type), Some(PublisherType::Original));
+    assert!(md.metadata.alternative_publishers.is_empty());
+    // infobox 出版社=尖端出版 → persons 匹配 → 台湾尖端（name_cn 优先）
+    let subject2: BangumiSubject = serde_json::from_str(
+        r#"{"id":1,"name":"X","name_cn":null,"summary":null,"tags":[],"infobox":[{"key":"出版社","value":"尖端出版"},{"key":"其他出版社","value":"白泉社"}]}"#,
+    )
+    .unwrap();
+    let md3 = mapper.to_series_metadata_persons(&subject2, &[], None, &persons);
+    assert_eq!(
+        md3.metadata.publisher.as_ref().map(|p| p.name.clone()),
+        Some("台湾尖端".to_string())
+    );
+    assert_eq!(
+        md3.metadata.publisher.as_ref().and_then(|p| p.r#type),
+        Some(PublisherType::Original)
+    );
+    // alternative = 出版社.drop(1) + 其他出版社 → 白泉社（name_cn 匹配 → 白泉社），LOCALIZED
+    assert_eq!(md3.metadata.alternative_publishers.len(), 1);
+    assert_eq!(md3.metadata.alternative_publishers[0].name, "白泉社");
+    assert_eq!(
+        md3.metadata.alternative_publishers[0].r#type,
+        Some(PublisherType::Localized)
+    );
+    // 在线（persons 空）→ 保持 infobox 现状：作者=藤本タツキ（无中文名）、出版社=集英社
+    let online = mapper.to_series_metadata(&subject, &[], None);
+    assert_eq!(online.metadata.authors[0].name, "藤本タツキ");
+    assert_eq!(online.metadata.publisher.as_ref().map(|p| p.name.as_str()), Some("集英社"));
+    // name_cn 为空 → 回退日文原名
+    let p_no_cn = PersonInfo {
+        person_id: 1954,
+        name: "週刊少年ジャンプ".to_string(),
+        name_cn: None,
+        person_type: Some(2),
+        career: Vec::new(),
+        position: Some(2005),
+        appear_eps: String::new(),
+    };
+    assert_eq!(person_display_name(&p_no_cn), "週刊少年ジャンプ");
+    // 连载杂志（2005）不影响 authors；publisher 仍来自 infobox（Kotlin 语义）
+    let md2 = mapper.to_series_metadata_persons(&subject, &[], None, &[p_no_cn]);
+    assert!(md2.metadata.authors.is_empty());
+    assert_eq!(
+        md2.metadata.publisher.as_ref().map(|p| p.name.as_str()),
+        Some("集英社")
     );
 }
 
@@ -936,6 +1470,49 @@ fn media_type_platform(media_type: crate::model::MediaType) -> Option<&'static s
         crate::model::MediaType::Novel => Some("小说"),
         crate::model::MediaType::Comic | crate::model::MediaType::Webtoon => None,
     }
+}
+
+
+/// person 显示名：name_cn 优先（非空），否则日文原名。
+fn person_display_name(p: &PersonInfo) -> String {
+    p.name_cn
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&p.name)
+        .to_string()
+}
+
+/// 出版社显示名：persons 中按 name 或 name_cn 匹配时用 name_cn 优先（离线扩展），
+/// 未匹配保持原名（对齐 Kotlin infobox 出版社原文）。
+fn publisher_display_name(persons: &[PersonInfo], name: &str) -> String {
+    for p in persons.iter().filter(|p| p.position == Some(2004)) {
+        if p.name == name || p.name_cn.as_deref() == Some(name) {
+            return person_display_name(p);
+        }
+    }
+    name.to_string()
+}
+
+/// 离线作者（persons 路径）：position=2001（作者）→ author_roles + artist_roles，
+/// 对齐 Kotlin infobox「作者」语义（authorRoles + artistRoles 全角色）；name 用 name_cn 优先。
+fn offline_person_authors(
+    persons: &[PersonInfo],
+    author_roles: &[AuthorRole],
+    artist_roles: &[AuthorRole],
+) -> Vec<Author> {
+    let mut out: Vec<Author> = Vec::new();
+    for p in persons.iter().filter(|p| p.position == Some(2001)) {
+        let name = person_display_name(p);
+        for role in author_roles.iter().chain(artist_roles.iter()) {
+            if !out.iter().any(|a: &Author| a.name == name && a.role == *role) {
+                out.push(Author {
+                    name: name.clone(),
+                    role: *role,
+                });
+            }
+        }
+    }
+    out
 }
 
 fn extract_authors(
@@ -1051,19 +1628,26 @@ pub struct BangumiMetadataProvider {
     name_matcher: NameSimilarityMatcher,
     fetch_series_covers: bool,
     media_type: crate::model::MediaType,
+    /// bangumi/Archive 离线数据源（None = 未启用；get() 返回 None = 未就绪 → 回退在线）。
+    archive: Option<std::sync::Arc<BangumiArchiveService>>,
+    /// 简繁归一化（bangumi 匹配始终应用，不依赖 chineseConversion 配置；Rust 扩展）。
+    chinese_t2s: ChineseConverter,
+    chinese_s2t: ChineseConverter,
 }
 
 pub fn create_provider(
-    config: &ProviderConfig,
+    config: &BangumiConfig,
     default_name_matcher: NameSimilarityMatcher,
     token: Option<&str>,
-    _http_client: &reqwest::Client,
+    http_client: &reqwest::Client,
+    work_dir: Option<&std::path::Path>,
 ) -> Option<BangumiMetadataProvider> {
-    if !config.enabled {
+    let provider = &config.provider;
+    if !provider.enabled {
         return None;
     }
 
-    if config.media_type == crate::model::MediaType::Comic {
+    if provider.media_type == crate::model::MediaType::Comic {
         return None;
     }
     let mut headers = reqwest::header::HeaderMap::new();
@@ -1077,26 +1661,49 @@ pub fn create_provider(
     }
     let client = crate::providers::client_with_default_headers(headers);
 
-    let name_matcher = config.name_matching_mode.unwrap_or(default_name_matcher);
+    let name_matcher = provider.name_matching_mode.unwrap_or(default_name_matcher);
     // 标签白名单：内置 json 资源（或 tagWhitelistFile 指定文件）+ tagWhitelist 自定义补充
-    let mut tag_whitelist = load_bangumi_tag_whitelist(config.tag_whitelist_file.as_deref());
-    for w in &config.tag_whitelist {
+    let mut tag_whitelist = load_bangumi_tag_whitelist(provider.tag_whitelist_file.as_deref());
+    for w in &provider.tag_whitelist {
         if !w.is_empty() && !tag_whitelist.iter().any(|t| t == w) {
             tag_whitelist.push(w.clone());
         }
     }
+    // bangumi/Archive 离线数据源：enabled 时启动后台下载/构建（tokio::spawn 非阻塞）。
+    // 数据目录：配置 dir → workDir/bangumi-archive。
+    let archive = if config.archive.enabled {
+        let dir = config
+            .archive
+            .dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .or_else(|| work_dir.map(|d| d.join("bangumi-archive")))
+            .unwrap_or_else(|| std::path::PathBuf::from("bangumi-archive"));
+        Some(BangumiArchiveService::start(
+            &config.archive,
+            http_client.clone(),
+            dir,
+        ))
+    } else {
+        None
+    };
     Some(BangumiMetadataProvider {
         client: BangumiClient::new(client),
         metadata_mapper: BangumiMetadataMapper::new(
-            config.series_metadata.clone(),
-            config.book_metadata.clone(),
-            config.author_roles.clone(),
-            config.artist_roles.clone(),
+            provider.series_metadata.clone(),
+            provider.book_metadata.clone(),
+            provider.author_roles.clone(),
+            provider.artist_roles.clone(),
             tag_whitelist,
         ),
         name_matcher,
-        fetch_series_covers: config.series_metadata.thumbnail,
-        media_type: config.media_type,
+        fetch_series_covers: provider.series_metadata.thumbnail,
+        media_type: provider.media_type,
+        archive,
+        chinese_t2s: ChineseConverter::new(ChineseDirection::T2s)
+            .unwrap_or_else(|_| ChineseConverter::none()),
+        chinese_s2t: ChineseConverter::new(ChineseDirection::S2t)
+            .unwrap_or_else(|_| ChineseConverter::none()),
     })
 }
 
@@ -1113,6 +1720,52 @@ impl MetadataProvider for BangumiMetadataProvider {
         let id: u64 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid Bangumi series id: {}", series_id.0))
         })?;
+        // ① Archive 离线优先：元数据 + 单行本 relations 走离线；封面在线 API 取（archive 无图）。
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                if let Some(v) = store.get_by_id(id) {
+                    let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
+                    if arch.id != 0 {
+                        let relations = store
+                            .get_related(id)
+                            .into_iter()
+                            .filter(|r| {
+                                r.subject_type == Some(1)
+                                    && r.relation.as_deref() == Some("单行本")
+                            })
+                            .map(|r| BangumiSubjectRelation {
+                                id: r.id,
+                                name: r.name,
+                                name_cn: r.name_cn,
+                                r#type: r.subject_type,
+                                relation: r.relation,
+                            })
+                            .collect::<Vec<_>>();
+                        let persons = store.get_persons(id);
+                        let thumbnail = if self.fetch_series_covers {
+                            match self.client.get(id).await {
+                                Ok(s) => self
+                                    .client
+                                    .get_thumbnail(&s, 60 * 1024, None)
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        };
+                        return Ok(self.metadata_mapper.to_series_metadata_persons(
+                            &arch.to_bangumi_subject(),
+                            &relations,
+                            thumbnail,
+                            &persons,
+                        ));
+                    }
+                }
+            }
+        }
+        // ② 在线（未启用 archive / 未就绪 / 未命中）
         let subject = self.client.get(id).await?;
         // Kotlin: getSubjectRelations → filter(type==BOOK) → filter(relation=="单行本")
         let relations = self
@@ -1152,6 +1805,36 @@ impl MetadataProvider for BangumiMetadataProvider {
         let id: u64 = book_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid Bangumi book id: {}", book_id.0))
         })?;
+        // ① Archive 离线优先（封面在线取）
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                if let Some(v) = store.get_by_id(id) {
+                    let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
+                    if arch.id != 0 {
+                        let persons = store.get_persons(id);
+                        let thumbnail = if self.fetch_series_covers {
+                            match self.client.get(id).await {
+                                Ok(b) => self
+                                    .client
+                                    .get_thumbnail(&b, 30 * 1024, Some(1024 * 1024))
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        };
+                        return Ok(self.metadata_mapper.to_book_metadata_persons(
+                            &arch.to_bangumi_subject(),
+                            thumbnail,
+                            &persons,
+                        ));
+                    }
+                }
+            }
+        }
+        // ② 在线
         let book = self.client.get(id).await?;
         let thumbnail = if self.fetch_series_covers {
             self.client
@@ -1174,6 +1857,91 @@ impl MetadataProvider for BangumiMetadataProvider {
         let platform_filter = media_type
             .and_then(media_type_platform)
             .or_else(|| media_type_platform(self.media_type));
+        // ① Archive 离线优先：series 过滤 + tag 过滤 + platform 过滤 + 相似度过滤（复用 matcher）
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                let results = store.search(series_name);
+                let mut out: Vec<SeriesSearchResult> = Vec::new();
+                for v in results {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
+                    if arch.id == 0 {
+                        continue;
+                    }
+                    // BangumiKomga resort：非系列跳过（缺省视为系列，避免误伤单本漫画）
+                    if arch.series == Some(false) {
+                        continue;
+                    }
+                    if arch.tags.iter().any(|t| t.name == "漫画单行本") {
+                        continue;
+                    }
+                    if let Some(platform) = platform_filter {
+                        if arch.platform_str().as_deref() != Some(platform) {
+                            continue;
+                        }
+                    }
+                    let bs = arch.to_bangumi_subject();
+                    let mut titles = vec![bs.name.clone()];
+                    if let Some(cn) = &bs.name_cn {
+                        titles.push(cn.clone());
+                    }
+                    // 别名/版本名参与相似度（顶层别名 + 嵌套别名/版本名，对齐 match_from_archive）
+                    for item in &bs.infobox {
+                        let is_alias_key = item.key.as_deref() == Some("别名")
+                            || item.key.as_deref() == Some("別名");
+                        if let Some(v) = item.value.as_ref() {
+                            if is_alias_key {
+                                match v {
+                                    serde_json::Value::String(s) => titles.push(s.clone()),
+                                    serde_json::Value::Array(items) => {
+                                        for it in items {
+                                            if let Some(v) = it.get("v").and_then(|v| v.as_str()) {
+                                                titles.push(v.to_string());
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let serde_json::Value::Array(items) = v {
+                                for sub in items {
+                                    let k = sub.get("k").and_then(|k| k.as_str());
+                                    if k == Some("别名") || k == Some("別名") || k == Some("版本名") {
+                                        if let Some(v) = sub.get("v").and_then(|v| v.as_str()) {
+                                            titles.push(v.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let titles = self.variant_titles(titles);
+                    if !self.name_matcher.matches(series_name, &titles) {
+                        continue;
+                    }
+                    out.push(self.metadata_mapper.to_series_search_result(&bs));
+                }
+                if !out.is_empty() {
+                    // 元数据离线 + 封面在线：离线命中后对每个结果在线补封面 URL；
+                    // 在线失败保持 None（不影响搜索结果）。
+                    for r in out.iter_mut() {
+                        if r.image_url.is_some() {
+                            continue;
+                        }
+                        let Ok(id) = r.result_id.parse::<u64>() else {
+                            continue;
+                        };
+                        if let Ok(subject) = self.client.get(id).await {
+                            r.image_url = BangumiClient::cover_url(&subject);
+                        }
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+        // ② 在线
         let results = self.client.search(series_name, limit as u32).await?;
         Ok(results
             .into_iter()
@@ -1191,6 +1959,15 @@ impl MetadataProvider for BangumiMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
+        // ① Archive 离线优先（未就绪/未命中 → 在线）
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                if let Some(meta) = self.match_from_archive(&store, match_query).await? {
+                    return Ok(Some(meta));
+                }
+            }
+        }
+        // ② 在线
         let results = self.client.search(&match_query.series_name, 20).await?;
         // 优先库配置 mediaType（query.media_type），无则用 provider 全局配置
         let platform_filter = match_query
@@ -1213,6 +1990,7 @@ impl MetadataProvider for BangumiMetadataProvider {
                 if let Some(name_cn) = &s.name_cn {
                     titles.push(name_cn.clone());
                 }
+                let titles = self.variant_titles(titles);
                 self.name_matcher.matches(
                     &match_query.normalized_series_name(),
                     &match_query.normalize_titles(&titles),
@@ -1245,6 +2023,7 @@ impl MetadataProvider for BangumiMetadataProvider {
                             _ => {}
                         }
                     }
+                    let titles = self.variant_titles(titles);
                     if self.name_matcher.matches(
                         &match_query.normalized_series_name(),
                         &match_query.normalize_titles(&titles),
@@ -1263,6 +2042,53 @@ impl MetadataProvider for BangumiMetadataProvider {
         let Some(subject) = subject else {
             return Ok(None);
         };
+
+        // Rust 扩展：在线搜索命中后优先尝试从离线数据库读取对应 id 的数据并使用
+        // （元数据离线 + persons name_cn 优先 + relations 离线；封面在线 API 补；未命中回退在线）。
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                if let Some(v) = store.get_by_id(subject.id) {
+                    let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
+                    if arch.id != 0 {
+                        let relations = store
+                            .get_related(subject.id)
+                            .into_iter()
+                            .filter(|r| {
+                                r.subject_type == Some(1)
+                                    && r.relation.as_deref() == Some("单行本")
+                            })
+                            .map(|r| BangumiSubjectRelation {
+                                id: r.id,
+                                name: r.name,
+                                name_cn: r.name_cn,
+                                r#type: r.subject_type,
+                                relation: r.relation,
+                            })
+                            .collect::<Vec<_>>();
+                        let persons = store.get_persons(subject.id);
+                        let thumbnail = if self.fetch_series_covers {
+                            match self.client.get(subject.id).await {
+                                Ok(s) => self
+                                    .client
+                                    .get_thumbnail(&s, 60 * 1024, None)
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        };
+                        return Ok(Some(self.metadata_mapper.to_series_metadata_persons(
+                            &arch.to_bangumi_subject(),
+                            &relations,
+                            thumbnail,
+                            &persons,
+                        )));
+                    }
+                }
+            }
+        }
 
         // Kotlin: getSubjectRelations → filter(type==BOOK) → filter(relation=="单行本")
         let relations = self
@@ -1285,7 +2111,23 @@ impl MetadataProvider for BangumiMetadataProvider {
 }
 
 impl BangumiMetadataProvider {
-    /// Kotlin `firstMatchingType`：逐个 getSubject 检查 platform（搜索响应项无 platform 字段）。
+    /// 简繁归一化变体（Rust 扩展）：每个标题生成 [原, 繁→简, 简→繁] 保序去重，
+    /// 使简繁任意写法都能相互命中（匹配层始终归一，不依赖 chineseConversion 配置）。
+    fn variant_titles(&self, titles: Vec<String>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for t in titles {
+            let v1 = self.chinese_t2s.convert(&t);
+            let v2 = self.chinese_s2t.convert(&t);
+            for v in [t, v1, v2] {
+                if !v.is_empty() && !out.iter().any(|x| x == &v) {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
+    /// Kotlin `firstMatchingType`：逐个 getSubject 检查 platform（搜索响应项无 platform 字段）。：逐个 getSubject 检查 platform（搜索响应项无 platform 字段）。
     async fn first_matching_type(
         &self,
         matches: &[BangumiSubject],
@@ -1303,11 +2145,172 @@ impl BangumiMetadataProvider {
         }
         Ok(None)
     }
+
+    /// Archive 离线匹配：搜索 → series/tag/platform 过滤 → 相似度（name/name_cn/别名，
+    /// 复用现有 matcher）→ 单/多候选（对齐在线 firstMatchingType 的 platform 语义）→
+    /// 元数据（离线）+ 单行本 relations（离线）+ 封面（在线）。
+    async fn match_from_archive(
+        &self,
+        store: &std::sync::Arc<crate::providers::bangumi_archive::BangumiArchiveStore>,
+        match_query: &MatchQuery,
+    ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
+        let platform_filter = match_query
+            .media_type
+            .and_then(media_type_platform)
+            .or_else(|| media_type_platform(self.media_type));
+        let mut candidates: Vec<ArchiveSubject> = Vec::new();
+        for v in store.search(&match_query.series_name) {
+            let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
+            if arch.id == 0 {
+                continue;
+            }
+            if arch.series == Some(false) {
+                continue;
+            }
+            if arch.tags.iter().any(|t| t.name == "漫画单行本") {
+                continue;
+            }
+            if let Some(platform) = platform_filter {
+                if arch.platform_str().as_deref() != Some(platform) {
+                    continue;
+                }
+            }
+            candidates.push(arch);
+        }
+        let mut matches: Vec<ArchiveSubject> = candidates
+            .into_iter()
+            .filter(|arch| {
+                let mut titles = vec![arch.name.clone()];
+                if let Some(cn) = &arch.name_cn {
+                    titles.push(cn.clone());
+                }
+                for item in &arch.infobox_items() {
+                    let is_alias_key = item.key.as_deref() == Some("别名")
+                        || item.key.as_deref() == Some("別名");
+                    if let Some(v) = item.value.as_ref() {
+                        if is_alias_key {
+                            match v {
+                                serde_json::Value::String(v) => titles.push(v.clone()),
+                                serde_json::Value::Array(items) => {
+                                    for it in items {
+                                        if let Some(v) = it.get("v").and_then(|v| v.as_str()) {
+                                            titles.push(v.to_string());
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let serde_json::Value::Array(items) = v {
+                            for sub in items {
+                                let k = sub.get("k").and_then(|k| k.as_str());
+                                if k == Some("别名") || k == Some("別名") || k == Some("版本名") {
+                                    if let Some(v) = sub.get("v").and_then(|v| v.as_str()) {
+                                        titles.push(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let titles = self.variant_titles(titles);
+                self.name_matcher.matches(
+                    &match_query.normalized_series_name(),
+                    &match_query.normalize_titles(&titles),
+                )
+            })
+            .collect();
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        // 单/多候选：对齐在线（1 → 直接取；多个 → platform 匹配优先，无则第一个）
+        let arch = if matches.len() == 1 {
+            matches.pop()
+        } else {
+            let idx = matches
+                .iter()
+                .position(|s| {
+                    platform_filter.map_or(true, |p| s.platform_str().as_deref() == Some(p))
+                })
+                .unwrap_or(0);
+            Some(matches.swap_remove(idx))
+        };
+        let Some(arch) = arch else {
+            return Ok(None);
+        };
+        let id = arch.id;
+        let relations = store
+            .get_related(id)
+            .into_iter()
+            .filter(|r| r.subject_type == Some(1) && r.relation.as_deref() == Some("单行本"))
+            .map(|r| BangumiSubjectRelation {
+                id: r.id,
+                name: r.name,
+                name_cn: r.name_cn,
+                r#type: r.subject_type,
+                relation: r.relation,
+            })
+            .collect::<Vec<_>>();
+        let persons = store.get_persons(id);
+        let thumbnail = if self.fetch_series_covers {
+            match self.client.get(id).await {
+                Ok(s) => self
+                    .client
+                    .get_thumbnail(&s, 60 * 1024, None)
+                    .await
+                    .ok()
+                    .flatten(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        Ok(Some(self.metadata_mapper.to_series_metadata_persons(
+            &arch.to_bangumi_subject(),
+            &relations,
+            thumbnail,
+            &persons,
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variant_titles_simplified_traditional_normalized() {
+        let provider = BangumiMetadataProvider {
+            client: BangumiClient::new(
+                crate::providers::client_with_default_headers(reqwest::header::HeaderMap::new()),
+            ),
+            metadata_mapper: BangumiMetadataMapper::new(
+                crate::config::SeriesMetadataConfig::default(),
+                crate::config::BookMetadataConfig::default(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            name_matcher: NameSimilarityMatcher::default(),
+            fetch_series_covers: false,
+            media_type: crate::model::MediaType::Manga,
+            archive: None,
+            chinese_t2s: ChineseConverter::new(ChineseDirection::T2s).unwrap(),
+            chinese_s2t: ChineseConverter::new(ChineseDirection::S2t).unwrap(),
+        };
+        let variants = provider.variant_titles(vec!["三月的狮子".to_string()]);
+        // 简体原样 + 繁→简（不变）+ 简→繁
+        assert!(variants.iter().any(|v| v == "三月的狮子"));
+        assert!(variants.iter().any(|v| v == "三月的獅子"));
+        // 繁体 query 能命中简体候选（双向归一）
+        assert!(provider
+            .name_matcher
+            .matches("三月的獅子", &provider.variant_titles(vec!["三月的狮子".to_string()])));
+        // 简体 query 能命中繁体候选
+        assert!(provider
+            .name_matcher
+            .matches("三月的狮子", &provider.variant_titles(vec!["三月的獅子".to_string()])));
+    }
 
     /// 真实 Bangumi v0 搜索响应（2026-09 抓取）：`data` 字段（非 `results`）。
     #[test]
