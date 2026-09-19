@@ -1135,6 +1135,7 @@ fn to_media_server_series(
         library_id: MediaServerLibraryId(series.library_id.to_string()),
         name: series.original_name.clone(),
         books_count: book_count,
+        books_metadata_links: Vec::new(),
         metadata: MediaServerSeriesMetadata {
             status,
             title: series.name.clone(),

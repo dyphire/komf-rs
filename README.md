@@ -14,7 +14,7 @@ The Rust implementation lives in [`komf-rust/`](komf-rust/README.md) as a fully 
 - Discord webhook + Apprise notifications with Velocity templates
 - ComicInfo reading/writing, book ordering, score tags, reading direction override
 - Config hot-reload (`PATCH /api/config`), job tracking, metadata search/identify/match/reset endpoints
-- Browser web extension / userscript compatible configuration UI
+- userscript compatible configuration UI
 
 ## Metadata providers
 
@@ -83,13 +83,12 @@ Environment variables (same as the Kotlin version):
 ### Docker
 
 ```sh
-docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust
-docker run -d -p 8085:8085 \
- -v /path/to/config:/config \ # directory containing application.yml
- --name komf komf-rust
+vdocker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
+ -p 8085:8085 \
+ -v /path/to/config:/config \ # 存放 application.yml 的目录
 ```
 
-The image exposes `/config` as a volume (`KOMF_CONFIG_DIR=/config`), so place your `application.yml` there. Healthcheck probes `GET /`.
+The image exposes `/config` as a volume (`KOMF_CONFIG_DIR=/config`), so place your `application.yml` there. The image is published to `ghcr.io/dyphire/komf-rs` (`latest` + version tags); to build locally instead, run `docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust` and replace the image name with `komf-rust`.
 
 ## Configuration
 
@@ -165,7 +164,8 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 ### Health check
 
-- `GET /`
+- `GET /` — returns `200` with body `komf-rs` when the service is up.
+- Docker image `HEALTHCHECK` probes it via `wget -qO- http://127.0.0.1:8085/` (`--interval=30s --timeout=5s --start-period=15s --retries=3`), matching the Dockerfile.
 
 ## Web UI integration
 
@@ -179,4 +179,6 @@ The userscript let you configure komf and identify series directly from the Komg
 - **Bangumi provider** is enhanced with a built-in 154-entry tag whitelist (from KomgaBangumi.user.js), configurable extras via `tagWhitelist` / `tagWhitelistFile`, dynamic tag count threshold (3~35) + top-10 boost, mediaType filtering for both search display and matching (library-level override wins), `score:N` tag parsing into a numeric score, and name_cn handling that respects `seriesTitleLanguage`.
 - **Search title extraction** is configurable per library (`searchTitleExtraction`): bracket/title regex, author separators, title splitters, symbol normalization and character mappings can be customized instead of being hard-coded.
 
+## Acknowledgements
 
+- [EhTagTranslation/Database](https://github.com/EhTagTranslation/Database) — tag translation database used by the eHentai provider

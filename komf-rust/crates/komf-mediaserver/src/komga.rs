@@ -22,9 +22,19 @@ pub struct KomgaSeriesDto {
     pub name: String,
     pub books_count: i32,
     pub metadata: KomgaSeriesMetadataDto,
+    /// komga SeriesDto.booksMetadata：系列聚合书籍元数据（含书籍级 links 并集）
+    #[serde(default)]
+    pub books_metadata: Option<KomgaBookMetadataAggregationDto>,
     pub url: String,
     #[serde(default)]
     pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KomgaBookMetadataAggregationDto {
+    #[serde(default)]
+    pub links: Vec<KomgaWebLinkDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -403,6 +413,19 @@ impl KomgaClient {
                 release_year_lock: false,
                 links_lock: metadata.links_lock,
             },
+            books_metadata_links: dto
+                .books_metadata
+                .as_ref()
+                .map(|agg| {
+                    agg.links
+                        .iter()
+                        .map(|l| WebLink {
+                            label: l.label.clone(),
+                            url: l.url.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             url: dto.url.clone(),
             deleted: dto.deleted,
         }

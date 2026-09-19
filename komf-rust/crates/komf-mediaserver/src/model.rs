@@ -20,6 +20,9 @@ pub struct MediaServerSeries {
     pub name: String,
     pub books_count: i32,
     pub metadata: MediaServerSeriesMetadata,
+    /// 系列聚合书籍元数据（komga SeriesDto.booksMetadata）中的 links：
+    /// oneshot 单本系列 provider 链接常写在书籍级，聚合后直接可用（无需遍历/额外请求）
+    pub books_metadata_links: Vec<WebLink>,
     pub url: String,
     pub deleted: bool,
 }
