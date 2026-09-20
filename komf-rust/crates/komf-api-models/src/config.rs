@@ -292,6 +292,10 @@ pub struct EHentaiConfigDto {
     pub author_roles: Option<Vec<KomfAuthorRole>>,
     pub artist_roles: Option<Vec<KomfAuthorRole>>,
     pub preferred_languages: Option<Vec<String>>,
+    /// 自动匹配仅 gid 匹配（Rust 扩展）：true 时 match 只做 gid 精准搜索，无 gid / gid
+    /// 无结果都跳过；links 匹配不受影响。false/未配置 → gid 优先、失败回落普通搜索。
+    #[serde(default)]
+    pub gid_only_match: Option<bool>,
     #[serde(default)]
     pub tag_whitelist: Option<Vec<String>>,
     pub title_priority: Option<String>,

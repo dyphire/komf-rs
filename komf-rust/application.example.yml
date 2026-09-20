@@ -225,6 +225,8 @@ metadataProviders:
       priority: 10
       enabled: false                # 需可访问 e-hentai.org（常需代理）；exhentai 另需 cookie
       mediaType: MANGA              # 搜索显示与匹配过滤（库级覆盖优先）
+      gidOnlyMatch: false           # 自动匹配仅 gid 匹配：true → 只做 gid 精准搜索，无 gid /
+                                    #   gid 无结果都跳过（不回落普通相似度搜索）；links 匹配不受影响
       preferredLanguages: [en, ja]  # 语言偏好（筛选结果）
       titlePriority: jpn            # "jpn"=日文标题优先（默认）/ "title"=英文标题优先
       translatorKeywords: []        # 自定义汉化组关键词（空=内置 10 个）

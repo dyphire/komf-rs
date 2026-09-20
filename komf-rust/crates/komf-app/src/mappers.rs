@@ -522,6 +522,7 @@ fn to_ehentai_dto(config: &EHentaiConfig) -> EHentaiConfigDto {
         tag_translation_enabled: Some(config.tag_translation_enabled),
         tag_translation_url: config.tag_translation_url.clone(),
         search_domain: Some(config.search_domain.clone()),
+        gid_only_match: Some(config.gid_only_match),
         ipb_member_id: config.ipb_member_id.clone(),
         ipb_pass_hash: config.ipb_pass_hash.clone(),
     }
@@ -1106,6 +1107,7 @@ fn from_ehentai_dto(dto: &EHentaiConfigDto, base: &EHentaiConfig) -> EHentaiConf
             .search_domain
             .clone()
             .unwrap_or_else(|| base.search_domain.clone()),
+        gid_only_match: dto.gid_only_match.unwrap_or(base.gid_only_match),
         ipb_member_id: dto.ipb_member_id.clone().or_else(|| base.ipb_member_id.clone()),
         ipb_pass_hash: dto.ipb_pass_hash.clone().or_else(|| base.ipb_pass_hash.clone()),
     }

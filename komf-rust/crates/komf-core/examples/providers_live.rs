@@ -206,6 +206,8 @@ async fn run(p: &Option<impl MetadataProvider>, name: &str) {
                     normalization_regex: None,
                     media_type: None,
                     chinese: None,
+                    oneshot: false,
+                    book_file_name: None,
                 })
                 .await
             {

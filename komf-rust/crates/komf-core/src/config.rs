@@ -280,6 +280,11 @@ pub struct EHentaiConfig {
     pub author_roles: Vec<AuthorRole>,
     #[serde(default = "default_artist_roles")]
     pub artist_roles: Vec<AuthorRole>,
+    /// 自动匹配仅 gid 匹配：true 时 match 只做 gid 精准搜索——提取不到 gid 或
+    /// gid 搜索无结果都跳过（不回落普通标题相似度搜索）；links 匹配（linksSkipEnabled/
+    /// linksMatchEnabled）不受影响。false（默认）→ gid 优先、失败回落普通搜索。
+    #[serde(default)]
+    pub gid_only_match: bool,
     /// 标题优先："jpn" → title_jpn 优先（默认）；"title" → 英文 title 优先。
     /// 作用于搜索结果显示与元数据标题。
     #[serde(default = "default_ehentai_title_priority")]
@@ -343,6 +348,7 @@ impl Default for EHentaiConfig {
             preferred_languages: default_ehentai_languages(),
             author_roles: default_ehentai_writer_roles(),
             artist_roles: default_artist_roles(),
+            gid_only_match: false,
             title_priority: default_ehentai_title_priority(),
             translator_keywords: Vec::new(),
             male_only_tags_file: None,
