@@ -48,6 +48,12 @@ pub struct BangumiSubject {
     pub infobox: Vec<BangumiInfoBoxItem>,
     #[serde(default)]
     pub eps_info: Option<Vec<BangumiEpisode>>,
+    /// Bangumi API age_rating：0=全年龄、1=15+、2=18+（Archive 离线数据无此字段）
+    #[serde(default)]
+    pub age_rating: Option<i32>,
+    /// Bangumi 成人内容标记（在线 API 与 Archive 均有）
+    #[serde(default)]
+    pub nsfw: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,7 +294,7 @@ impl BangumiMetadataMapper {
             .collect();
 
         // 在线：API 顶层 volumes/eps/total_episodes；离线（Archive）无这些字段，
-        // 回退 infobox「册数」（已出版卷数，对齐 js 的 volumes 语义）→「话数」（对齐 eps/total_episodes）。
+        // 回退 infobox「册数」（已出版卷数）→「话数」（eps/total_episodes 语义）。
         // 键支持繁简变体（册数/冊数/卷数/巻数/册數/冊數/卷數/巻數；话数/話數/话數/話数）。
         const VOLUME_KEYS: [&str; 8] = ["册数", "冊数", "卷数", "巻数", "册數", "冊數", "卷數", "巻數"];
         const EPISODE_KEYS: [&str; 4] = ["话数", "話數", "话數", "話数"];
@@ -333,6 +339,7 @@ impl BangumiMetadataMapper {
             .flatten();
 
         // 白名单（内置+自定义）+ 非 statusTags → count 降序 → 动态阈值（3~35）→ 不足 10 补前 10
+        // 补足从白名单命中项取，不引入非白名单标签
         let mut tags: Vec<String> = if cfg.tags {
             let raw: Vec<(String, i32)> = subject
                 .tags
@@ -374,7 +381,7 @@ impl BangumiMetadataMapper {
             }
 
             let mut aliases: Vec<(String, Option<String>)> = Vec::new();
-            // 预置主标题（原名/中文名）：别名与其相同则跳过（对齐 js 排除逻辑）
+            // 预置主标题（原名/中文名）：别名与其相同则跳过
             let mut alias_seen = std::collections::HashSet::new();
             alias_seen.insert(subject.name.clone());
             if let Some(cn) = &subject.name_cn {
@@ -537,9 +544,13 @@ impl BangumiMetadataMapper {
             publisher,
             alternative_publishers,
             reading_direction: None,
-            age_rating: None,
+            age_rating: cfg
+                .age_rating
+                .then_some(map_bangumi_age_rating(subject.age_rating, subject.nsfw, &tags))
+                .flatten(),
             language: None,
-            genres: Vec::new(),
+            // platform（漫画/小说）写入 genres
+            genres: subject.platform.clone().into_iter().collect(),
             tags,
             total_book_count,
             authors,
@@ -707,7 +718,7 @@ impl BangumiMetadataMapper {
     }
 }
 
-/// 别名项 k 的语言代码白名单（Rust 扩展，对齐 js 忽略非语言标签）：
+/// 别名项 k 的语言代码白名单（忽略非语言标签）：
 /// `[非官方|电锯人]` 的 k 是别名类型标签而非语言，写入时 language 应为 None；
 /// 仅真实语言代码（en/zh/hk…）保留为 language。
 fn alias_language(k: &str) -> Option<String> {
@@ -897,6 +908,35 @@ fn infobox_count(v: &serde_json::Value) -> Option<i32> {
     re.find(s)?.as_str().parse::<i32>().ok()
 }
 
+/// 组合式 age_rating：API age_rating 字段优先（0→0 全年龄、1→15、2→18）；
+/// 无 API 值（含 Archive 离线数据）→ 标签含成人指示词推断 18；未知 API 值 → None。
+fn map_bangumi_age_rating(api: Option<i32>, nsfw: Option<bool>, tags: &[String]) -> Option<i32> {
+    if let Some(r) = api {
+        return match r {
+            1 => Some(15),
+            2 => Some(18),
+            0 => Some(0),
+            _ => None,
+        };
+    }
+    if nsfw == Some(true) {
+        return Some(18);
+    }
+    if nsfw == Some(false) {
+        // 明确的非成人声明：不写分级（也不做标签推断）
+        return None;
+    }
+    const ADULT_TAGS: [&str; 24] = [
+        "エロ", "官能", "乱交", "SM", "触手", "鬼畜", "催眠", "扶她",
+        "母系", "熟女", "调教", "恶堕", "幼女", "R18", "成年コミック",
+        "成人漫画", "アダルトコミック", "18X", "無修正", "無修", "无修",
+        "H本", "A书", "黄漫",
+    ];
+    tags.iter()
+        .any(|t| ADULT_TAGS.contains(&t.as_str()))
+        .then_some(18)
+}
+
 fn classify_bangumi_status(value: &str) -> Option<SeriesStatus> {
     let s = value.to_lowercase();
     if s.contains("休刊") || s.contains("停刊") || s.contains("停止连载") || s.contains("长期休载")
@@ -904,18 +944,19 @@ fn classify_bangumi_status(value: &str) -> Option<SeriesStatus> {
         Some(SeriesStatus::Hiatus)
     } else if s.contains("连载中") || s.contains("连载") {
         Some(SeriesStatus::Ongoing)
-    } else if s.contains("完结") {
+    } else if s.contains("腰斩") || s.contains("完结") {
         Some(SeriesStatus::Ended)
     } else {
         None
     }
 }
 
-const BANGUMI_STATUS_TAGS: [&str; 8] = [
+const BANGUMI_STATUS_TAGS: [&str; 9] = [
     "连载",
     "连载中",
     "完结",
     "已完结",
+    "腰斩",
     "停刊",
     "长期休载",
     "停止连载",
@@ -1008,7 +1049,7 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
         assert_eq!(mk(r#"[{"key": "册数", "value": "5"}]"#), Some(5));
     }
 
-/// 话数回退：无 volumes/eps/册数时用 infobox「话数」（对齐 js eps/total_episodes）；
+/// 话数回退：无 volumes/eps/册数时用 infobox「话数」（eps/total_episodes 语义）；
 /// 册数优先于话数；"97话" 等容错解析。
 #[test]
     fn total_book_count_episodes_fallback() {
@@ -1148,7 +1189,7 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
     }
 
 /// 特殊别名结构：`[非官方|电锯人]` 的 k 是标签非语言 → language None；
-/// `[en|xxx]` 语言代码保留；别名与 name/name_cn 相同不写入（对齐 js）。
+/// `[en|xxx]` 语言代码保留；别名与 name/name_cn 相同不写入。
 #[test]
     fn alias_tag_not_language_and_title_dedup() {
         let json = r#"{
@@ -1190,7 +1231,7 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
         assert!(titles.contains(&("Chainsaw man".to_string(), None)));
         assert!(titles.contains(&("Chainsaw Man".to_string(), Some("en".to_string()))));
         assert!(titles.contains(&("鏈鋸人".to_string(), None)));
-        // 与 name_cn 相同的别名不重复写入（js 排除逻辑）
+        // 与 name_cn 相同的别名不重复写入
         let j2 = r#"{
             "id": 1,
             "name": "A",
@@ -1214,7 +1255,7 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
 /// 嵌套别名收集：
 /// infobox 任意项的 value 数组内 k=="别名" 的子项（如「版本:*」条目），无语言。
 #[test]
-    fn nested_aliases_collected_like_js() {
+    fn nested_aliases_collected() {
     let json = r#"{
             "id": 1902,
             "name": "3月のライオン",
@@ -1252,7 +1293,7 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
         .map(|t| t.name.as_str())
         .collect();
     // 直接别名 1 条 + 嵌套去重后 2 条（三月的狮子 / 三月的獅子）；
-    // 版本名「3月的狮子」与 name_cn 相同 → 被排除（对齐 js：别名与主标题相同不写入）
+    // 版本名「3月的狮子」与 name_cn 相同 → 被排除（别名与主标题相同不写入）
     assert_eq!(
         localized,
         vec!["March comes in like a lion", "三月的狮子", "三月的獅子"]
@@ -1282,6 +1323,7 @@ fn offline_person_authors_and_publishers() {
             career: vec!["mangaka".to_string()],
             position: Some(2001),
             appear_eps: String::new(),
+            aliases: Vec::new(),
         },
         PersonInfo {
             person_id: 588,
@@ -1291,6 +1333,7 @@ fn offline_person_authors_and_publishers() {
             career: Vec::new(),
             position: Some(2004),
             appear_eps: String::new(),
+            aliases: Vec::new(),
         },
         PersonInfo {
             person_id: 7611,
@@ -1300,6 +1343,7 @@ fn offline_person_authors_and_publishers() {
             career: Vec::new(),
             position: Some(2004),
             appear_eps: String::new(),
+            aliases: Vec::new(),
         },
     ];
     let md = mapper.to_series_metadata_persons(&subject, &[], None, &persons);
@@ -1354,6 +1398,7 @@ fn offline_person_authors_and_publishers() {
         career: Vec::new(),
         position: Some(2005),
         appear_eps: String::new(),
+        aliases: Vec::new(),
     };
     assert_eq!(person_display_name(&p_no_cn), "週刊少年ジャンプ");
     // 连载杂志（2005）不影响 authors；publisher 仍来自 infobox（Kotlin 语义）
@@ -1414,7 +1459,7 @@ fn score_tag_appended_when_enabled() {
 /// 白名单（内置 + 自定义补充）∩ 非 statusTags → 按 count 降序 → 动态阈值
 /// （max>200→35 / >125→25 / >60→15 / >30→10 / >10→5 / 否则 3）→ count ≥ 阈值；
 /// 结果不足 10 个时替换为排序后前 10。返回标签名列表（保持 count 降序）。
-/// 注意：白名单命中用精确匹配（JS 的 `tagLabels.includes(name + ',')` 子串判断
+/// 注意：白名单命中用精确匹配子串判断
 /// 会让单字标签如 "空"/"生" 误入，此处有意改进为精确匹配）。
 fn filter_bangumi_tags(tags: &[(String, i32)], whitelist: &[String]) -> Vec<String> {
     let whitelist: std::collections::HashSet<&str> = whitelist.iter().map(String::as_str).collect();
@@ -1450,7 +1495,8 @@ fn filter_bangumi_tags(tags: &[(String, i32)], whitelist: &[String]) -> Vec<Stri
         .cloned()
         .collect();
     if final_tags.len() < 10 {
-        final_tags = valid.into_iter().take(10).collect();
+        // 不足 10：白名单命中项（count 降序）全取前 10，不引入非白名单标签。
+        final_tags = valid.iter().cloned().take(10).collect();
     }
     final_tags.into_iter().map(|(name, _)| name).collect()
 }
@@ -1493,21 +1539,35 @@ fn publisher_display_name(persons: &[PersonInfo], name: &str) -> String {
     name.to_string()
 }
 
-/// 离线作者（persons 路径）：position=2001（作者）→ author_roles + artist_roles，
-/// 对齐 Kotlin infobox「作者」语义（authorRoles + artistRoles 全角色）；name 用 name_cn 优先。
+/// 离线作者（persons 路径）：position 角色映射对齐 infobox 语义，
+/// 2001（作者）→ author_roles + artist_roles；2007（原作）→ author_roles；
+/// 2002（作画/人物原案/人物设定）→ artist_roles；name 用 name_cn 优先。
 fn offline_person_authors(
     persons: &[PersonInfo],
     author_roles: &[AuthorRole],
     artist_roles: &[AuthorRole],
 ) -> Vec<Author> {
     let mut out: Vec<Author> = Vec::new();
-    for p in persons.iter().filter(|p| p.position == Some(2001)) {
+    for p in persons {
+        let roles: Vec<AuthorRole> = match p.position {
+            Some(2001) => author_roles
+                .iter()
+                .chain(artist_roles.iter())
+                .cloned()
+                .collect(),
+            Some(2007) => author_roles.to_vec(),
+            Some(2010) => author_roles.to_vec(), // 脚本
+            Some(2002) => artist_roles.to_vec(),
+            Some(2003) => artist_roles.to_vec(), // 插图（小说插画师）
+            Some(2009) => artist_roles.to_vec(), // 插画/画师（样例均为画师/插画家）
+            _ => continue,
+        };
         let name = person_display_name(p);
-        for role in author_roles.iter().chain(artist_roles.iter()) {
-            if !out.iter().any(|a: &Author| a.name == name && a.role == *role) {
+        for role in roles {
+            if !out.iter().any(|a: &Author| a.name == name && a.role == role) {
                 out.push(Author {
                     name: name.clone(),
-                    role: *role,
+                    role,
                 });
             }
         }
@@ -1558,12 +1618,33 @@ fn extract_authors(
             push_cleaned(&mut authors, &name, *role);
         }
     }
+    // 漫画/小说相关职务（动画专用如「系列构成」不映射；「人物设定」保留现状）：
+    // 脚本/原案/分镜/脚本·分镜 → authorRoles（writer 系）
+    for key in ["脚本", "原案", "分镜", "脚本·分镜"] {
+        if let Some(name) = single(key) {
+            for role in author_roles {
+                push_cleaned(&mut authors, &name, *role);
+            }
+        }
+    }
     for key in ["作画", "人物原案", "人物设定"] {
         if let Some(name) = single(key) {
             for role in artist_roles {
                 push_cleaned(&mut authors, &name, *role);
             }
         }
+    }
+    // 插图/插画家/铅稿 → artistRoles（画师系）
+    for key in ["插图", "插画家", "铅稿"] {
+        if let Some(name) = single(key) {
+            for role in artist_roles {
+                push_cleaned(&mut authors, &name, *role);
+            }
+        }
+    }
+    // 上色 → 固定 COLORIST（不随 artistRoles 配置）
+    if let Some(name) = single("上色") {
+        push_cleaned(&mut authors, &name, AuthorRole::Colorist);
     }
 
     let has_writer = authors.iter().any(|a| a.role == AuthorRole::Writer);
@@ -1811,7 +1892,13 @@ impl MetadataProvider for BangumiMetadataProvider {
                 if let Some(v) = store.get_by_id(id) {
                     let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
                     if arch.id != 0 {
-                        let persons = store.get_persons(id);
+                        // 单行本 book 常无 persons 关联：回退系列 persons（同系列作者 name_cn 一致）
+                        let mut persons = store.get_persons(id);
+                        if persons.is_empty() {
+                            if let Ok(sid) = _series_id.0.parse::<u64>() {
+                                persons = store.get_persons(sid);
+                            }
+                        }
                         let thumbnail = if self.fetch_series_covers {
                             match self.client.get(id).await {
                                 Ok(b) => self
@@ -2279,6 +2366,279 @@ mod tests {
     use super::*;
 
     #[test]
+    fn offline_person_roles_2002_2007_name_cn_priority() {
+        // 182434 型：2002（作画）→ artist_roles、2007（原作）→ author_roles，name_cn 优先
+        let persons = vec![
+            PersonInfo {
+                person_id: 1,
+                name: "古屋庵".to_string(),
+                name_cn: Some("古屋庵".to_string()),
+                person_type: Some(1),
+                career: vec!["mangaka".to_string()],
+                position: Some(2002),
+                appear_eps: String::new(),
+                aliases: Vec::new(),
+            },
+            PersonInfo {
+                person_id: 2,
+                name: "るーすぼーい".to_string(),
+                name_cn: Some("螺丝".to_string()),
+                person_type: Some(1),
+                career: vec!["writer".to_string()],
+                position: Some(2007),
+                appear_eps: String::new(),
+                aliases: Vec::new(),
+            },
+        ];
+        let authors = offline_person_authors(
+            &persons,
+            &[AuthorRole::Writer],
+            &[AuthorRole::Penciller],
+        );
+        assert_eq!(authors.len(), 2);
+        assert!(authors.contains(&Author {
+            name: "古屋庵".to_string(),
+            role: AuthorRole::Penciller,
+        }));
+        assert!(authors.contains(&Author {
+            name: "螺丝".to_string(),
+            role: AuthorRole::Writer,
+        }));
+        // 2001 → 全角色
+        let all = vec![PersonInfo {
+            person_id: 3,
+            name: "藤本タツキ".to_string(),
+            name_cn: Some("藤本树".to_string()),
+            person_type: Some(1),
+            career: vec!["mangaka".to_string()],
+            position: Some(2001),
+            appear_eps: String::new(),
+            aliases: Vec::new(),
+        }];
+        let authors = offline_person_authors(&all, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
+        assert_eq!(authors.len(), 2);
+        assert!(authors.iter().all(|a| a.name == "藤本树"));
+    }
+
+    /// 在线路径端到端：补足从白名单命中项取（182434 在线形态）
+    /// 白名单命中 超能力/推理/校园（斗智 非白名单不引入；
+    /// 漫画/るーすぼーい/古屋庵/2016/无能的奈奈 天然不在白名单）
+    #[test]
+    fn online_tags_valid_fill() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            load_bangumi_tag_whitelist(None),
+        );
+        let json = r#"{
+            "id": 182434,
+            "name": "無能なナナ",
+            "name_cn": "无能的奈奈",
+            "summary": null,
+            "platform": "漫画",
+            "date": "2016-05-12",
+            "tags": [
+                {"name": "漫画", "count": 197},
+                {"name": "超能力", "count": 112},
+                {"name": "推理", "count": 103},
+                {"name": "るーすぼーい", "count": 60},
+                {"name": "校园", "count": 59},
+                {"name": "古屋庵", "count": 41},
+                {"name": "2016", "count": 34},
+                {"name": "无能的奈奈", "count": 27},
+                {"name": "斗智", "count": 26}
+            ],
+            "infobox": [
+                {"key": "原作", "value": "るーすぼーい"},
+                {"key": "作画", "value": "古屋庵"},
+                {"key": "出版社", "value": "スクウェア・エニックス"},
+                {"key": "连载杂志", "value": "月刊少年ガンガン"}
+            ]
+        }"#;
+        let subject: BangumiSubject = serde_json::from_str(json).unwrap();
+        let md = mapper.to_series_metadata(&subject, &[], None);
+        // 白名单命中 超能力/推理/校园（斗智 非白名单不引入；
+        // 漫画/るーすぼーい/古屋庵/2016/无能的奈奈 天然不在白名单）
+        assert_eq!(
+            md.metadata.tags,
+            vec!["超能力", "推理", "校园"]
+        );
+        // platform → genres
+        assert_eq!(md.metadata.genres, vec!["漫画"]);
+    }
+
+    /// 在线 182434 完整 tags（30 个）：百合/奇幻 count 小被阈值过滤，但命中<10 →
+    /// 白名单命中项全取，应包含 奇幻/百合（智斗/谋略/斗智 非白名单不引入）
+    #[test]
+    fn online_full_tags_fill_includes_fantasy_yuri() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            load_bangumi_tag_whitelist(None),
+        );
+        let json = r#"{
+            "id": 182434,
+            "name": "無能なナナ",
+            "name_cn": "无能的奈奈",
+            "summary": null,
+            "date": "2016-05-12",
+            "tags": [
+                {"name": "漫画", "count": 198},
+                {"name": "超能力", "count": 112},
+                {"name": "推理", "count": 104},
+                {"name": "悬疑", "count": 89},
+                {"name": "智斗", "count": 71},
+                {"name": "るーすぼーい", "count": 60},
+                {"name": "校园", "count": 59},
+                {"name": "古屋庵", "count": 41},
+                {"name": "2016", "count": 35},
+                {"name": "无能的奈奈", "count": 27},
+                {"name": "斗智", "count": 26},
+                {"name": "战斗", "count": 21},
+                {"name": "谋略", "count": 17},
+                {"name": "已完结", "count": 12},
+                {"name": "日本", "count": 11},
+                {"name": "月刊少年ガンガン", "count": 7},
+                {"name": "漫画系列", "count": 6},
+                {"name": "系列", "count": 5},
+                {"name": "奇幻", "count": 4},
+                {"name": "Square_Enix", "count": 4},
+                {"name": "百合", "count": 3},
+                {"name": "连载中", "count": 3},
+                {"name": "原创", "count": 2},
+                {"name": "未完结", "count": 2},
+                {"name": "生存", "count": 2}
+            ],
+            "infobox": [
+                {"key": "原作", "value": "るーすぼーい"},
+                {"key": "作画", "value": "古屋庵"},
+                {"key": "出版社", "value": "スクウェア・エニックス"},
+                {"key": "连载杂志", "value": "月刊少年ガンガン"}
+            ]
+        }"#;
+        let subject: BangumiSubject = serde_json::from_str(json).unwrap();
+        let md = mapper.to_series_metadata(&subject, &[], None);
+        let tags = md.metadata.tags;
+        // 白名单命中 9 个（阈值 15 过滤后 7 个 <10）→ 白名单命中项全取：
+        // 超能力/推理/悬疑/智斗/校园/战斗/奇幻/百合/生存（谋略/斗智 非白名单不引入）
+        assert_eq!(
+            tags,
+            vec!["超能力", "推理", "悬疑", "智斗", "校园", "战斗", "奇幻", "百合", "生存"]
+        );
+    }
+
+    /// Archive 模板字符串 infobox → 解析为数组 → extract_authors 拆分多作者
+    /// （作者顿号分隔 4 人；插图 → artistRoles；与在线 v0 API 同构）
+    #[test]
+    fn archive_infobox_author_keys_end_to_end() {
+        use crate::providers::bangumi_archive::parse_archive_infobox;
+        let raw = "{{Infobox animanga/Novel\r\n|作者= 麻枝准、涼元悠一、魁、丘野塔也\r\n|插图= ごとP\r\n}}";
+        let items = parse_archive_infobox(raw);
+        let subject = BangumiSubject {
+            id: 48,
+            name: "X".to_string(),
+            name_cn: None,
+            image: None,
+            summary: None,
+            date: None,
+            images: None,
+            rating: None,
+            rank: None,
+            subject_type: None,
+            platform: Some("小说".to_string()),
+            tags: Vec::new(),
+            volumes: None,
+            eps: None,
+            total_episodes: None,
+            infobox: items,
+            eps_info: None,
+            age_rating: None,
+            nsfw: None,
+        };
+        let authors = extract_authors(&subject, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
+        for name in ["麻枝准", "涼元悠一", "魁", "丘野塔也"] {
+            assert!(
+                authors.contains(&Author {
+                    name: name.to_string(),
+                    role: AuthorRole::Writer
+                }),
+                "missing writer {name}"
+            );
+        }
+        assert!(
+            authors.contains(&Author {
+                name: "ごとP".to_string(),
+                role: AuthorRole::Penciller
+            }),
+            "missing illustrator ごとP"
+        );
+    }
+
+    /// 漫画/小说职务键全覆盖：作者/原作/作画/人物原案/脚本/原案/分镜/插图/上色等
+    #[test]
+    fn extract_authors_full_role_keys() {
+        let subject: BangumiSubject = serde_json::from_str(
+            r#"{"id":1,"name":"X","name_cn":null,"summary":null,"tags":[],"platform":"漫画","infobox":[
+                {"key":"作者","value":"A"},
+                {"key":"原作","value":"B"},
+                {"key":"脚本","value":"C"},
+                {"key":"原案","value":"D"},
+                {"key":"作画","value":"E"},
+                {"key":"插图","value":"F"},
+                {"key":"上色","value":"G"}
+            ]}"#,
+        )
+        .unwrap();
+        let authors = extract_authors(&subject, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
+        // 作者 → Writer+Penciller；原作/脚本/原案 → Writer；作画/插图/上色 → Penciller
+        for (name, roles) in [
+            ("A", vec![AuthorRole::Writer, AuthorRole::Penciller]),
+            ("B", vec![AuthorRole::Writer]),
+            ("C", vec![AuthorRole::Writer]),
+            ("D", vec![AuthorRole::Writer]),
+            ("E", vec![AuthorRole::Penciller]),
+            ("F", vec![AuthorRole::Penciller]),
+            ("G", vec![AuthorRole::Colorist]),
+        ] {
+            for role in roles {
+                assert!(
+                    authors.contains(&Author { name: name.to_string(), role }),
+                    "missing {name} {role:?}"
+                );
+            }
+        }
+    }
+
+    /// offline_person_authors 补全：2003 插图 / 2009 画师 → artistRoles；2010 脚本 → authorRoles
+    #[test]
+    fn offline_person_extra_positions() {
+        let mk = |pid: u64, name: &str, pos: i32| PersonInfo {
+            person_id: pid,
+            name: name.to_string(),
+            name_cn: None,
+            person_type: Some(1),
+            career: Vec::new(),
+            position: Some(pos),
+            appear_eps: String::new(),
+            aliases: Vec::new(),
+        };
+        let persons = vec![
+            mk(1, "插画师A", 2003),
+            mk(2, "画师B", 2009),
+            mk(3, "脚本C", 2010),
+        ];
+        let authors = offline_person_authors(&persons, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
+        assert!(authors.contains(&Author { name: "插画师A".to_string(), role: AuthorRole::Penciller }));
+        assert!(authors.contains(&Author { name: "画师B".to_string(), role: AuthorRole::Penciller }));
+        assert!(authors.contains(&Author { name: "脚本C".to_string(), role: AuthorRole::Writer }));
+        assert_eq!(authors.len(), 3);
+    }
+
+    #[test]
     fn variant_titles_simplified_traditional_normalized() {
         let provider = BangumiMetadataProvider {
             client: BangumiClient::new(
@@ -2362,7 +2722,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_date_supports_js_formats() {
+    fn normalize_date_supports_variants() {
         assert_eq!(
             normalize_bangumi_date("2020年1月5日").as_deref(),
             Some("2020-01-05")
@@ -2387,7 +2747,33 @@ mod tests {
     }
 
     #[test]
-    fn classify_status_matches_js() {
+    fn age_rating_api_and_tag_inference() {
+        // API 优先
+        assert_eq!(map_bangumi_age_rating(Some(0), None, &[]), Some(0));
+        assert_eq!(map_bangumi_age_rating(Some(1), None, &[]), Some(15));
+        assert_eq!(map_bangumi_age_rating(Some(2), None, &[]), Some(18));
+        assert_eq!(map_bangumi_age_rating(Some(9), None, &[]), None);
+        // API 未知值不推断（权威优先）
+        assert_eq!(
+            map_bangumi_age_rating(Some(9), Some(true), &["エロ".to_string()]),
+            None
+        );
+        // 无 API → nsfw 标记
+        assert_eq!(map_bangumi_age_rating(None, Some(true), &[]), Some(18));
+        // nsfw=false：明确的非成人声明 → None（不做标签推断）
+        assert_eq!(map_bangumi_age_rating(None, Some(false), &["エロ".to_string()]), None);
+        // 无 API 无 nsfw → 标签推断
+        assert_eq!(map_bangumi_age_rating(None, None, &["恋爱".to_string()]), None);
+        assert_eq!(map_bangumi_age_rating(None, None, &["エロ".to_string()]), Some(18));
+        assert_eq!(map_bangumi_age_rating(None, None, &["恋爱".to_string(), "官能".to_string()]), Some(18));
+        assert_eq!(map_bangumi_age_rating(None, None, &["R18".to_string()]), Some(18));
+        // 擦边词不推断
+        assert_eq!(map_bangumi_age_rating(None, None, &["卖肉".to_string()]), None);
+        assert_eq!(map_bangumi_age_rating(None, None, &["NTR".to_string()]), None);
+    }
+
+    #[test]
+    fn classify_status_matches_variants() {
         assert_eq!(
             classify_bangumi_status("连载中"),
             Some(SeriesStatus::Ongoing)
@@ -2396,6 +2782,7 @@ mod tests {
         assert_eq!(classify_bangumi_status("完结"), Some(SeriesStatus::Ended));
         assert_eq!(classify_bangumi_status("已完结"), Some(SeriesStatus::Ended));
         assert_eq!(classify_bangumi_status("停刊"), Some(SeriesStatus::Hiatus));
+        assert_eq!(classify_bangumi_status("腰斩"), Some(SeriesStatus::Ended));
         assert_eq!(
             classify_bangumi_status("长期休载"),
             Some(SeriesStatus::Hiatus)
@@ -2470,7 +2857,8 @@ mod tests {
             ("连载".to_string(), 500), // statusTags 排除
             ("搞笑".to_string(), 400),
         ];
-        // max=500 > 200 → 阈值 35；热血/搞笑 ≥35 保留，按 count 降序
+        // max=500 > 200 → 阈值 35：热血/搞笑 ≥35 保留（2 个 <10）→ 白名单命中项全取：
+        // 白名单命中项全取（非白名单999 不引入）→ 热血/搞笑
         let whitelist = load_bangumi_tag_whitelist(None);
         let out = filter_bangumi_tags(&tags, &whitelist);
         assert_eq!(out, vec!["热血", "搞笑"]);
@@ -2493,7 +2881,7 @@ mod tests {
         );
     }
 
-    /// 标签处理：阈值过滤后不足 10 个 → 取排序后前 10（JS slice(0,10) 替换）
+    /// 标签处理：阈值过滤后不足 10 个 → 取白名单命中项前 10
     #[test]
     fn filter_tags_top10_fallback() {
         let tags: Vec<(String, i32)> = vec![
@@ -2516,6 +2904,30 @@ mod tests {
         assert_eq!(out.len(), 10);
         assert_eq!(out[0], "热血");
         assert_eq!(out[9], "职场");
+    }
+
+    /// 182434 场景：白名单命中 4 个 <10 → 白名单命中项全取
+    /// （智斗/斗智 非白名单不引入；漫画/作者 るーすぼーい・古屋庵/年份 2016/系列名 无能的奈奈 天然不在白名单）
+    #[test]
+    fn filter_tags_fill_from_valid() {
+        let tags: Vec<(String, i32)> = vec![
+            ("漫画".to_string(), 197),
+            ("超能力".to_string(), 112),
+            ("推理".to_string(), 103),
+            ("悬疑".to_string(), 88),
+            ("智斗".to_string(), 71),
+            ("るーすぼーい".to_string(), 60),
+            ("校园".to_string(), 59),
+            ("古屋庵".to_string(), 41),
+            ("2016".to_string(), 34),
+            ("无能的奈奈".to_string(), 27),
+            ("斗智".to_string(), 26),
+        ];
+        // 白名单命中：超能力/推理/悬疑/校园/智斗（5 个）→ 白名单命中项全取；
+        // 斗智 非白名单不引入（漫画/作者/年份/系列名 天然不在白名单）
+        let whitelist = load_bangumi_tag_whitelist(None);
+        let out = filter_bangumi_tags(&tags, &whitelist);
+        assert_eq!(out, vec!["超能力", "推理", "悬疑", "智斗", "校园"]);
     }
 
     /// 配置项：自定义白名单补充生效
