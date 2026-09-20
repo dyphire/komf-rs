@@ -298,6 +298,7 @@ impl MalMetadataMapper {
             result_id: manga.id.to_string(),
             media_type: mal_media_type_to_media_type(manga.media_type.as_deref()),
             language: None,
+            nsfw: None,
         }
     }
 }
@@ -406,6 +407,12 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for MalMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"myanimelist\.net/(?:manga|anime)/(\d+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Mal
     }

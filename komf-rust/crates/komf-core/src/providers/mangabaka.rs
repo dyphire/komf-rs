@@ -561,6 +561,7 @@ impl MangaBakaMetadataMapper {
             result_id: series.id.to_string(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 }
@@ -752,6 +753,12 @@ fn dedup_publishers(v: &mut Vec<Publisher>) {
 
 #[async_trait::async_trait]
 impl MetadataProvider for MangaBakaMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"mangabaka\.org/(\d+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::MangaBaka
     }

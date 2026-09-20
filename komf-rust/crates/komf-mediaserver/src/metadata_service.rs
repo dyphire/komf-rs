@@ -146,6 +146,34 @@ impl MetadataService {
             let name = name.clone();
             let provider_ref: Arc<dyn MetadataProvider> = provider;
             tasks.push(tokio::spawn(async move {
+                // Rust 扩展：输入为 provider 网页链接时直接按 id 获取（跳过站点搜索）
+                if let Some(id) = provider_ref.resolve_link_id(&name) {
+                    match provider_ref
+                        .get_series_metadata(&ProviderSeriesId(id.clone()))
+                        .await
+                    {
+                        Ok(meta) => {
+                            let title = meta
+                                .metadata
+                                .titles
+                                .first()
+                                .map(|t| t.name.clone())
+                                .or_else(|| meta.metadata.title.as_ref().map(|t| t.name.clone()))
+                                .unwrap_or_else(|| name.clone());
+                            return vec![SeriesSearchResult {
+                                url: Some(name.trim().to_string()),
+                                image_url: None,
+                                title,
+                                provider: provider_ref.provider_name().as_str().to_string(),
+                                result_id: id,
+                                media_type: None,
+                                language: meta.metadata.language.clone(),
+                                nsfw: None,
+                            }];
+                        }
+                        Err(_) => {}
+                    }
+                }
                 match provider_ref.search_series(&name, 5, Some(library_type)).await {
                     Ok(results) => results,
                     Err(error) => {
@@ -879,6 +907,22 @@ impl MetadataService {
             let _ = tx.send(MetadataJobEvent::ProviderSeries { provider: provider.provider_name() });
 
             let query = self.create_match_query(search_title, series, books).await;
+            // Rust 扩展：搜索标题为 provider 网页链接时直接按 id 获取（跳过搜索/相似度匹配）
+            if let Some(id) = provider.resolve_link_id(&query.series_name) {
+                if let Ok(result) = provider
+                    .get_series_metadata(&ProviderSeriesId(id))
+                    .await
+                {
+                    tracing::info!(
+                        "found match via link: \"{}\" from {}  {}",
+                        result.metadata.titles.first().map(|t| t.name.clone()).unwrap_or_default(),
+                        provider.provider_name(),
+                        result.id.0
+                    );
+                    let book_metadata = self.get_book_metadata(books, &result, provider.clone(), edition, tx).await;
+                    return Some(SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books));
+                }
+            }
             let result = match provider.match_series_metadata(&query).await {
                 Ok(result) => result,
                 Err(error) => {

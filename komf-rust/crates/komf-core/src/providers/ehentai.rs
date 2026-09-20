@@ -1812,6 +1812,7 @@ impl EHentaiMetadataMapper {
             provider: CoreProviders::EHentai.as_str().to_string(),
             media_type: None,
             language,
+            nsfw: result.category.as_deref().map(|c| !c.eq_ignore_ascii_case("non-h")),
         }
     }
 
@@ -2094,6 +2095,12 @@ impl EHentaiMetadataProvider {
 
 #[async_trait::async_trait]
 impl MetadataProvider for EHentaiMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"(?:e-hentai\.org|exhentai\.org)/g/(\d+)/([a-f0-9]+)").ok()?;
+        re.captures(query)
+            .map(|c| format!("{};{}", c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str()))
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::EHentai
     }

@@ -628,6 +628,7 @@ impl ComicVineMetadataMapper {
             result_id: volume.id.to_string(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 
@@ -645,6 +646,7 @@ impl ComicVineMetadataMapper {
             result_id: volume.id.to_string(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 
@@ -1181,6 +1183,12 @@ impl ComicVineMetadataProvider {
 
 #[async_trait::async_trait]
 impl MetadataProvider for ComicVineMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"comicvine\.gamespot\.com/[^/]+/(\d+)-(\d+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(2).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::ComicVine
     }

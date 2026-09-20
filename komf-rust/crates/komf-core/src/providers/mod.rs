@@ -135,6 +135,13 @@ pub trait MetadataProvider: Send + Sync {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError>;
+
+    /// 从搜索/匹配输入中解析本 provider 的网页链接 → 返回 series_id
+    /// （Rust 扩展：输入为 provider 站点链接时直接按 id 获取，跳过站点搜索）。
+    /// 默认不支持；各 provider 覆盖实现。
+    fn resolve_link_id(&self, _query: &str) -> Option<String> {
+        None
+    }
 }
 
 /// provider 错误。
