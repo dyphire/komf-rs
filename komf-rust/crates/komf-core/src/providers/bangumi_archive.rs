@@ -502,8 +502,44 @@ impl BangumiArchiveStore {
         })
     }
 
-    /// 标记活动：距上次查询超过 idle 阈值时先释放 mmap 热页（MADV_DONTNEED，
-    /// 仅 unix；下次访问按需重读），随后更新活动时间戳。
+    /// 释放 mmap 热页（MADV_DONTNEED，仅 unix；下次访问按需重读）。
+    fn release_hot_pages(&self) {
+        #[cfg(unix)]
+        if let Some(mm) = &self.mm {
+            unsafe {
+                libc::madvise(
+                    mm.as_ptr() as *mut libc::c_void,
+                    mm.len(),
+                    libc::MADV_DONTNEED,
+                );
+            }
+            tracing::debug!("bangumi archive: released mmap hot pages");
+        }
+    }
+
+    /// 后台空闲释放：距上次查询超过 idle 阈值时释放热页并重置时间戳
+    /// （CAS 防并发；供周期任务调用，使空闲期内存可回落）。
+    pub fn release_if_idle(&self) {
+        let now = now_ms();
+        let last = self.last_used.load(std::sync::atomic::Ordering::Relaxed);
+        let idle = self.idle_release_ms;
+        if idle > 0
+            && now.saturating_sub(last) >= idle
+            && self
+                .last_used
+                .compare_exchange(
+                    last,
+                    now,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            self.release_hot_pages();
+        }
+    }
+
+    /// 标记活动：距上次查询超过 idle 阈值时先释放 mmap 热页，随后更新活动时间戳。
     fn touch(&self) {
         let now = now_ms();
         let last = self.last_used.load(std::sync::atomic::Ordering::Relaxed);
@@ -520,20 +556,7 @@ impl BangumiArchiveStore {
                 )
                 .is_ok()
             {
-                #[cfg(unix)]
-                if let Some(mm) = &self.mm {
-                    unsafe {
-                        libc::madvise(
-                            mm.as_ptr() as *mut libc::c_void,
-                            mm.len(),
-                            libc::MADV_DONTNEED,
-                        );
-                    }
-                    tracing::debug!(
-                        "bangumi archive: released mmap hot pages after {}s idle",
-                        idle / 1000
-                    );
-                }
+                self.release_hot_pages();
             }
         } else {
             self.last_used.store(now, std::sync::atomic::Ordering::Relaxed);
@@ -1167,6 +1190,19 @@ impl BangumiArchiveService {
         });
         let interval_hours = config.update_interval_hours;
         let idle_release_secs = config.idle_release_secs.unwrap_or(0);
+        // 后台空闲释放：每 min(idle,60)s 检查一次，空闲超时自动释放 mmap 热页
+        if idle_release_secs > 0 {
+            let svc_idle = svc.clone();
+            tokio::spawn(async move {
+                let tick = std::time::Duration::from_secs(idle_release_secs.min(60).max(1));
+                loop {
+                    tokio::time::sleep(tick).await;
+                    if let Some(s) = svc_idle.store.read().unwrap().as_ref() {
+                        s.release_if_idle();
+                    }
+                }
+            });
+        }
         tokio::spawn(async move {
             let _ = std::fs::create_dir_all(&dir);
             let db_path = dir.join("archive_index.db");
