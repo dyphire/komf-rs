@@ -1193,6 +1193,12 @@ impl MetadataProvider for ComicVineMetadataProvider {
         CoreProviders::ComicVine
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let volume = self.client.get_volume(id.parse().ok()?).await.ok()?;
+        Some(self.mapper.to_series_search_result_volume(&volume))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

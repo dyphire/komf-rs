@@ -787,6 +787,17 @@ impl MetadataProvider for VizMetadataProvider {
         CoreProviders::Viz
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let series = self.get_book(&VizBookId(id.clone())).await.ok()?;
+        let books: Vec<VizSeriesBook> = match &series.all_books_id {
+            Some(bid) => self.client.get_all_books(bid).await.ok()?,
+            None => vec![series.to_viz_series_book()],
+        };
+        let book = books.first()?;
+        Some(self.metadata_mapper.to_series_search_result(book))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

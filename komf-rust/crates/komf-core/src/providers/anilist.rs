@@ -652,6 +652,12 @@ impl MetadataProvider for AniListMetadataProvider {
         CoreProviders::Anilist
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let media = self.client.get_series(id.parse().ok()?).await.ok()?;
+        Some(self.metadata_mapper.to_series_search_result(&media))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

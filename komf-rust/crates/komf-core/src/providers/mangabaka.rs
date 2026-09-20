@@ -763,6 +763,12 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         CoreProviders::MangaBaka
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let series = self.data_source.get_series(id.parse().ok()?).await.ok()?;
+        Some(self.metadata_mapper.to_series_search_result(&series))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,
