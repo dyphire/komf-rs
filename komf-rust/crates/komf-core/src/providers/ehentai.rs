@@ -18,6 +18,7 @@ use crate::model::{
     ProviderSeriesMetadata, ReadingDirection, ReleaseDate, SeriesMetadata, SeriesSearchResult,
     SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
+use crate::providers::ehentai_archive::{EHentaiArchiveService, GalleryRow};
 use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
 use crate::util::NameSimilarityMatcher;
 
@@ -76,6 +77,38 @@ pub(crate) struct EHentaiBook {
     #[serde(rename = "first_key")]
     first_key: Option<String>,
     error: Option<String>,
+}
+
+impl EHentaiBook {
+    /// 从 e-hentai-db 离线库 GalleryRow 构造（gdata 同字段语义）：
+    /// title/title_jpn 为 gdata 原始 HTML 实体编码 → 复用 html_unescape 解码；
+    /// rating 字符串 → round；空 title_jpn → None；空 tags → None。
+    pub(crate) fn from_archive_row(row: GalleryRow) -> Self {
+        Self {
+            gid: row.gid,
+            token: row.token,
+            title: html_unescape(&row.title),
+            title_jpn: if row.title_jpn.is_empty() {
+                None
+            } else {
+                Some(html_unescape(&row.title_jpn))
+            },
+            category: Some(row.category),
+            thumb: Some(row.thumb),
+            uploader: row.uploader,
+            posted: Some(row.posted),
+            file_count: Some(row.file_count.to_string()),
+            file_size: Some(row.file_size),
+            expunged: Some(row.expunged),
+            rating: row.rating.parse::<f64>().ok().map(|v| v.round()),
+            tags: if row.tags.is_empty() {
+                None
+            } else {
+                Some(row.tags)
+            },
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -942,8 +975,10 @@ impl EHentaiTagMapper {
 
     /// 取第一个 `language:` 标签映射为 BCP47 码。
     fn map_language(tags: &[String]) -> Option<String> {
-        let tag = tags.iter().find(|t| t.starts_with("language:"))?;
-        Self::bcp47_map().get(tag.as_str()).map(|v| v.to_string())
+        let map = Self::bcp47_map();
+        tags.iter()
+            .filter(|t| t.starts_with("language:"))
+            .find_map(|t| map.get(t.as_str()).map(|v| v.to_string()))
     }
 
     /// Kotlin `mapAgeRating`：极端标签（guro/ryona/snuff/scat）→18；
@@ -1838,22 +1873,18 @@ impl EHentaiMetadataMapper {
         let mut no_language_books: Vec<EHentaiBook> = Vec::new();
 
         for book in books {
-            let has_language_tag = book
-                .tags
-                .as_ref()
-                .map(|t| t.iter().any(|t| t.starts_with("language:")))
-                .unwrap_or(false);
-            let lang_tag = book
-                .tags
-                .as_ref()
-                .and_then(|t| t.iter().find(|t| t.starts_with("language:")));
-            let book_lang = lang_tag.and_then(|t| map.get(t.as_str()).map(|v| v.to_string()));
+            let book_lang = book.tags.as_ref().and_then(|t| {
+                t.iter()
+                    .filter(|t| t.starts_with("language:"))
+                    .find_map(|t| map.get(t.as_str()).map(|v| v.to_string()))
+            });
 
             if let Some(lang) = &book_lang {
                 if valid.contains(lang) {
                     grouped.get_mut(lang).unwrap().push(book.clone());
                 }
-            } else if !has_language_tag {
+            } else {
+                // 无法映射（language:translated / 未收录语言 / 无语言标签）→ 归无语言组保留，不丢弃
                 no_language_books.push(book.clone());
             }
         }
@@ -1949,6 +1980,12 @@ pub struct EHentaiMetadataProvider {
     metadata_mapper: EHentaiMetadataMapper,
     name_matcher: NameSimilarityMatcher,
     fetch_series_covers: bool,
+    /// e-hentai-db 离线数据源（None=禁用；gid 精准查询离线优先，未命中回退在线）。
+    archive: Option<std::sync::Arc<EHentaiArchiveService>>,
+    /// 离线标题搜索的 category 白名单（空=不过滤）。
+    archive_category_filter: Vec<String>,
+    /// 离线标题搜索的 uploader 白名单（空=不过滤）。
+    archive_uploader_filter: Vec<String>,
     /// 自动匹配仅 gid 匹配（Rust 扩展）：true → match 只做 gid 精准搜索，
     /// 无 gid / gid 无结果都跳过（不回落普通相似度搜索）；links 匹配不受影响。
     gid_only_match: bool,
@@ -2041,6 +2078,17 @@ pub fn create_provider(
             }
         });
     }
+    // e-hentai-db 离线数据源：enabled 时启动后台下载/解压（tokio::spawn 非阻塞）。
+    // 数据文件：配置 dbFile → workDir/ehentai/e-hentai.db。
+    let archive = if config.archive.enabled {
+        Some(EHentaiArchiveService::start(
+            &config.archive,
+            http_client.clone(),
+            work_dir,
+        ))
+    } else {
+        None
+    };
     Some(EHentaiMetadataProvider {
         client,
         metadata_mapper: EHentaiMetadataMapper::with_options(
@@ -2057,16 +2105,30 @@ pub fn create_provider(
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
         gid_only_match: config.gid_only_match,
+        archive_category_filter: config.archive.search_category_filter.clone(),
+        archive_uploader_filter: config.archive.search_uploader_filter.clone(),
+        archive,
         cache: TtlCache::new(Duration::from_secs(5 * 60)),
     })
 }
 
 impl EHentaiMetadataProvider {
     /// Kotlin `getBookOrThrow`：gdata 单查；gallery 缺失/API error 抛错。
+    /// Rust 扩展：e-hentai-db 离线库就绪时 gid 精准查询优先（未命中回退在线）。
     async fn get_book_or_throw(
         &self,
         series_id: &ProviderSeriesId,
     ) -> Result<EHentaiBook, ProviderError> {
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                if let Ok((gid, _)) = EHentaiParser::parse_gid(series_id) {
+                    if let Some(row) = store.get_by_gid(gid) {
+                        tracing::debug!("ehentai archive hit gid {gid}");
+                        return Ok(EHentaiBook::from_archive_row(row));
+                    }
+                }
+            }
+        }
         let key = series_id.clone();
         self.cache
             .get_or_load(key, || async {
@@ -2164,6 +2226,54 @@ impl MetadataProvider for EHentaiMetadataProvider {
         _media_type: Option<crate::model::MediaType>,
     ) -> Result<Vec<SeriesSearchResult>, ProviderError> {
         let queries = EHentaiParser::get_search_queries(series_name);
+        // e-hentai-db 离线优先：标题搜索（FTS5/LIKE）→ 候选；离线空 → 在线回退
+        if let Some(archive) = &self.archive {
+            let mut offline: Vec<EHentaiBook> = Vec::new();
+            for query in &queries {
+                let rows = archive.search_titles(
+                    query,
+                    50,
+                    &self.archive_category_filter,
+                    &self.archive_uploader_filter,
+                );
+                offline.extend(rows.into_iter().map(EHentaiBook::from_archive_row));
+            }
+            if !offline.is_empty() {
+                let mut seen = std::collections::HashSet::new();
+                let mut filtered: Vec<EHentaiBook> = Vec::new();
+                for book in offline {
+                    if book.error.is_some() {
+                        continue;
+                    }
+                    if seen.insert(book.gid) {
+                        filtered.push(book);
+                    }
+                }
+                let processed = self.metadata_mapper.apply_language_preference(&filtered);
+                let processed = match EHentaiMetadataMapper::forced_language_from_search(series_name)
+                {
+                    Some(lang) => {
+                        let (matching, rest): (Vec<EHentaiBook>, Vec<EHentaiBook>) = processed
+                            .into_iter()
+                            .partition(|b| {
+                                self.metadata_mapper.book_matches_forced_language(b, lang)
+                            });
+                        matching.into_iter().chain(rest).collect()
+                    }
+                    None => processed,
+                };
+                let mut out = Vec::new();
+                for book in processed {
+                    let result =
+                        self.metadata_mapper.to_series_search_result(&book, series_name);
+                    self.cache
+                        .put(ProviderSeriesId(result.result_id.clone()), book)
+                        .await;
+                    out.push(result);
+                }
+                return Ok(out);
+            }
+        }
 
         let mut raw_results: Vec<EHentaiBook> = Vec::new();
         for query in &queries {
@@ -2236,6 +2346,26 @@ impl MetadataProvider for EHentaiMetadataProvider {
         }
         if let Some(gid) = gid_candidates.iter().find_map(|c| extract_gid_from_title(c)) {
             tracing::info!("found gid {} in match title, searching gid:{}", gid, gid);
+            // e-hentai-db 离线优先：gid 精准查询（未命中 → 在线 gid 搜索）
+            if let Some(archive) = &self.archive {
+                if let Some(store) = archive.get() {
+                    if let Ok(gid_num) = gid.parse::<i32>() {
+                        if let Some(row) = store.get_by_gid(gid_num) {
+                            let book = EHentaiBook::from_archive_row(row);
+                            let cover = if self.fetch_series_covers {
+                                self.client.get_thumbnail(&book).await?
+                            } else {
+                                None
+                            };
+                            let metadata = self
+                                .metadata_mapper
+                                .to_series_metadata(&book, cover, forced);
+                            self.cache.put(metadata.id.clone(), book).await;
+                            return Ok(Some(metadata));
+                        }
+                    }
+                }
+            }
             let response = self.client.search_by_title(&format!("gid:{gid}")).await?;
             if let Some(book) = response
                 .gmetadata
@@ -2266,10 +2396,29 @@ impl MetadataProvider for EHentaiMetadataProvider {
 
         let queries = EHentaiParser::get_search_queries(&search_name);
         let mut raw_results: Vec<EHentaiBook> = Vec::new();
+
+        // e-hentai-db 离线优先：标题搜索候选；离线空 → 在线搜索
+        let mut offline_used = false;
+        if let Some(archive) = &self.archive {
+            for query in &queries {
+                let rows = archive.search_titles(
+                    query,
+                    50,
+                    &self.archive_category_filter,
+                    &self.archive_uploader_filter,
+                );
+                if !rows.is_empty() {
+                    offline_used = true;
+                }
+                raw_results.extend(rows.into_iter().map(EHentaiBook::from_archive_row));
+            }
+        }
+        if raw_results.is_empty() {
         for query in &queries {
             let truncated: String = query.chars().take(400).collect();
             let response = self.client.search_by_title(&truncated).await?;
             raw_results.extend(response.gmetadata);
+        }
         }
 
         let mut seen = std::collections::HashSet::new();
@@ -2293,7 +2442,7 @@ impl MetadataProvider for EHentaiMetadataProvider {
                     .map(|t| self.matches_name(&search_name, t))
                     .unwrap_or(false)
         };
-        let matched = match forced {
+        let mut matched = match forced {
             Some(lang) => processed
                 .iter()
                 .find(|book| {
@@ -2306,6 +2455,39 @@ impl MetadataProvider for EHentaiMetadataProvider {
             None => processed.into_iter().find(|book| matches(book)),
         };
 
+
+        // 离线候选非空但相似度未命中 → 在线回退再匹配（保证不漏）
+        if matched.is_none() && offline_used {
+            let mut raw: Vec<EHentaiBook> = Vec::new();
+            for query in &queries {
+                let truncated: String = query.chars().take(400).collect();
+                let response = self.client.search_by_title(&truncated).await?;
+                raw.extend(response.gmetadata);
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut filtered: Vec<EHentaiBook> = Vec::new();
+            for book in raw {
+                if book.error.is_some() {
+                    continue;
+                }
+                if seen.insert(book.gid) {
+                    filtered.push(book);
+                }
+            }
+            let processed = self.metadata_mapper.apply_language_preference(&filtered);
+            matched = match forced {
+                Some(lang) => processed
+                    .iter()
+                    .find(|book| {
+                        self.metadata_mapper
+                            .book_matches_forced_language(book, lang)
+                            && matches(book)
+                    })
+                    .or_else(|| processed.iter().find(|book| matches(book)))
+                    .cloned(),
+                None => processed.into_iter().find(|book| matches(book)),
+            };
+        }
         let Some(book) = matched else { return Ok(None) };
         let cover = if self.fetch_series_covers {
             self.client.get_thumbnail(&book).await?
@@ -2327,6 +2509,113 @@ impl MetadataProvider for EHentaiMetadataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(test)]
+    use crate::providers::ehentai_archive::EHentaiArchiveStore;
+    /// [オンキュウ] 无 (artist) 括号结构 -> writer=penciller=社团名（直接使用）。
+    #[test]
+    fn parse_authors_from_title_no_artist_bracket() {
+        let (writer, penciller) = EHentaiParser::parse_authors_from_title(
+            "[オンキュウ] 生意気ギャルがわからせられる本3.0 [中国翻訳] [DL版]",
+        );
+        assert_eq!(writer.as_deref(), Some("オンキュウ"));
+        assert_eq!(penciller.as_deref(), Some("オンキュウ"));
+    }
+
+    /// [circle (artist)] -> writer=社团、penciller=画师（多人由调用方拆分）。
+    #[test]
+    fn parse_authors_from_title_with_artist() {
+        let (writer, penciller) =
+            EHentaiParser::parse_authors_from_title("[Poki no Ie (Pochikin, Chinpoki)] Aisareru");
+        assert_eq!(writer.as_deref(), Some("Poki no Ie"));
+        assert_eq!(penciller.as_deref(), Some("Pochikin, Chinpoki"));
+    }
+
+    /// 完整 mapper 链路：title_jpn 含 [オンキュウ] -> 两层角色均写入。
+    #[test]
+    fn mapper_authors_title_jpn_no_artist() {
+        use crate::config::SeriesMetadataConfig;
+        let mut cfg = SeriesMetadataConfig::default();
+        cfg.authors = true;
+        let mapper = EHentaiMetadataMapper::with_options(
+            cfg,
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec!["zh".to_string(), "ja".to_string()],
+            "jpn".to_string(),
+            Vec::new(),
+            std::sync::Arc::new(Vec::new()),
+            String::new(),
+            None,
+        );
+        let book = EHentaiBook {
+            gid: 4190146,
+            token: "90f7fd33fa".to_string(),
+            title: "[Onkyu] Namaiki JK ga Wakaraserareru Hon 3.0 [Chinese] [Digital]".to_string(),
+            title_jpn: Some(
+                "[オンキュウ] 生意気ギャルがわからせられる本3.0 [中国翻訳] [DL版]".to_string(),
+            ),
+            category: Some("Doujinshi".to_string()),
+            rating: Some(2.0),
+            tags: None,
+            ..Default::default()
+        };
+        let meta = mapper.to_series_metadata(&book, None, None);
+        assert!(
+            meta.metadata
+                .authors
+                .iter()
+                .any(|a| a.name == "オンキュウ" && a.role == AuthorRole::Writer),
+            "expected writer オンキュウ, got {:?}",
+            meta.metadata.authors
+        );
+        assert!(
+            meta.metadata
+                .authors
+                .iter()
+                .any(|a| a.name == "オンキュウ" && a.role == AuthorRole::Penciller),
+            "expected penciller オンキュウ, got {:?}",
+            meta.metadata.authors
+        );
+    }
+
+    /// 集成：真实 e-hentai.db（../../ehentai/e-hentai.db）-> from_archive_row ->
+    /// to_series_metadata 验证 authors 从 title_jpn 的 [オンキュウ] 解析（--ignored 运行）。
+    #[test]
+    #[ignore]
+    fn archive_real_db_authors() {
+        use crate::config::SeriesMetadataConfig;
+        let path = std::path::Path::new("../../ehentai/e-hentai.db");
+        if !path.exists() {
+            eprintln!("db not found, skipping");
+            return;
+        }
+        let store = EHentaiArchiveStore::open(path, 0).expect("open real db");
+        let row = store.get_by_gid(4190146).expect("row 4190146");
+        let book = EHentaiBook::from_archive_row(row);
+        let mut cfg = SeriesMetadataConfig::default();
+        cfg.authors = true;
+        let mapper = EHentaiMetadataMapper::with_options(
+            cfg,
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec!["zh".to_string(), "ja".to_string()],
+            "jpn".to_string(),
+            Vec::new(),
+            std::sync::Arc::new(Vec::new()),
+            String::new(),
+            None,
+        );
+        let meta = mapper.to_series_metadata(&book, None, None);
+        eprintln!("authors={:?}", meta.metadata.authors);
+        assert!(
+            meta.metadata
+                .authors
+                .iter()
+                .any(|a| a.role == AuthorRole::Writer),
+            "expected writer from title, got {:?}",
+            meta.metadata.authors
+        );
+    }
 
     /// 临时 db.text.json（EhTagTranslation 格式：{"data":[{"namespace":..,"data":{..}}]}）。
     fn write_test_db() -> std::path::PathBuf {
@@ -2667,6 +2956,32 @@ mod tests {
         assert_eq!(EHentaiTagMapper::map_language(&[]), None);
     }
 
+    #[test]
+    fn apply_language_preference_keeps_book_when_translated_precedes_language() {
+        // language:translated 排在 language:chinese 前：不能因首个 language:* 无法映射而丢弃
+        let mapper = EHentaiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec!["zh".to_string(), "ja".to_string(), "en".to_string()],
+        );
+        let book = EHentaiBook {
+            gid: 4190146,
+            token: "t".to_string(),
+            title: "T".to_string(),
+            title_jpn: Some("J".to_string()),
+            category: Some("Doujinshi".to_string()),
+            tags: Some(vec![
+                "female:big breasts".to_string(),
+                "language:translated".to_string(),
+                "language:chinese".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let out = mapper.apply_language_preference(&[book]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].gid, 4190146);
+    }
     #[test]
     fn apply_language_preference_sorts_by_preference_then_rating() {
         let mapper = EHentaiMetadataMapper::new(

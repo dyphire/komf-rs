@@ -9,6 +9,7 @@ pub mod bangumi_archive;
 pub mod bookwalker;
 pub mod comicvine;
 pub mod ehentai;
+pub mod ehentai_archive;
 pub mod mal;
 pub mod mangabaka;
 pub mod mangadex;

@@ -1,7 +1,7 @@
 //! 配置 DTO 映射 —— 对应 `AppConfigMapper.kt` / `AppConfigUpdateMapper.kt`。
 use komf_api_models::common::*;
 use komf_api_models::config::*;
-use komf_core::config::{BangumiConfig, EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
+use komf_core::config::{BangumiConfig, EHentaiArchiveConfig, EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
 use komf_core::model::{AuthorRole, MediaType, ReadingDirection, UpdateMode};
 use komf_core::util::NameSimilarityMatcher;
 use komf_mediaserver::config::{
@@ -525,6 +525,15 @@ fn to_ehentai_dto(config: &EHentaiConfig) -> EHentaiConfigDto {
         gid_only_match: Some(config.gid_only_match),
         ipb_member_id: config.ipb_member_id.clone(),
         ipb_pass_hash: config.ipb_pass_hash.clone(),
+        archive: Some(EHentaiArchiveConfigDto {
+            enabled: Some(config.archive.enabled),
+            url: config.archive.url.clone(),
+            db_file: config.archive.db_file.clone(),
+            update_interval_hours: Some(config.archive.update_interval_hours),
+            idle_release_secs: config.archive.idle_release_secs,
+            search_category_filter: Some(config.archive.search_category_filter.clone()),
+            search_uploader_filter: Some(config.archive.search_uploader_filter.clone()),
+        }),
     }
 }
 
@@ -1110,6 +1119,29 @@ fn from_ehentai_dto(dto: &EHentaiConfigDto, base: &EHentaiConfig) -> EHentaiConf
         gid_only_match: dto.gid_only_match.unwrap_or(base.gid_only_match),
         ipb_member_id: dto.ipb_member_id.clone().or_else(|| base.ipb_member_id.clone()),
         ipb_pass_hash: dto.ipb_pass_hash.clone().or_else(|| base.ipb_pass_hash.clone()),
+        archive: dto
+            .archive
+            .as_ref()
+            .map(|d| EHentaiArchiveConfig {
+                enabled: d.enabled.unwrap_or(base.archive.enabled),
+                url: d.url.clone().or_else(|| base.archive.url.clone()),
+                db_file: d.db_file.clone().or_else(|| base.archive.db_file.clone()),
+                update_interval_hours: d
+                    .update_interval_hours
+                    .unwrap_or(base.archive.update_interval_hours),
+                idle_release_secs: d
+                    .idle_release_secs
+                    .or(base.archive.idle_release_secs),
+                search_category_filter: d
+                    .search_category_filter
+                    .clone()
+                    .unwrap_or_else(|| base.archive.search_category_filter.clone()),
+                search_uploader_filter: d
+                    .search_uploader_filter
+                    .clone()
+                    .unwrap_or_else(|| base.archive.search_uploader_filter.clone()),
+            })
+            .unwrap_or_else(|| base.archive.clone()),
     }
 }
 

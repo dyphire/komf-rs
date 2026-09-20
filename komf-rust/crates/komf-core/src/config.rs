@@ -318,6 +318,60 @@ pub struct EHentaiConfig {
     pub ipb_member_id: Option<String>,
     #[serde(default)]
     pub ipb_pass_hash: Option<String>,
+    /// e-hentai-db 离线数据源（URenko nightly SQLite）：enabled 时启动时下载/解压并
+    /// 用于 gid 精准查询（getBookOrThrow/gid 匹配/链接搜索离线优先，未命中回退在线）。
+    #[serde(default)]
+    pub archive: EHentaiArchiveConfig,
+}
+
+/// e-hentai-db 离线数据源配置：
+/// 数据文件为 URenko fork 的 nightly SQLite dump（gallery/gid_tid/tag/torrent 表，
+/// 与官方 gdata JSON 同字段），启动时应用内自动下载 zstd 并解压到本地，定期检查更新。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EHentaiArchiveConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 数据库下载 URL（缺省 URenko nightly release e-hentai.db.zstd）。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 本地数据库文件路径（缺省 workDir/ehentai/e-hentai.db）。
+    #[serde(default)]
+    pub db_file: Option<String>,
+    /// 更新检查间隔（小时）；0 = 仅启动时加载/下载一次，不自动更新。
+    #[serde(default = "default_ehentai_archive_update_interval")]
+    pub update_interval_hours: u64,
+    /// 空闲释放 SQLite 页面缓存（秒）；0 = 禁用（默认 60，对齐 bangumi archive）。
+    #[serde(default = "default_ehentai_archive_idle_release")]
+    pub idle_release_secs: Option<u64>,
+    /// 搜索结果/匹配候选的 category 白名单（如 ["Doujinshi"]）；空 = 不过滤。
+    #[serde(default)]
+    pub search_category_filter: Vec<String>,
+    /// 搜索结果/匹配候选的 uploader 白名单（精确匹配）；空 = 不过滤。
+    #[serde(default)]
+    pub search_uploader_filter: Vec<String>,
+}
+
+fn default_ehentai_archive_update_interval() -> u64 {
+    4
+}
+
+fn default_ehentai_archive_idle_release() -> Option<u64> {
+    Some(60)
+}
+
+impl Default for EHentaiArchiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            db_file: None,
+            update_interval_hours: default_ehentai_archive_update_interval(),
+            idle_release_secs: default_ehentai_archive_idle_release(),
+            search_category_filter: Vec::new(),
+            search_uploader_filter: Vec::new(),
+        }
+    }
 }
 
 fn default_ehentai_search_domain() -> String {
@@ -358,6 +412,7 @@ impl Default for EHentaiConfig {
             search_domain: default_ehentai_search_domain(),
             ipb_member_id: None,
             ipb_pass_hash: None,
+            archive: EHentaiArchiveConfig::default(),
         }
     }
 }

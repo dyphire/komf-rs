@@ -239,6 +239,17 @@ metadataProviders:
       searchDomain: e-hentai        # "e-hentai"（默认）| "exhentai"（仅搜索请求域名）
       ipbMemberId: null             # exhentai 登录 cookie（searchDomain=exhentai 时必需；403 自动刷新）
       ipbPassHash: null
+      archive:                      # e-hentai-db 离线数据源（URenko nightly SQLite dump）
+        enabled: false              #   启用后启动时下载 e-hentai.db.zstd（约 1+GB 压缩）→ 解压到本地
+                                    #   gid 精准查询（getBookOrThrow / gid 匹配 / 链接搜索）离线优先
+                                    #   未就绪 / 未命中 → 自动回退在线 gdata；可关闭本段恢复纯在线
+        url: null                   #   数据库下载 URL（缺省 URenko nightly release e-hentai.db.zstd）
+        dbFile: null                #   本地数据库文件路径（缺省 workDir/ehentai/e-hentai.db）
+        updateIntervalHours: 4    #   更新检查间隔（小时）；0 = 仅启动时加载/下载一次，不自动更新
+        idleReleaseSecs: 60         #   空闲释放 SQLite 页面缓存（秒）；0 = 禁用（默认 60）
+        searchCategoryFilter: []    #   离线标题搜索的 category 白名单（空=不过滤），
+                                    #   例: ["Doujinshi", "Manga", "Non-H"]（FTS 命中后过滤候选）
+        searchUploaderFilter: []    #   离线标题搜索的 uploader 白名单（空=不过滤）
   libraryProviders: {}              # 按库覆盖（库 id → 同 defaultProviders 结构）
 
 notifications:
