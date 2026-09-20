@@ -571,12 +571,28 @@ impl BangumiMetadataMapper {
         };
 
         // Kotlin books：bookRelations（provider 已过滤 type==BOOK && relation=="单行本"）
+        // 排序：单行本先按标题提取的卷号排，无法提取 / 卷号相同回退 id 升序
+        //（离线 get_related 与在线 API 均按此统一，消除对返回顺序的隐式依赖）
+        let mut relations: Vec<&BangumiSubjectRelation> = book_relations.iter().collect();
+        relations.sort_by(|a, b| {
+            let na = get_book_number(&a.name).map(|r| r.start);
+            let nb = get_book_number(&b.name).map(|r| r.start);
+            match (na, nb) {
+                (Some(x), Some(y)) if x != y => {
+                    x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                _ => a.id.cmp(&b.id),
+            }
+        });
         let books: Vec<SeriesBook> = if cfg.books {
-            book_relations
-                .iter()
-                .map(|rel| SeriesBook {
+            relations
+                .into_iter()
+                .enumerate()
+                .map(|(i, rel)| SeriesBook {
                     id: ProviderBookId(rel.id.to_string()),
-                    number: get_book_number(&rel.name),
+                    // extractVolumeNumber(...) || (index + 1)——标题提取失败回退排序位置
+                    number: get_book_number(&rel.name)
+                        .or_else(|| Some(crate::model::BookRange::single((i + 1) as f64))),
                     name: Some(rel.name.clone()),
                     r#type: None,
                     edition: None,

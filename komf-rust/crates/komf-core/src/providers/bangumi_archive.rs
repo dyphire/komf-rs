@@ -1012,7 +1012,8 @@ impl BangumiArchiveStore {
             "SELECT s.id, s.name, s.name_cn, s.type, r.relation_type
              FROM relations_idx r
              JOIN subjects_idx s ON r.related_subject_id = s.id
-             WHERE r.subject_id = ?1",
+             WHERE r.subject_id = ?1
+             ORDER BY r.related_subject_id ASC",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
