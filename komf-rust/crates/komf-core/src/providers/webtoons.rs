@@ -1101,7 +1101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seo_encoding_matches_vendor_js() {
+    fn seo_encoding_matches_vendor_page() {
         assert_eq!(seo_encoding(""), "_");
         assert_eq!(seo_encoding("Tower of God"), "tower-of-god");
         assert_eq!(seo_encoding("  Leading Spaces"), "leading-spaces");

@@ -83,6 +83,9 @@ pub struct ArchiveSubject {
     pub score: Option<f64>,
     #[serde(default)]
     pub rating: Option<BangumiRating>,
+    /// 成人内容标记（在线 API 与 Archive 均有）
+    #[serde(default)]
+    pub nsfw: Option<bool>,
 }
 
 /// person 实体（person.jsonlines）：name=日文原名；name_cn 从 infobox「简体中文名」提取。
@@ -122,6 +125,7 @@ pub struct PersonInfo {
     pub career: Vec<String>,
     pub position: Option<i32>,
     pub appear_eps: String,
+    pub aliases: Vec<String>,
 }
 
 /// 从 person infobox（{{Infobox Crt\n|简体中文名= 水树奈奈\n...}}）提取简体中文名。
@@ -139,6 +143,74 @@ fn person_name_cn(infobox: Option<&str>) -> Option<String> {
         }
     }
     None
+}
+
+/// 从 person infobox「别名」块提取全部别名（含子条目 v；`、`/`,` 拆分；`(注音)` 拆出；
+/// 空值跳过，去重保序）。
+fn person_aliases(infobox: Option<&str>) -> Vec<String> {
+    fn push_parts(out: &mut Vec<String>, raw: &str) {
+        for part in raw.split(['、', ',']) {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if !out.contains(&part.to_string()) {
+                out.push(part.to_string());
+            }
+            // 括号注音（如 "近藤奈々 (こんどう なな)"）也拆出
+            if let Some(open) = part.find('(') {
+                if let Some(close) = part.rfind(')') {
+                    if close > open {
+                        let inner = part[open + 1..close].trim();
+                        if !inner.is_empty() && !out.contains(&inner.to_string()) {
+                            out.push(inner.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let Some(ib) = infobox else { return out };
+    let ib = ib.trim();
+    let mut lines = ib.split('\n').peekable();
+    while let Some(raw) = lines.next() {
+        let line = raw.trim().strip_prefix('|').unwrap_or(raw.trim());
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == "别名" {
+                let mut block = v.trim().to_string();
+                // 多行别名块：{ [..] [..] } 直到 '}' 或下一个 '|'
+                if block.starts_with('{') {
+                    while !block.contains('}') {
+                        match lines.next() {
+                            Some(l) => block.push_str(l.trim()),
+                            None => break,
+                        }
+                    }
+                    for item in block.split('[').skip(1) {
+                        // 截断到行尾 / '}'（别名块可能尾随换行与 '}'）
+                        let item = item.trim();
+                        let item = item
+                            .split(['\r', '\n', '}'])
+                            .next()
+                            .unwrap_or(item)
+                            .trim();
+                        let item = item.trim_end_matches(']').trim();
+                        let item = item.strip_suffix(']').unwrap_or(item).trim();
+                        if let Some((_, val)) = item.split_once('|') {
+                            push_parts(&mut out, val);
+                        } else if !item.is_empty() {
+                            push_parts(&mut out, item);
+                        }
+                    }
+                } else if !block.is_empty() && block != "{}" {
+                    push_parts(&mut out, &block);
+                }
+            }
+        }
+    }
+    out
 }
 
 impl ArchiveSubject {
@@ -169,6 +241,8 @@ impl ArchiveSubject {
             total_episodes: None,
             infobox: self.infobox_items(),
             eps_info: None,
+            age_rating: None,
+            nsfw: self.nsfw,
         }
     }
 
@@ -202,23 +276,30 @@ impl ArchiveSubject {
 }
 
 /// 列表项：`key|value` → kv 对；纯值 → 无 key 项。
-fn parse_list_item(seg: &str) -> (Option<String>, String) {
+/// 空 value（`[韩版|]` 之类）无实际内容 → 返回 None 跳过（避免写入 "韩版|" 垃圾别名）。
+fn parse_list_item(seg: &str) -> Option<(Option<String>, String)> {
     if let Some((k, v)) = seg.split_once('|') {
         let k = k.trim();
         let v = v.trim();
         if !k.is_empty() && !v.is_empty() {
-            return (Some(k.to_string()), v.to_string());
+            return Some((Some(k.to_string()), v.to_string()));
         }
-        if !v.is_empty() {
-            return (None, v.to_string());
+        if v.is_empty() {
+            return None;
         }
+        return Some((None, v.to_string()));
     }
-    (None, seg.to_string())
+    let seg = seg.trim();
+    if seg.is_empty() {
+        None
+    } else {
+        Some((None, seg.to_string()))
+    }
 }
 
 /// 解析 archive infobox Wiki 模板字符串 → [{key,value}]。
 /// 支持：`|key= value`、`|key={ [item] [item] }` 列表、跨行值。
-fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
+pub(crate) fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
     fn make_item(key: &str, value: Option<&str>, list: &[(Option<String>, String)]) -> BangumiInfoBoxItem {
         if list.is_empty() {
             BangumiInfoBoxItem {
@@ -275,7 +356,7 @@ fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
                             if seg.is_empty() {
                                 return None;
                             }
-                            Some(parse_list_item(seg))
+                            parse_list_item(seg)
                         })
                         .collect();
                     out.push(make_item(&key, None, &items));
@@ -294,7 +375,9 @@ fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
                 .trim_end_matches(']')
                 .trim();
             if !s.is_empty() {
-                current_list.push(parse_list_item(s));
+                if let Some(item) = parse_list_item(s) {
+                    current_list.push(item);
+                }
             }
         }
     }
@@ -348,7 +431,8 @@ const DDL_PERSONS: &str = "CREATE TABLE IF NOT EXISTS persons (
     name   TEXT,
     name_cn TEXT,
     type   INTEGER,
-    career TEXT
+    career TEXT,
+    aliases TEXT
 )";
 const DDL_SUBJECT_PERSONS: &str = "CREATE TABLE IF NOT EXISTS subject_persons (
     subject_id INTEGER NOT NULL,
@@ -498,6 +582,18 @@ impl BangumiArchiveStore {
         ] {
             c.execute_batch(ddl)
                 .map_err(|e| ProviderError::message(format!("archive schema failed: {e}")))?;
+        }
+        // persons 缺 aliases 列（旧库）→ ALTER TABLE ADD COLUMN（不重建，下次 build 填充）
+        let has_p_aliases = match c.prepare("PRAGMA table_info(persons)") {
+            Ok(mut st) => st
+                .query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.filter_map(|r| r.ok()).any(|n| n == "aliases"))
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !has_p_aliases {
+            c.execute_batch("ALTER TABLE persons ADD COLUMN aliases TEXT")
+                .map_err(|e| ProviderError::message(format!("archive schema migrate aliases: {e}")))?;
         }
         c.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| ProviderError::message(format!("archive version failed: {e}")))?;
@@ -666,7 +762,8 @@ impl BangumiArchiveStore {
             .map_err(|e| ProviderError::message(format!("archive persons open: {e}")))?;
         let reader = std::io::BufReader::new(file);
         let mut lines = reader.lines();
-        let mut batch: Vec<(u64, String, Option<String>, Option<i64>, String)> = Vec::new();
+        let mut batch: Vec<(u64, String, Option<String>, Option<i64>, String, String)> =
+            Vec::new();
         let mut count = 0usize;
         loop {
             let Some(line) = lines.next() else { break };
@@ -679,6 +776,7 @@ impl BangumiArchiveStore {
                 person_name_cn(p.infobox.as_deref()),
                 p.r#type.map(|t| t as i64),
                 career,
+                serde_json::to_string(&person_aliases(p.infobox.as_deref())).unwrap_or_default(),
             ));
             count += 1;
             if batch.len() >= 10000 {
@@ -694,13 +792,13 @@ impl BangumiArchiveStore {
 
     fn insert_person_batch(
         c: &rusqlite::Connection,
-        batch: &[(u64, String, Option<String>, Option<i64>, String)],
+        batch: &[(u64, String, Option<String>, Option<i64>, String, String)],
     ) -> Result<(), ProviderError> {
         for b in batch {
             c.execute(
-                "INSERT OR REPLACE INTO persons (id, name, name_cn, type, career)
-                 VALUES (?1,?2,?3,?4,?5)",
-                rusqlite::params![b.0 as i64, b.1, b.2, b.3, b.4],
+                "INSERT OR REPLACE INTO persons (id, name, name_cn, type, career, aliases)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![b.0 as i64, b.1, b.2, b.3, b.4, b.5],
             )
             .map_err(|e| ProviderError::message(format!("archive persons insert: {e}")))?;
         }
@@ -915,7 +1013,7 @@ impl BangumiArchiveStore {
         self.touch();
         let c = self.conn.lock().unwrap();
         let mut stmt = match c.prepare(
-            "SELECT sp.person_id, p.name, p.name_cn, p.type, p.career, sp.position, sp.appear_eps
+            "SELECT sp.person_id, p.name, p.name_cn, p.type, p.career, sp.position, sp.appear_eps, p.aliases
              FROM subject_persons sp
              JOIN persons p ON p.id = sp.person_id
              WHERE sp.subject_id = ?1
@@ -933,6 +1031,10 @@ impl BangumiArchiveStore {
                 career: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
                 position: r.get::<_, Option<i64>>(5)?.map(|v| v as i32),
                 appear_eps: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                aliases: r
+                    .get::<_, Option<String>>(7)?
+                    .map(|a| serde_json::from_str(&a).unwrap_or_default())
+                    .unwrap_or_default(),
             })
         })
         .ok()
@@ -944,7 +1046,7 @@ impl BangumiArchiveStore {
     pub fn get_person(&self, person_id: u64) -> Option<PersonInfo> {
         let c = self.conn.lock().unwrap();
         c.query_row(
-            "SELECT id, name, name_cn, type, career FROM persons WHERE id = ?1",
+            "SELECT id, name, name_cn, type, career, aliases FROM persons WHERE id = ?1",
             [person_id as i64],
             |r| {
                 Ok(PersonInfo {
@@ -955,6 +1057,10 @@ impl BangumiArchiveStore {
                     career: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
                     position: None,
                     appear_eps: String::new(),
+                    aliases: r
+                        .get::<_, Option<String>>(5)?
+                        .map(|a| serde_json::from_str(&a).unwrap_or_default())
+                        .unwrap_or_default(),
                 })
             },
         )
@@ -1358,6 +1464,22 @@ async fn fetch_latest_meta(http_client: &reqwest::Client) -> Result<LatestMeta, 
 
 #[cfg(test)]
 mod tests {
+    /// person infobox 别名块解析：子条目 v、`、`/`,` 拆分、括号注音拆出、空值跳过
+    #[test]
+    fn person_aliases_parsed() {
+        let ib = "{{Infobox Crt\r\n|简体中文名= 水树奈奈\r\n|别名={\r\n[第二中文名|]\r\n[英文名|]\r\n[日文名|近藤奈々 (こんどう なな)]\r\n[纯假名|みずき なな]\r\n[罗马字|Mizuki Nana]\r\n[昵称|奈々ちゃん、奈々さん、奈々様]\r\n}\r\n|性别= 女\r\n}}";
+        let a = person_aliases(Some(ib));
+        for w in [
+            "近藤奈々 (こんどう なな)", "こんどう なな", "みずき なな", "Mizuki Nana",
+            "奈々ちゃん", "奈々さん", "奈々様",
+        ] {
+            assert!(a.contains(&w.to_string()), "missing alias: {w}");
+        }
+        // 空子条目跳过
+        assert!(!a.contains(&String::new()));
+        assert!(!a.iter().any(|x| x.trim().is_empty()));
+    }
+
     use super::*;
 
     fn write_subjects(path: &Path, rows: &[&str]) {
@@ -1374,6 +1496,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn parse_list_item_empty_v_skipped() {
+        // [韩版|] 空 v → None（跳过）；[台版|無能力者娜娜] → kv；纯值 → 无 key
+        assert!(parse_list_item("韩版|").is_none());
+        assert_eq!(
+            parse_list_item("台版|無能力者娜娜"),
+            Some((Some("台版".to_string()), "無能力者娜娜".to_string()))
+        );
+        assert_eq!(parse_list_item("完结"), Some((None, "完结".to_string())));
+        assert!(parse_list_item("").is_none());
+        // 单行列表整体：空 v 项被过滤
+        let items = parse_archive_infobox(
+            "{{Infobox animanga/Manga\r\n|别名={\r\n[台版|無能力者娜娜]\r\n[韩版|]\r\n}\r\n|出版社= スクウェア・エニックス\r\n}}",
+        );
+        let alias = items.iter().find(|i| i.key.as_deref() == Some("别名")).unwrap();
+        let arr = alias.value.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].get("k").and_then(|k| k.as_str()), Some("台版"));
+        assert_eq!(arr[0].get("v").and_then(|v| v.as_str()), Some("無能力者娜娜"));
+        let pub_ = items.iter().find(|i| i.key.as_deref() == Some("出版社")).unwrap();
+        assert_eq!(pub_.value.as_ref().unwrap().as_str(), Some("スクウェア・エニックス"));
     }
 
     #[test]

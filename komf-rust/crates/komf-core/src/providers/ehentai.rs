@@ -1756,7 +1756,15 @@ impl EHentaiMetadataMapper {
             reading_direction,
             age_rating,
             language,
-            genres: Vec::new(),
+            // 非 non-h（SFW）内容 → hentai genre（non-h 标签格式：`non-h` / `misc:non-h`）
+            genres: if raw_tags
+                .iter()
+                .any(|t| t == "non-h" || t == "misc:non-h")
+            {
+                Vec::new()
+            } else {
+                vec!["hentai".to_string()]
+            },
             tags,
             total_book_count: None,
             authors,
@@ -2612,6 +2620,32 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// 非 non-h（SFW）内容 → genres=["hentai"]；含 non-h / misc:non-h → 空
+    #[test]
+    fn to_series_metadata_genres_hentai_unless_noh() {
+        let mapper = EHentaiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec!["en".to_string()],
+        );
+        // 无 no-h → hentai
+        let mut b = book(1, "t", "Title", None);
+        b.tags = Some(vec!["artist:ArtistX".to_string()]);
+        let meta = mapper.to_series_metadata(&b, None, None);
+        assert_eq!(meta.metadata.genres, vec!["hentai"]);
+        // non-h → 空
+        let mut b2 = book(2, "t", "SFW Title", None);
+        b2.tags = Some(vec!["non-h".to_string()]);
+        let meta2 = mapper.to_series_metadata(&b2, None, None);
+        assert_eq!(meta2.metadata.genres, Vec::<String>::new());
+        // misc:non-h → 空
+        let mut b3 = book(3, "t", "SFW Title 2", None);
+        b3.tags = Some(vec!["misc:non-h".to_string()]);
+        let meta3 = mapper.to_series_metadata(&b3, None, None);
+        assert_eq!(meta3.metadata.genres, Vec::<String>::new());
     }
 
     #[test]
