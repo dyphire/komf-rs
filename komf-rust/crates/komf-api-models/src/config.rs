@@ -311,6 +311,20 @@ pub struct EHentaiConfigDto {
     pub search_domain: Option<String>,
     pub ipb_member_id: Option<String>,
     pub ipb_pass_hash: Option<String>,
+    /// e-hentai-db 离线数据源（Rust 扩展）：与 bangumi archive 同构。
+    pub archive: Option<EHentaiArchiveConfigDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EHentaiArchiveConfigDto {
+    pub enabled: Option<bool>,
+    pub url: Option<String>,
+    pub db_file: Option<String>,
+    pub update_interval_hours: Option<u64>,
+    pub idle_release_secs: Option<u64>,
+    pub search_category_filter: Option<Vec<String>>,
+    pub search_uploader_filter: Option<Vec<String>>,
 }
 
 /// Bangumi 配置 DTO：通用 ProviderConfigDto 字段 + archive 离线数据源段。

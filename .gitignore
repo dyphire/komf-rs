@@ -5,10 +5,12 @@ build/
 !src/**/build/
 .smoke
 target/
+bangumi-archive/
 application.yml
 *.log
 *.json
 *.sqlite
+*.db
 
 ### intellij idea ###
 .idea/*
@@ -58,3 +60,5 @@ kls-classpath*
 
 ### neovim ###
 .nvim.lua
+# e-hentai-db 离线数据（用户自备/自动下载）+ FTS 索引 + meta（komf-rust）
+komf-rust/ehentai/
