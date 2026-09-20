@@ -74,20 +74,20 @@ jobs:
         include:
           - runner: ubuntu-latest
             platform: linux
-            artifact_suffix: linux-amd64-gnu
-            release_package_name: release-package-amd64-gnu
+            artifact_suffix: linux-amd64-musl
+            release_package_name: release-package-amd64-musl
             arch: amd64
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             binary_source: komf-app
             binary_name: komf-app
             docker_runtime: true
-            cross: false
+            cross: true
           - runner: ubuntu-latest
             platform: linux
-            artifact_suffix: linux-arm64-gnu
-            release_package_name: release-package-arm64-gnu
+            artifact_suffix: linux-arm64-musl
+            release_package_name: release-package-arm64-musl
             arch: arm64
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             binary_source: komf-app
             binary_name: komf-app
             docker_runtime: true
@@ -166,7 +166,7 @@ jobs:
           fi
           tar -czf "$release_artifact" -C dist "$(basename "$release_dir")"
           if [[ "${{ matrix.docker_runtime }}" == 'true' ]]; then
-            docker_artifact_dir="docker-artifacts/linux-gnu/${{ matrix.arch }}"
+            docker_artifact_dir="docker-artifacts/linux-musl/${{ matrix.arch }}"
             rm -rf "$docker_artifact_dir"
             mkdir -p "$docker_artifact_dir"
             cp "$binary_path" "$docker_artifact_dir/komf-app"
@@ -178,7 +178,7 @@ jobs:
           set -euo pipefail
           test -f "dist/komf-${VERSION}-${{ matrix.artifact_suffix }}.tar.gz"
           if [[ "${{ matrix.docker_runtime }}" == 'true' ]]; then
-            test -f "docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app"
+            test -f "docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app"
           fi
 
       - name: Upload release package artifact
@@ -193,7 +193,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: docker-artifacts-${{ matrix.arch }}
-          path: docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          path: docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
           if-no-files-found: error
 
   github_release:
@@ -299,27 +299,27 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-amd64
-          path: komf-rust/docker-artifacts/linux-gnu/amd64
+          path: komf-rust/docker-artifacts/linux-musl/amd64
 
       - name: Download arm64 Docker runtime artifacts
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-arm64
-          path: komf-rust/docker-artifacts/linux-gnu/arm64
+          path: komf-rust/docker-artifacts/linux-musl/arm64
 
       - name: Verify Docker runtime artifacts
         run: |
           set -euo pipefail
-          test -f komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
-          test -f komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+          test -f komf-rust/docker-artifacts/linux-musl/amd64/komf-app
+          test -f komf-rust/docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Strip Docker runtime artifacts
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
-          strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
-          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+          strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/amd64/komf-app
+          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

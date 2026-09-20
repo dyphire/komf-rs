@@ -16,10 +16,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             cross: true
           - arch: arm64
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             cross: true
     defaults:
       run:
@@ -58,16 +58,16 @@ jobs:
           set -euo pipefail
           binary_path="target/${{ matrix.target }}/release/komf-app"
           test -f "$binary_path"
-          mkdir -p docker-artifacts/linux-gnu/${{ matrix.arch }}
-          cp "$binary_path" docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
-          chmod +x docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
-          test -f docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          mkdir -p docker-artifacts/linux-musl/${{ matrix.arch }}
+          cp "$binary_path" docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
+          chmod +x docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
+          test -f docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
 
       - name: Upload Docker runtime artifact
         uses: actions/upload-artifact@v7
         with:
           name: docker-artifacts-${{ matrix.arch }}
-          path: komf-rust/docker-artifacts/linux-gnu/${{ matrix.arch }}/komf-app
+          path: komf-rust/docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
           if-no-files-found: error
 
   docker-test:
@@ -83,27 +83,27 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-amd64
-          path: komf-rust/docker-artifacts/linux-gnu/amd64
+          path: komf-rust/docker-artifacts/linux-musl/amd64
 
       - name: Download arm64 Docker runtime artifacts
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-arm64
-          path: komf-rust/docker-artifacts/linux-gnu/arm64
+          path: komf-rust/docker-artifacts/linux-musl/arm64
 
       - name: Verify Docker runtime artifacts
         run: |
           set -euo pipefail
-          test -f komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
-          test -f komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+          test -f komf-rust/docker-artifacts/linux-musl/amd64/komf-app
+          test -f komf-rust/docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Strip Docker runtime artifacts
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
-          strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/amd64/komf-app
-          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-gnu/arm64/komf-app
+          strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/amd64/komf-app
+          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4

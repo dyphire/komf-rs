@@ -11,7 +11,7 @@ rm -rf /var/lib/apt/lists/*
 mkdir -p /app
 EOF
 WORKDIR /app
-COPY --chmod=755 docker-artifacts/${TARGETOS}-gnu/${TARGETARCH}/komf-app ./komf-app
+COPY --chmod=755 docker-artifacts/${TARGETOS}-musl/${TARGETARCH}/komf-app ./komf-app
 VOLUME /config
 ENV KOMF_CONFIG_DIR="/config"
 ENV LANG='C.UTF-8' LC_ALL='C.UTF-8'
