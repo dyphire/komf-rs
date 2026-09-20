@@ -1949,6 +1949,9 @@ pub struct EHentaiMetadataProvider {
     metadata_mapper: EHentaiMetadataMapper,
     name_matcher: NameSimilarityMatcher,
     fetch_series_covers: bool,
+    /// 自动匹配仅 gid 匹配（Rust 扩展）：true → match 只做 gid 精准搜索，
+    /// 无 gid / gid 无结果都跳过（不回落普通相似度搜索）；links 匹配不受影响。
+    gid_only_match: bool,
     cache: TtlCache<ProviderSeriesId, EHentaiBook>,
 }
 
@@ -2053,6 +2056,7 @@ pub fn create_provider(
         ),
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
+        gid_only_match: config.gid_only_match,
         cache: TtlCache::new(Duration::from_secs(5 * 60)),
     })
 }
@@ -2091,6 +2095,16 @@ impl EHentaiMetadataProvider {
             .iter()
             .any(|local| self.name_matcher.matches(local, &remote_variants))
     }
+}
+
+/// 从标题末尾提取 eHentai gid：`[1234567]` / `(1234567)` / 末尾裸数字（≥5 位纯数字，避免卷号误判）。
+fn extract_gid_from_title(title: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?:\[(\d{5,})\]|\((\d{5,})\)|(\d{5,}))\s*$").ok()?;
+    let caps = re.captures(title.trim_end())?;
+    caps.get(1)
+        .or_else(|| caps.get(2))
+        .or_else(|| caps.get(3))
+        .map(|m| m.as_str().to_string())
 }
 
 #[async_trait::async_trait]
@@ -2199,6 +2213,50 @@ impl MetadataProvider for EHentaiMetadataProvider {
             .unwrap_or_else(|| match_query.series_name.clone());
         // 特殊化（超 Kotlin）：标题含「中国翻訳」→ 优先匹配中文结果；含「英訳」→ 优先英文结果
         let forced = EHentaiMetadataMapper::forced_language_from_search(&search_name);
+
+        // Rust 扩展：从系列标题/目录名（oneshot 额外从唯一书籍标题/文件名）提取末尾 gid
+        // （`[1234567]` / `(1234567)` / 裸数字）→ 用 `gid:xxx` 精准搜索取唯一结果直接匹配。
+        let mut gid_candidates: Vec<String> = vec![match_query.series_name.clone()];
+        if let Some(folder) = &match_query.series_folder {
+            gid_candidates.push(folder.clone());
+        }
+        if match_query.oneshot {
+            if let Some(bq) = &match_query.book_qualifier {
+                gid_candidates.push(bq.name.clone());
+            }
+            if let Some(file_name) = &match_query.book_file_name {
+                gid_candidates.push(file_name.clone());
+            }
+        }
+        if let Some(gid) = gid_candidates.iter().find_map(|c| extract_gid_from_title(c)) {
+            tracing::info!("found gid {} in match title, searching gid:{}", gid, gid);
+            let response = self.client.search_by_title(&format!("gid:{gid}")).await?;
+            if let Some(book) = response
+                .gmetadata
+                .into_iter()
+                .find(|b| b.error.is_none() && b.gid.to_string() == gid)
+            {
+                let cover = if self.fetch_series_covers {
+                    self.client.get_thumbnail(&book).await?
+                } else {
+                    None
+                };
+                let metadata = self
+                    .metadata_mapper
+                    .to_series_metadata(&book, cover, forced);
+                self.cache.put(metadata.id.clone(), book).await;
+                return Ok(Some(metadata));
+            }
+            if self.gid_only_match {
+                // gid 匹配无结果 → 跳过（不回落普通相似度搜索）
+                tracing::info!("gid {} matched nothing, skipping (gidOnlyMatch)", gid);
+                return Ok(None);
+            }
+        } else if self.gid_only_match {
+            // 无 gid → 跳过（不回落普通相似度搜索）
+            tracing::info!("no gid found in match titles, skipping (gidOnlyMatch)");
+            return Ok(None);
+        }
 
         let queries = EHentaiParser::get_search_queries(&search_name);
         let mut raw_results: Vec<EHentaiBook> = Vec::new();
@@ -2525,6 +2583,20 @@ mod tests {
         let qs = EHentaiParser::get_search_queries(" Series ");
         assert_eq!(qs.len(), 1);
         assert_eq!(qs[0], "Series");
+    }
+
+    #[test]
+    fn extract_gid_variants() {
+        assert_eq!(
+            extract_gid_from_title("[Poki no Ie (Pochikin)] Aisareru Shikaku [1234567]").as_deref(),
+            Some("1234567")
+        );
+        assert_eq!(extract_gid_from_title("Title (7654321)").as_deref(), Some("7654321"));
+        assert_eq!(extract_gid_from_title("Title 1234567").as_deref(), Some("1234567"));
+        assert_eq!(extract_gid_from_title("[Circle] Title [Vol.1]").as_deref(), None);
+        assert_eq!(extract_gid_from_title("Title [1]").as_deref(), None);
+        assert_eq!(extract_gid_from_title("Vol. 3").as_deref(), None);
+        assert_eq!(extract_gid_from_title("Title [123]").as_deref(), None);
     }
 
     #[test]

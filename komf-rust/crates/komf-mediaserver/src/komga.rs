@@ -124,6 +124,8 @@ pub struct KomgaBookDto {
     pub series_title: String,
     pub name: String,
     pub url: String,
+    #[serde(default)]
+    pub file_name: String,
     pub number: i32,
     pub oneshot: bool,
     pub metadata: KomgaBookMetadataDto,
@@ -440,6 +442,15 @@ impl KomgaClient {
             series_title: dto.series_title.clone(),
             name: dto.name.clone(),
             url: dto.url.clone(),
+            // komga BookDto.fileName 在部分版本返回空 → 回退从 url（完整文件路径）取 file_stem
+            file_name: if dto.file_name.is_empty() {
+                std::path::Path::new(&dto.url)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            } else {
+                dto.file_name.clone()
+            },
             number: dto.number,
             oneshot: dto.oneshot,
             metadata: MediaServerBookMetadata {

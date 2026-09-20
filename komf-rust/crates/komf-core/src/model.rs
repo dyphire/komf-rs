@@ -354,6 +354,10 @@ pub struct MatchQuery {
     /// Rust 扩展：简繁转换（匹配归一时对 query 与候选双向应用；None = 不转换）。
     /// 作用于 `normalized_series_name` / `normalize_title` / `normalize_titles`。
     pub chinese: Option<std::sync::Arc<crate::util::ChineseConverter>>,
+    /// Rust 扩展：oneshot 系列标志（唯一书籍）——eHentai 匹配时决定是否从书标题/文件名提取 gid。
+    pub oneshot: bool,
+    /// Rust 扩展：第一本书文件名——eHentai 匹配时作为 gid 提取候选。
+    pub book_file_name: Option<String>,
 }
 
 impl MatchQuery {
@@ -371,12 +375,21 @@ impl MatchQuery {
             normalization_regex: None,
             media_type: None,
             chinese: None,
+            oneshot: false,
+            book_file_name: None,
         }
     }
 
     /// 设置匹配归一正则（None = 不归一）。
     pub fn with_normalization(mut self, normalization_regex: Option<String>) -> Self {
         self.normalization_regex = normalization_regex;
+        self
+    }
+
+    /// 设置书籍上下文（Rust 扩展：eHentai gid 提取候选）。
+    pub fn with_book_context(mut self, oneshot: bool, book_file_name: Option<String>) -> Self {
+        self.oneshot = oneshot;
+        self.book_file_name = book_file_name;
         self
     }
 

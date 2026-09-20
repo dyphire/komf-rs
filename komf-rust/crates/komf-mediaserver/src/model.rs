@@ -91,6 +91,8 @@ pub struct MediaServerBook {
     pub series_title: String,
     pub name: String,
     pub url: String,
+    /// 文件名（komga: fileName；kavita: 文件 stem）。eHentai gid 提取候选。
+    pub file_name: String,
     pub number: i32,
     pub oneshot: bool,
     pub metadata: MediaServerBookMetadata,

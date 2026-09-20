@@ -1219,8 +1219,9 @@ fn to_media_server_book(chapter: &KavitaChapter, volume: &KavitaVolume) -> Media
         series_id: MediaServerSeriesId(volume.series_id.to_string()),
         library_id: None,
         series_title: chapter.title.clone(),
-        name: file_name,
+        name: file_name.clone(),
         url: file_path,
+        file_name,
         number,
         oneshot: false,
         metadata: MediaServerBookMetadata {

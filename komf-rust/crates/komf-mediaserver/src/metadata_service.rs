@@ -1175,6 +1175,7 @@ impl MetadataService {
                     series_title: String::new(),
                     name: String::new(),
                     url: String::new(),
+                    file_name: String::new(),
                     number: 0,
                     oneshot: false,
                     metadata: MediaServerBookMetadata {
@@ -1231,6 +1232,11 @@ impl MetadataService {
         } else {
             None
         })
+        // Rust 扩展：oneshot 标志 + 第一本书文件名（eHentai gid 提取候选）
+        .with_book_context(
+            sorted.len() == 1 && first_book.oneshot,
+            (!first_book.file_name.is_empty()).then(|| first_book.file_name.clone()),
+        )
     }
 }
 
@@ -1935,6 +1941,7 @@ mod tests {
             series_title: "oneshot".into(),
             name: "oneshot".into(),
             url: String::new(),
+            file_name: String::new(),
             number: 1,
             oneshot: true,
             metadata: MediaServerBookMetadata {
