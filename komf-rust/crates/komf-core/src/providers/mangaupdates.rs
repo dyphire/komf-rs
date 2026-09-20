@@ -691,6 +691,30 @@ impl MetadataProvider for MangaUpdatesMetadataProvider {
         CoreProviders::MangaUpdates
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        // get_series 返回详情对象（非搜索 SeriesRecord）→ 按同字段自构造（封面/标题/URL）
+        let id = self.resolve_link_id(query)?;
+        let id: u64 = id.parse().ok()?;
+        let series = self.client.get_series(id).await.ok()?;
+        Some(SeriesSearchResult {
+            url: series
+                .url
+                .clone()
+                .or_else(|| Some(format!("https://www.mangaupdates.com/series/{}", id))),
+            image_url: series
+                .image
+                .as_ref()
+                .and_then(|i| i.url.as_ref())
+                .and_then(|u| u.original.clone()),
+            title: series.title,
+            provider: CoreProviders::MangaUpdates.as_str().to_string(),
+            result_id: id.to_string(),
+            media_type: None,
+            language: None,
+            nsfw: None,
+        })
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

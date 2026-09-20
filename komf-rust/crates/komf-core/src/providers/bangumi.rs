@@ -1817,6 +1817,36 @@ impl MetadataProvider for BangumiMetadataProvider {
         CoreProviders::Bangumi
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let id: u64 = id.parse().ok()?;
+        // Archive 离线优先（与 get_series_metadata 一致）：元数据离线 + 封面在线补（archive 无图）。
+        if let Some(archive) = &self.archive {
+            if let Some(store) = archive.get() {
+                if let Some(v) = store.get_by_id(id) {
+                    let arch: ArchiveSubject = serde_json::from_value(v).ok()?;
+                    if arch.id != 0 {
+                        let mut subj = arch.to_bangumi_subject();
+                        // 离线无图：在线补封面 URL（仅 URL 不下载；与普通搜索离线结果一致，
+                        // 不受 seriesMetadata.thumbnail 配置限制）。
+                        if subj.image.is_none() && subj.images.is_none() {
+                            if let Ok(online) = self.client.get(id).await {
+                                if online.image.is_some() || online.images.is_some() {
+                                    subj.image = online.image;
+                                    subj.images = online.images;
+                                }
+                            }
+                        }
+                        return Some(self.metadata_mapper.to_series_search_result(&subj));
+                    }
+                }
+            }
+        }
+        // 在线回退
+        let subj = self.client.get(id).await.ok()?;
+        Some(self.metadata_mapper.to_series_search_result(&subj))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

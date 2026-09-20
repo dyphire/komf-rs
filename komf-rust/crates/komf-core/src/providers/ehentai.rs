@@ -2119,6 +2119,12 @@ impl MetadataProvider for EHentaiMetadataProvider {
         CoreProviders::EHentai
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let book = self.get_book_or_throw(&ProviderSeriesId(id)).await.ok()?;
+        Some(self.metadata_mapper.to_series_search_result(&book, query))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

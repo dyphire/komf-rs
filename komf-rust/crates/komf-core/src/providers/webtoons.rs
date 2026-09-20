@@ -986,6 +986,31 @@ impl MetadataProvider for WebtoonsMetadataProvider {
         CoreProviders::Webtoons
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let series_id = ProviderSeriesId(id.clone());
+        let series = self
+            .series_cache
+            .get_or_load(series_id.clone(), || async move {
+                self.client.get_series_with_chapters(&WebtoonsSeriesId(id)).await
+            })
+            .await
+            .ok()?;
+        Some(SeriesSearchResult {
+            url: Some(query.trim().to_string()),
+            image_url: series
+                .thumbnail_url
+                .as_ref()
+                .map(|u| remove_query_param(u, "type")),
+            title: series.title.clone(),
+            provider: CoreProviders::Webtoons.as_str().to_string(),
+            result_id: series_id.0,
+            media_type: None,
+            language: None,
+            nsfw: None,
+        })
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

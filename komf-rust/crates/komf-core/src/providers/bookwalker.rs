@@ -1013,6 +1013,12 @@ impl MetadataProvider for BookWalkerMetadataProvider {
         CoreProviders::BookWalker
     }
 
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let series = self.repository.get_series(&id).ok()?;
+        Some(self.metadata_mapper.to_series_search_result(&series))
+    }
+
     async fn get_series_metadata(
         &self,
         series_id: &ProviderSeriesId,

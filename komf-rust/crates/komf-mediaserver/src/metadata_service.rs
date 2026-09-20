@@ -146,33 +146,10 @@ impl MetadataService {
             let name = name.clone();
             let provider_ref: Arc<dyn MetadataProvider> = provider;
             tasks.push(tokio::spawn(async move {
-                // Rust 扩展：输入为 provider 网页链接时直接按 id 获取（跳过站点搜索）
-                if let Some(id) = provider_ref.resolve_link_id(&name) {
-                    match provider_ref
-                        .get_series_metadata(&ProviderSeriesId(id.clone()))
-                        .await
-                    {
-                        Ok(meta) => {
-                            let title = meta
-                                .metadata
-                                .titles
-                                .first()
-                                .map(|t| t.name.clone())
-                                .or_else(|| meta.metadata.title.as_ref().map(|t| t.name.clone()))
-                                .unwrap_or_else(|| name.clone());
-                            return vec![SeriesSearchResult {
-                                url: Some(name.trim().to_string()),
-                                image_url: None,
-                                title,
-                                provider: provider_ref.provider_name().as_str().to_string(),
-                                result_id: id,
-                                media_type: None,
-                                language: meta.metadata.language.clone(),
-                                nsfw: None,
-                            }];
-                        }
-                        Err(_) => {}
-                    }
+                // Rust 扩展：输入为 provider 网页链接时直接按 id 获取（跳过站点搜索）。
+                // 搜索结果由 provider 自行构造（封面/标题选择/mediaType/语言/nsfw 复用其搜索显示逻辑）。
+                if let Some(result) = provider_ref.resolve_link_search_result(&name).await {
+                    return vec![result];
                 }
                 match provider_ref.search_series(&name, 5, Some(library_type)).await {
                     Ok(results) => results,

@@ -142,6 +142,35 @@ pub trait MetadataProvider: Send + Sync {
     fn resolve_link_id(&self, _query: &str) -> Option<String> {
         None
     }
+
+    /// 链接命中时构造搜索结果（Rust 扩展：搜索框提交 provider 链接时显示用）。
+    /// 默认实现：resolve_link_id → get_series_metadata → 通用模板（titles.first，
+    /// 无封面 URL / mediaType）。各 provider 可重写复用其搜索结果显示逻辑
+    /// （封面 URL、mediaType、标题选择、语言、nsfw）。
+    async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
+        let id = self.resolve_link_id(query)?;
+        let meta = self
+            .get_series_metadata(&ProviderSeriesId(id.clone()))
+            .await
+            .ok()?;
+        let title = meta
+            .metadata
+            .titles
+            .first()
+            .map(|t| t.name.clone())
+            .or_else(|| meta.metadata.title.as_ref().map(|t| t.name.clone()))
+            .unwrap_or_else(|| query.to_string());
+        Some(SeriesSearchResult {
+            url: Some(query.trim().to_string()),
+            image_url: None,
+            title,
+            provider: self.provider_name().as_str().to_string(),
+            result_id: id,
+            media_type: None,
+            language: meta.metadata.language.clone(),
+            nsfw: None,
+        })
+    }
 }
 
 /// provider 错误。
