@@ -539,6 +539,7 @@ impl MangaUpdatesMetadataMapper {
             result_id: record.series_id.to_string(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 }
@@ -680,6 +681,12 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for MangaUpdatesMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"mangaupdates\.com/(?:series/(\d+)|series\.html\?id=(\d+))").ok()?;
+        re.captures(query)
+            .and_then(|c| c.get(1).or_else(|| c.get(2)).map(|m| m.as_str().to_string()))
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::MangaUpdates
     }

@@ -750,6 +750,7 @@ impl WebtoonsMetadataMapper {
                 result_id: result_id.map(|id| id.0).unwrap_or_default(),
                 media_type: None,
                 language: None,
+                nsfw: None,
             });
         }
         for title in &results.1 {
@@ -761,6 +762,7 @@ impl WebtoonsMetadataMapper {
                 result_id: title.get_canvas_id().0,
                 media_type: None,
                 language: None,
+                nsfw: None,
             });
         }
         out
@@ -973,6 +975,13 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for WebtoonsMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        // series_id = URL path+query（对齐 WebtoonsSeriesId 的 encoded_path_and_query）
+        let re = regex::Regex::new(r"webtoons\.com([^\s]+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Webtoons
     }

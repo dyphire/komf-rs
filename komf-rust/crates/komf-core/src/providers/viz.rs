@@ -694,6 +694,7 @@ impl VizMetadataMapper {
             result_id: book.id.0.clone(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 
@@ -776,6 +777,12 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for VizMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"viz\.com/manga-books/manga/([^/?#]+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Viz
     }

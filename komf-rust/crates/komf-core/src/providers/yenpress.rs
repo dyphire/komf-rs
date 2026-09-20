@@ -727,6 +727,7 @@ impl YenPressMetadataMapper {
             image_url: result.image.as_ref().map(|i| i.raw.clone()),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 }
@@ -832,6 +833,12 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for YenPressMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"yenpress\.com/series/([^/?#]+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::YenPress
     }

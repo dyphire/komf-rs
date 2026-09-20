@@ -571,7 +571,7 @@ impl BangumiMetadataMapper {
         };
 
         // Kotlin books：bookRelations（provider 已过滤 type==BOOK && relation=="单行本"）
-        // 排序：单行本先按标题提取的卷号排，无法提取 / 卷号相同回退 id 升序
+        // js 排序：单行本先按标题提取的卷号排，无法提取 / 卷号相同回退 id 升序
         //（离线 get_related 与在线 API 均按此统一，消除对返回顺序的隐式依赖）
         let mut relations: Vec<&BangumiSubjectRelation> = book_relations.iter().collect();
         relations.sort_by(|a, b| {
@@ -590,7 +590,7 @@ impl BangumiMetadataMapper {
                 .enumerate()
                 .map(|(i, rel)| SeriesBook {
                     id: ProviderBookId(rel.id.to_string()),
-                    // extractVolumeNumber(...) || (index + 1)——标题提取失败回退排序位置
+                    // js：extractVolumeNumber(...) || (index + 1)——标题提取失败回退排序位置
                     number: get_book_number(&rel.name)
                         .or_else(|| Some(crate::model::BookRange::single((i + 1) as f64))),
                     name: Some(rel.name.clone()),
@@ -625,6 +625,7 @@ impl BangumiMetadataMapper {
             result_id: subject.id.to_string(),
             media_type: platform_media_type(subject.platform.as_deref()),
             language: None,
+            nsfw: subject.nsfw,
         }
     }
 
@@ -1806,6 +1807,12 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for BangumiMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"(?:bgm\.tv|bangumi\.tv|chii\.in)/subject/(\d+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Bangumi
     }

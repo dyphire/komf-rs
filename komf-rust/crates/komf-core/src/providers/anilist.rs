@@ -471,6 +471,7 @@ impl AniListMetadataMapper {
             result_id: media.id.to_string(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 }
@@ -641,6 +642,12 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for AniListMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"anilist\.co/(?:manga|anime)/(\d+)").ok()?;
+        re.captures(query)
+            .map(|c| c.get(1).unwrap().as_str().to_string())
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Anilist
     }

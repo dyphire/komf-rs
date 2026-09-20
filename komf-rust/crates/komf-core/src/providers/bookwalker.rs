@@ -850,6 +850,7 @@ impl BookWalkerMetadataMapper {
             result_id: series.id.clone(),
             media_type: None,
             language: None,
+            nsfw: None,
         }
     }
 }
@@ -1000,6 +1001,14 @@ impl BookWalkerMetadataProvider {
 
 #[async_trait::async_trait]
 impl MetadataProvider for BookWalkerMetadataProvider {
+
+    fn resolve_link_id(&self, query: &str) -> Option<String> {
+        let re = regex::Regex::new(r"(?:bookwalker\.com\.tw|bookwalker\.jp)/series/([^/?#]+)").ok()?;
+        re.captures(query).map(|c| {
+            let id = c.get(1).unwrap().as_str();
+            if id.starts_with("CNT_") { id.to_string() } else { format!("CNT_{id}") }
+        })
+    }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::BookWalker
     }

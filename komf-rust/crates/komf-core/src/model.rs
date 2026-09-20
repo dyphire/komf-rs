@@ -331,6 +331,10 @@ pub struct SeriesSearchResult {
     /// originalLanguage 填充；无可靠来源的 provider 为 None）。Kotlin 无此字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// 搜索结果显示用：是否成人内容（Bangumi nsfw 字段、eHentai 分类推导；
+    /// 无此概念的 provider 为 None）。Rust 扩展：脚本区分/显示用。Kotlin 无此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsfw: Option<bool>,
 }
 
 /// 匹配查询 —— 对应 `MatchQuery.kt`。
