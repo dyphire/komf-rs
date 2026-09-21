@@ -443,6 +443,8 @@ struct ArchiveMeta {
 fn meta_read(meta: &Path) -> ArchiveMeta {
     std::fs::read_to_string(meta)
         .ok()
+        // 容忍 UTF-8 BOM（外部工具/Windows 编辑器可能写入；serde 不解析 BOM 字符）
+        .map(|raw| raw.trim_start_matches('\u{feff}').to_string())
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
 }
@@ -482,43 +484,103 @@ async fn fetch_remote_stamp(
 }
 
 /// 下载 zstd → 流式解压到 db_path（先写 .tmp 再 rename）；校验 SQLite 有效后才替换。
+/// 支持断点续传：`.zstd.tmp` 已存在时用 `Range: bytes=N-` 续传剩余部分
+/// （GitHub release asset 支持 Range；大文件中断后重试只续传剩余字节，不重下 1GB+）。
 async fn download_and_extract(
     client: &reqwest::Client,
     url: &str,
     db_path: &Path,
 ) -> Result<(), ProviderError> {
-    let resp = client.get(url).send().await?;
+    use std::io::Write;
+    let zst_tmp = db_path.with_extension("db.zstd.tmp");
+    let db_tmp = db_path.with_extension("db.tmp");
+    let existing = std::fs::metadata(&zst_tmp).map(|m| m.len()).unwrap_or(0);
+    let mut need_download = true;
+    let mut req = client.get(url);
+    if existing > 0 {
+        // 已有部分文件：HEAD 拿远端大小，已完整则跳过下载直接解压（避免 416 续传死循环）
+        if let Some(total) = fetch_content_length(client, url).await? {
+            if existing >= total {
+                need_download = false;
+            }
+        }
+        if need_download {
+            req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+        }
+    }
+    let resp = req.send().await?;
     if !resp.status().is_success() {
         return Err(ProviderError::message(format!(
             "ehentai archive download HTTP {}",
             resp.status()
         )));
     }
-    use std::io::Write;
-    let zst_tmp = db_path.with_extension("db.zstd.tmp");
-    let db_tmp = db_path.with_extension("db.tmp");
-    // ① 流式写压缩文件（1GB+，不能整包载入内存）
-    {
-        let mut out = std::fs::File::create(&zst_tmp)
-            .map_err(|e| ProviderError::message(format!("ehentai archive tmp write failed: {e}")))?;
+    let resumed = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    // ① 流式写压缩文件（1GB+，不能整包载入内存；206 续传时追加写，200 从头覆盖）
+    if need_download {
+        let mut out = if resumed {
+            std::fs::OpenOptions::new().append(true).open(&zst_tmp)
+        } else {
+            std::fs::File::create(&zst_tmp)
+        }
+        .map_err(|e| ProviderError::message(format!("ehentai archive tmp write failed: {e}")))?;
+        // Content-Length / Content-Range 在消费流之前读取（bytes_stream 会 move resp）
+        let content_length = resp.content_length();
+        let content_range_total = if resumed {
+            content_range_total(&resp)
+        } else {
+            None
+        };
+        let mut written: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            out.write_all(&chunk?)
+            let c = chunk.map_err(|e| {
+                ProviderError::message(format!("ehentai archive download interrupted: {e}"))
+            })?;
+            out.write_all(&c)
                 .map_err(|e| ProviderError::message(format!("ehentai archive tmp write failed: {e}")))?;
+            written += c.len() as u64;
         }
         out.flush()
             .map_err(|e| ProviderError::message(format!("ehentai archive tmp flush failed: {e}")))?;
+        // 完整性校验：
+        // 200（全量）：written == Content-Length
+        // 206（续传）：Content-Length 是剩余字节，完整大小 = existing + written，
+        //   与 Content-Range 头的 total（远端全量）比较；解析不到 total 时跳过（解压兜底）
+        if resumed {
+            if let Some(total) = content_range_total {
+                if existing + written != total {
+                    return Err(ProviderError::message(format!(
+                        "ehentai archive download incomplete ({} + {} != {})",
+                        existing, written, total
+                    )));
+                }
+            }
+        } else if let Some(cl) = content_length {
+            if written != cl {
+                return Err(ProviderError::message(format!(
+                    "ehentai archive download incomplete ({} != {})",
+                    written, cl
+                )));
+            }
+        }
     }
-    // ② zstd 流式解压
+    // ② zstd 流式解压；解压失败说明压缩缓存损坏（大小一致也可能内容损坏），
+    //    删除 zst_tmp 让重试从头下载，避免反复续传坏数据
     {
         let input = std::fs::File::open(&zst_tmp)
             .map_err(|e| ProviderError::message(format!("ehentai archive tmp open failed: {e}")))?;
         let mut decoder = zstd::stream::read::Decoder::new(input)
-            .map_err(|e| ProviderError::message(format!("ehentai archive zstd decode failed: {e}")))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&zst_tmp);
+                ProviderError::message(format!("ehentai archive zstd decode failed: {e}"))
+            })?;
         let mut out = std::fs::File::create(&db_tmp)
             .map_err(|e| ProviderError::message(format!("ehentai archive tmp write failed: {e}")))?;
-        std::io::copy(&mut decoder, &mut out)
-            .map_err(|e| ProviderError::message(format!("ehentai archive extract failed: {e}")))?;
+        std::io::copy(&mut decoder, &mut out).map_err(|e| {
+            let _ = std::fs::remove_file(&zst_tmp);
+            ProviderError::message(format!("ehentai archive extract failed: {e}"))
+        })?;
         out.flush()
             .map_err(|e| ProviderError::message(format!("ehentai archive tmp flush failed: {e}")))?;
     }
@@ -533,11 +595,106 @@ async fn download_and_extract(
         ));
     }
     drop(store);
-    // ④ 原子替换
-    std::fs::rename(&db_tmp, db_path).map_err(|e| {
-        ProviderError::message(format!("ehentai archive db rename failed: {e}"))
-    })?;
+    // ④ db.tmp 就绪：rename 由调用方 commit_archive 执行
+    //    （Windows 下目标 db 可能被现有连接占用，需先释放连接再 rename）
     Ok(())
+}
+
+/// 解析 `Content-Range: bytes start-end/total` 的 total（远端全量大小）。
+fn content_range_total(resp: &reqwest::Response) -> Option<u64> {
+    let v = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?;
+    let total = v.rsplit('/').next()?.trim();
+    total.parse().ok()
+}
+
+/// HEAD 请求拿远端 Content-Length（用于续传前判定已完整/计算剩余）。
+async fn fetch_content_length(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Option<u64>, ProviderError> {
+    let resp = client.head(url).send().await?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    Ok(resp.content_length())
+}
+
+/// 提交已下载并校验的 db.tmp：
+/// 1) 释放旧 store 连接（Windows 下 rename 目标若被打开会拒绝访问）；
+/// 2) rename 短重试（最多 5 次 × 500ms，等待并发搜索请求释放 Arc）；
+/// 3) 重开新 store 并重新入槽（就绪）。失败返回 false（调用方走快速重试）。
+async fn commit_archive(
+    store: &Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>>,
+    ready: &Arc<AtomicBool>,
+    current: &mut Option<Arc<EHentaiArchiveStore>>,
+    db_tmp: &Path,
+    db_path: &Path,
+    idle_secs: u64,
+) -> bool {
+    // 释放旧连接（Arc 计数归零即关闭 SQLite 句柄）；提交期间搜索短暂回退在线
+    if let Some(old) = store.write().unwrap().take() {
+        drop(old);
+    }
+    ready.store(false, Ordering::SeqCst);
+    *current = None;
+    let mut renamed = false;
+    for _ in 0..5 {
+        if std::fs::rename(db_tmp, db_path).is_ok() {
+            renamed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    if !renamed {
+        let _ = std::fs::remove_file(db_tmp);
+        tracing::warn!("ehentai archive db rename failed; retrying later");
+        return false;
+    }
+    if let Some(s) = EHentaiArchiveStore::open(db_path, idle_secs)
+        .ok()
+        .filter(|s| s.validate())
+    {
+        let s = Arc::new(s);
+        *store.write().unwrap() = Some(s.clone());
+        *current = Some(s);
+        ready.store(true, Ordering::SeqCst);
+        true
+    } else {
+        tracing::warn!("ehentai archive db invalid after commit");
+        false
+    }
+}
+
+/// 下载带指数退避重试（瞬时网络抖动/中断场景）：首次尝试 + 3 次重试（5s/30s/120s）。
+/// 断点续传保证重试只续传剩余字节，不重新下载整个文件。
+async fn download_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    db_path: &Path,
+) -> Result<(), ProviderError> {
+    const DELAYS: [u64; 3] = [5, 30, 120];
+    let mut attempt = 0u32;
+    loop {
+        match download_and_extract(client, url, db_path).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt as usize >= DELAYS.len() {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "ehentai archive download attempt {} failed: {e}; retrying in {}s",
+                    attempt + 1,
+                    DELAYS[attempt as usize]
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(DELAYS[attempt as usize])).await;
+                attempt += 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -610,29 +767,35 @@ impl EHentaiArchiveService {
                 ensure_fts(&store, &fts, &db_path, &meta);
             }
             let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
+            // 下载失败后快速重试（而非等满 interval）：15 分钟
+            let retry_delay = std::time::Duration::from_secs(15 * 60);
             loop {
+                let mut ok = true;
                 if current.is_none() {
-                    // 首次下载
-                    match download_and_extract(&http_client, &url, &db_path).await {
-                        Ok(()) => match EHentaiArchiveStore::open(&db_path, idle_secs)
-                            .ok()
-                            .filter(|s| s.validate())
-                        {
-                            Some(s) => {
-                                let s = Arc::new(s);
-                                *store.write().unwrap() = Some(s.clone());
-                                current = Some(s);
-                                ready.store(true, Ordering::SeqCst);
+                    // 首次下载：下载+解压 → commit（rename+重开）
+                    match download_with_retry(&http_client, &url, &db_path).await {
+                        Ok(()) => {
+                            let db_tmp = db_path.with_extension("db.tmp");
+                            if commit_archive(
+                                &store,
+                                &ready,
+                                &mut current,
+                                &db_tmp,
+                                &db_path,
+                                idle_secs,
+                            )
+                            .await
+                            {
                                 tracing::info!("ehentai archive ready (downloaded)");
                                 ensure_fts(&store, &fts, &db_path, &meta);
+                            } else {
+                                ok = false;
                             }
-                            None => {
-                                tracing::warn!("ehentai archive db invalid after download");
-                            }
-                        },
+                        }
                         Err(e) => {
+                            ok = false;
                             tracing::warn!(
-                                "ehentai archive download failed: {e}; falling back to online"
+                                "ehentai archive download failed after retries: {e}; falling back to online"
                             );
                         }
                     }
@@ -643,32 +806,42 @@ impl EHentaiArchiveService {
                             let local = meta_read(&meta).asset_stamp;
                             if local.as_deref() != Some(stamp.as_str()) {
                                 tracing::info!("ehentai archive update available, downloading");
-                                match download_and_extract(&http_client, &url, &db_path).await {
+                                match download_with_retry(&http_client, &url, &db_path).await {
                                     Ok(()) => {
-                                        if let Some(s) =
-                                            EHentaiArchiveStore::open(&db_path, idle_secs)
-                                                .ok()
-                                                .filter(|s| s.validate())
+                                        let db_tmp = db_path.with_extension("db.tmp");
+                                        if commit_archive(
+                                            &store,
+                                            &ready,
+                                            &mut current,
+                                            &db_tmp,
+                                            &db_path,
+                                            idle_secs,
+                                        )
+                                        .await
                                         {
-                                            let s = Arc::new(s);
-                                            *store.write().unwrap() = Some(s.clone());
-                                            current = Some(s);
                                             meta_write(&meta, Some(&stamp), None, None);
                                             tracing::info!("ehentai archive updated");
                                             ensure_fts(&store, &fts, &db_path, &meta);
+                                        } else {
+                                            ok = false;
                                         }
                                     }
                                     Err(e) => {
+                                        ok = false;
                                         tracing::warn!("ehentai archive update failed: {e}");
                                     }
                                 }
                             }
                         }
                         Ok(None) => {}
-                        Err(e) => tracing::warn!("ehentai archive update check failed: {e}"),
+                        Err(e) => {
+                            ok = false;
+                            tracing::warn!("ehentai archive update check failed: {e}");
+                        }
                     }
                 }
-                tokio::time::sleep(interval).await;
+                // 失败后短间隔快速重试；成功恢复正常 interval
+                tokio::time::sleep(if ok { interval } else { retry_delay }).await;
             }
         });
         svc

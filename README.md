@@ -183,4 +183,5 @@ The userscript let you configure komf and identify series directly from the Komg
 ## Acknowledgements
 
 - [EhTagTranslation/Database](https://github.com/EhTagTranslation/Database) — tag translation database used by the eHentai provider
+- [URenko/e-hentai-db](https://github.com/URenko/e-hentai-db) — offline SQLite dump (nightly) used by the eHentai provider offline archive
 - [bangumi/Archive](https://github.com/bangumi/Archive) — offline data source used by the Bangumi provider offline archive

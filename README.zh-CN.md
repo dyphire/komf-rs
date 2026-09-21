@@ -183,4 +183,5 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 ## 鸣谢
 
 - [EhTagTranslation/Database](https://github.com/EhTagTranslation/Database) —— eHentai provider 使用的标签翻译数据库
+- [URenko/e-hentai-db](https://github.com/URenko/e-hentai-db) — eHentai provider 的离线 SQLite 转储（nightly） 离线归档数据源
 - [bangumi/Archive](https://github.com/bangumi/Archive) —— Bangumi provider 离线数据源

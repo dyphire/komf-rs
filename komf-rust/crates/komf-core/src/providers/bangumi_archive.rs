@@ -1230,7 +1230,10 @@ impl BangumiArchiveService {
             }
             // 首次构建 / 周期检查
             let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
+            // 下载/构建失败后快速重试（而非等满 interval）：15 分钟
+            let retry_delay = std::time::Duration::from_secs(15 * 60);
             loop {
+                let mut ok = true;
                 if current.is_none() {
                     match download_and_rebuild(
                         &http_client,
@@ -1251,6 +1254,7 @@ impl BangumiArchiveService {
                             tracing::info!("bangumi archive ready (rebuilt)");
                         }
                         Err(e) => {
+                            ok = false;
                             tracing::warn!("bangumi archive build failed: {e}; falling back to online");
                         }
                     }
@@ -1271,10 +1275,14 @@ impl BangumiArchiveService {
                             tracing::info!("bangumi archive updated");
                         }
                         Ok(None) => {}
-                        Err(e) => tracing::warn!("bangumi archive update check failed: {e}"),
+                        Err(e) => {
+                            ok = false;
+                            tracing::warn!("bangumi archive update check failed: {e}");
+                        }
                     }
                 }
-                tokio::time::sleep(interval).await;
+                // 失败后短间隔快速重试；成功恢复正常 interval
+                tokio::time::sleep(if ok { interval } else { retry_delay }).await;
             }
         });
         svc
@@ -1343,6 +1351,90 @@ fn remote_after(remote: &str, local: &str) -> Option<bool> {
     Some(parse(remote)? > parse(local)?)
 }
 
+/// 下载 zip（支持断点续传）：`.tmp` 已存在时 Range 续传；GitHub release asset 支持 Range。
+/// 大小校验用 expected_size（GitHub API 的 size，即完整大小）：
+/// 206 续传时完整大小 = 已有 + 本次写入；200 全量时 = 本次写入。
+async fn download_zip(
+    dl: &reqwest::Client,
+    url: &str,
+    tmp_zip: &Path,
+    expected_size: Option<u64>,
+) -> Result<(), ProviderError> {
+    use std::io::Write;
+    let existing = std::fs::metadata(tmp_zip).map(|m| m.len()).unwrap_or(0);
+    let mut req = dl.get(url);
+    if existing > 0 {
+        req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+    }
+    let response = req.send().await?;
+    if !response.status().is_success() {
+        return Err(ProviderError::Status(
+            CoreProviders::Bangumi,
+            response.status(),
+            response.text().await.unwrap_or_default(),
+        ));
+    }
+    let resumed = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let mut file = std::io::BufWriter::new(if resumed {
+        std::fs::OpenOptions::new().append(true).open(tmp_zip)
+    } else {
+        std::fs::File::create(tmp_zip)
+    }
+    .map_err(|e| ProviderError::message(format!("archive create: {e}")))?);
+    let mut stream = response.bytes_stream();
+    let mut written = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            ProviderError::message(format!("archive body interrupted: {e}"))
+        })?;
+        written += chunk.len() as u64;
+        file.write_all(&chunk)
+            .map_err(|e| ProviderError::message(format!("archive write: {e}")))?;
+    }
+    file.flush()
+        .map_err(|e| ProviderError::message(format!("archive flush: {e}")))?;
+    // 大小校验：206 时 Content-Length 是剩余字节，用 expected_size（完整大小）判定
+    if let Some(size) = expected_size {
+        let base = if resumed { existing } else { 0 };
+        if base + written != size {
+            let _ = std::fs::remove_file(tmp_zip);
+            return Err(ProviderError::message(format!(
+                "archive size mismatch: {} != {size}",
+                base + written
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// zip 下载指数退避重试：首次 + 3 次（5s/30s/120s）；中断续传只补剩余字节。
+async fn download_zip_with_retry(
+    dl: &reqwest::Client,
+    url: &str,
+    tmp_zip: &Path,
+    expected_size: Option<u64>,
+) -> Result<(), ProviderError> {
+    const DELAYS: [u64; 3] = [5, 30, 120];
+    let mut attempt = 0u32;
+    loop {
+        match download_zip(dl, url, tmp_zip, expected_size).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt as usize >= DELAYS.len() {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "bangumi archive download attempt {} failed: {e}; retrying in {}s",
+                    attempt + 1,
+                    DELAYS[attempt as usize]
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(DELAYS[attempt as usize])).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// 下载 zip → 解压 → 全量重建 → 返回新 store。
 async fn download_and_rebuild(
     http_client: &reqwest::Client,
@@ -1367,48 +1459,13 @@ async fn download_and_rebuild(
         .unwrap_or(false);
     if !cached_ok {
         tracing::info!("downloading bangumi archive ({url})");
-        // 大文件：独立长超时 client（全局 client 超时不适合），流式写盘防内存峰值
         let dl = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3600))
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| ProviderError::message(format!("archive client: {e}")))?;
-        let response = dl
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ProviderError::message(format!("archive download: {e}")))?;
-        if !response.status().is_success() {
-            return Err(ProviderError::Status(
-                CoreProviders::Bangumi,
-                response.status(),
-                response.text().await.unwrap_or_default(),
-            ));
-        }
         let tmp_zip = zip_path.with_extension("tmp");
-        let mut file = std::io::BufWriter::new(
-            std::fs::File::create(&tmp_zip)
-                .map_err(|e| ProviderError::message(format!("archive create: {e}")))?,
-        );
-        let mut stream = response.bytes_stream();
-        let mut downloaded = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| ProviderError::message(format!("archive body: {e}")))?;
-            downloaded += chunk.len() as u64;
-            std::io::Write::write_all(&mut file, &chunk)
-                .map_err(|e| ProviderError::message(format!("archive write: {e}")))?;
-        }
-        std::io::Write::flush(&mut file)
-            .map_err(|e| ProviderError::message(format!("archive flush: {e}")))?;
-        if let Some(size) = expected_size {
-            if downloaded != size {
-                let _ = std::fs::remove_file(&tmp_zip);
-                return Err(ProviderError::message(format!(
-                    "archive size mismatch: {downloaded} != {size}"
-                )));
-            }
-        }
+        download_zip_with_retry(&dl, &url, &tmp_zip, expected_size).await?;
         std::fs::rename(&tmp_zip, &zip_path)
             .map_err(|e| ProviderError::message(format!("archive move: {e}")))?;
     } else {
@@ -1417,8 +1474,11 @@ async fn download_and_rebuild(
     // 解压（zip crate 读取时自动校验 CRC）
     let zip_file = std::fs::File::open(&zip_path)
         .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
-    let mut archive = zip::ZipArchive::new(zip_file)
-        .map_err(|e| ProviderError::message(format!("archive zip: {e}")))?;
+    let mut archive = zip::ZipArchive::new(zip_file).map_err(|e| {
+        // zip 缓存损坏（size 一致也可能 CRC 失败）：删除缓存让下次重试重下
+        let _ = std::fs::remove_file(&zip_path);
+        ProviderError::message(format!("archive zip: {e}"))
+    })?;
     let mut got_subjects = false;
     let mut got_relations = false;
     let mut got_persons = false;
