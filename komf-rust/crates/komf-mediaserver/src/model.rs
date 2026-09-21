@@ -25,6 +25,8 @@ pub struct MediaServerSeries {
     pub books_metadata_links: Vec<WebLink>,
     pub url: String,
     pub deleted: bool,
+    /// oneshot 单本系列（Komga SeriesDto.oneshot；mylar 导出文件名区分用）。
+    pub oneshot: bool,
 }
 
 #[derive(Debug, Clone, Default)]

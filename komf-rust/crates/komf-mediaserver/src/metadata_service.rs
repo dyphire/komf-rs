@@ -1910,6 +1910,7 @@ mod tests {
             metadata: MediaServerSeriesMetadata::default(),
             url: String::new(),
             deleted: false,
+            oneshot: true,
         };
         let oneshot_book = MediaServerBook {
             id: MediaServerBookId("b".into()),

@@ -86,6 +86,8 @@ fn build_state(
         http_client.clone(),
         notifications_module.discord_webhook_service.clone(),
         notifications_module.apprise_service.clone(),
+        // mylar ${configDir} 占位符基准（=配置目录，work_dir 语义：目录/文件父目录/cwd）
+        Some(work_dir.clone()),
     );
     let manga_baka_db_downloader = Arc::new(MangaBakaDbDownloader::new(
         db_work_dir,

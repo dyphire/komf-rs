@@ -81,6 +81,11 @@ pub struct MetadataProcessingConfigDto {
     pub update_modes: Option<Vec<KomfUpdateMode>>,
     /// 对应 Kotlin `MetadataProcessingConfigUpdateRequest.overrideComicInfo`（PATCH 可更新）。
     pub override_comic_info: Option<bool>,
+    /// Rust 扩展：mylar series.json 导出时同时下载系列封面（默认 false）。
+    pub mylar_covers: Option<bool>,
+    /// Rust 扩展：mylar 导出根目录（对齐 py --output）。三态：缺省=保持；null=回系列原目录；有值=设置。
+    #[serde(default, deserialize_with = "deserialize_tri_state")]
+    pub mylar_output_dir: Option<Option<String>>,
     pub post_processing: Option<MetadataPostProcessingConfigDto>,
     /// 搜索标题提取配置（Rust 扩展，Kotlin 无）。GET 输出；PATCH 接收时合并。
     pub search_title_extraction: Option<SearchTitleExtractionConfigDto>,

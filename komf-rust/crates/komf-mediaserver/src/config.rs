@@ -98,6 +98,12 @@ pub struct MetadataProcessingConfig {
     pub lock_covers: bool,
     pub update_modes: Vec<UpdateMode>,
     pub override_comic_info: bool,
+    /// Rust 扩展：UpdateMode::MylarSeriesJson 导出 series.json 时同时下载系列封面
+    /// （cover.jpg / <系列名>.cover.jpg，已存在跳过）。默认 false（对齐 py 脚本 --save-cover 需显式开启）。
+    pub mylar_covers: bool,
+    /// Rust 扩展：mylar series.json 导出根目录（对齐 py --output）。null = 系列原目录。
+    /// 库根目录由内部从媒体服务器 API 自动获取（get_library().roots），用于还原相对目录结构。
+    pub mylar_output_dir: Option<String>,
     pub post_processing: MetadataPostProcessingConfig,
     /// 搜索标题提取（括号式标题提取，可配置化）
     /// enabled 默认 false = 行为不变；除 symbolNormalizeRegex 外均无默认正则，
@@ -232,6 +238,8 @@ impl Default for MetadataProcessingConfig {
             lock_covers: true,
             update_modes: vec![UpdateMode::Api],
             override_comic_info: false,
+            mylar_covers: false,
+            mylar_output_dir: None,
             post_processing: MetadataPostProcessingConfig::default(),
             search_title_extraction: SearchTitleExtractionConfig::default(),
             failed_match_collection_name: None,

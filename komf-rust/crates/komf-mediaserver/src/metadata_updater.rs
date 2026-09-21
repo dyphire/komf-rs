@@ -1,6 +1,7 @@
 //! 元数据更新器 —— 对应 `MetadataUpdater.kt`。
 use crate::client::{MediaServerClient, MediaServerError};
 use crate::comic_info::{comic_info_from_metadata, series_comic_info, ComicInfoWriter};
+use crate::mylar::{mylar_series_json_from_metadata, write_series_json};
 use crate::jobs::{BookThumbnail, KomfJobsRepository, SeriesThumbnail};
 use crate::metadata_mapper::{authors_to_comic_info_fields, MetadataMapper};
 use crate::metadata_post_processor::MetadataPostProcessor;
@@ -16,6 +17,14 @@ pub struct MetadataUpdater {
     metadata_update_mapper: MetadataMapper,
     post_processor: MetadataPostProcessor,
     comic_info_writer: ComicInfoWriter,
+    /// mylarCovers：导出 series.json 时同时下载系列封面（cover.jpg / {name}.cover.jpg）。
+    mylar_covers: bool,
+    /// mylar 导出根目录（null=系列原目录）。
+    mylar_output_dir: Option<String>,
+    /// mylar 导出路径 `${configDir}` 占位符基准（=配置目录）。
+    mylar_config_dir: Option<std::path::PathBuf>,
+    /// 库根目录缓存（library_id → root；内部从媒体服务器 API 获取，无需配置）。
+    library_root_cache: std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
 
     update_modes: Vec<UpdateMode>,
     override_existing_covers: bool,
@@ -37,6 +46,9 @@ impl MetadataUpdater {
         upload_series_covers: bool,
         lock_covers: bool,
         override_comic_info: bool,
+        mylar_covers: bool,
+        mylar_output_dir: Option<String>,
+        mylar_config_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             media_server_client,
@@ -45,6 +57,10 @@ impl MetadataUpdater {
             metadata_update_mapper: MetadataMapper,
             post_processor,
             comic_info_writer: ComicInfoWriter::new(override_comic_info),
+            mylar_covers,
+            mylar_output_dir,
+            mylar_config_dir,
+            library_root_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             update_modes,
             override_existing_covers,
             upload_book_covers,
@@ -62,6 +78,10 @@ impl MetadataUpdater {
         let processed = self.post_processor.process(metadata);
         self.update_series_metadata(series, &processed.series_metadata).await?;
         self.update_book_metadata(series, metadata, &processed).await?;
+
+        if self.update_modes.contains(&UpdateMode::MylarSeriesJson) {
+            self.write_mylar_series_json(series, &processed.series_metadata).await?;
+        }
 
         if self.update_modes.contains(&UpdateMode::ComicInfo) {
             self.media_server_client
@@ -165,6 +185,66 @@ impl MetadataUpdater {
         Ok(())
     }
 
+    /// 内部获取库根目录（media server API get_library().roots 首个），带进程内缓存。
+    /// 失败 / 无 root 返回 None → mylar 导出回退仅用目录名（拍平），不阻塞导出。
+    async fn library_root_for(&self, library_id: &MediaServerLibraryId) -> Option<String> {
+        let key = library_id.0.clone();
+        if let Some(v) = self.library_root_cache.lock().unwrap().get(&key).cloned() {
+            return v;
+        }
+        let root = self
+            .media_server_client
+            .get_library(library_id)
+            .await
+            .ok()
+            .and_then(|l| l.roots.into_iter().next());
+        self.library_root_cache
+            .lock()
+            .unwrap()
+            .insert(key, root.clone());
+        root
+    }
+
+    /// mylar 格式 series.json 导出（Rust 扩展，参考 komga-mylar.py）：
+    /// 写 `<系列目录>/series.json`（oneshot 为 `<系列目录>/<系列名>.oneshot.json`）；
+    /// `mylarCovers` 开启时下载系列封面（`cover.jpg` / `<系列名>.cover.jpg`，已存在跳过）。
+    async fn write_mylar_series_json(
+        &self,
+        series: &MediaServerSeries,
+        metadata: &SeriesMetadata,
+    ) -> Result<(), MediaServerError> {
+        let json = mylar_series_json_from_metadata(metadata, series.books_count);
+        // 导出目录：mylarOutputDir 可重定向（对齐 py --output）；库根目录由内部从
+        // 媒体服务器 API 获取（get_library().roots），用于还原相对目录结构，无需配置。
+        // oneshot 的 series.url 指向 zip 文件 → 目录为 zip 父目录、文件名取 zip stem。
+        let library_root = self.library_root_for(&series.library_id).await;
+        let (dir, file_stem) = crate::mylar::resolve_mylar_output_dir(
+            &series.url,
+            series.oneshot,
+            self.mylar_output_dir.as_deref(),
+            library_root.as_deref(),
+            self.mylar_config_dir.as_deref(),
+        );
+        let series_name_for_file = file_stem.as_deref().unwrap_or(&series.name);
+        write_series_json(&dir, series_name_for_file, series.oneshot, &json)
+            .map_err(|e| MediaServerError::Mylar(e))?;
+        if self.mylar_covers {
+            let cover_name = if series.oneshot {
+                format!("{series_name_for_file}.cover.jpg")
+            } else {
+                "cover.jpg".to_string()
+            };
+            let cover_path = dir.join(&cover_name);
+            if !cover_path.exists() {
+                if let Some(image) = self.media_server_client.get_series_thumbnail(&series.id).await? {
+                    std::fs::write(&cover_path, &image.bytes)
+                        .map_err(|e| MediaServerError::Mylar(format!("write {}: {e}", cover_path.display())))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn update_book_metadata(
         &self,
         series: &MediaServerSeries,
@@ -231,6 +311,8 @@ impl MetadataUpdater {
                                 .map_err(|e| MediaServerError::ComicInfo(e.to_string()))?;
                         }
                     }
+                    // mylar series.json 是系列级导出，在 update_metadata 中统一处理（不逐书写）。
+                    UpdateMode::MylarSeriesJson => {}
                 }
             }
 

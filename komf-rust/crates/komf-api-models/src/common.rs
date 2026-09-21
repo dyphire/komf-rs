@@ -45,6 +45,8 @@ pub enum KomfReadingDirection {
 pub enum KomfUpdateMode {
     Api,
     ComicInfo,
+    /// Rust 扩展：更新后导出 mylar 格式 series.json（对应 UpdateMode::MylarSeriesJson）。
+    MylarSeriesJson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

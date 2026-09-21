@@ -40,6 +40,8 @@ impl Default for MediaType {
 pub enum UpdateMode {
     Api,
     ComicInfo,
+    /// Rust 扩展：更新后导出 mylar 格式 series.json（参考 komga-mylar.py）。
+    MylarSeriesJson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

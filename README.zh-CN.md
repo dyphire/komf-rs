@@ -179,6 +179,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 - **Bangumi provider** 增强了内置 154 项标签白名单（源自 KomgaBangumi.user.js）、通过 `tagWhitelist`/`tagWhitelistFile` 配置额外白名单、动态标签计数阈值（3~35）+ 前 10 增强、搜索显示与匹配双向的 mediaType 过滤（库级覆盖优先）、`score:N` 标签解析为数值评分，以及尊重 `seriesTitleLanguage` 的 name_cn 处理。
 - **Bangumi 离线数据源**（移植自 [BangumiKomga](https://github.com/kalxd/BangumiKomga) 的 `bangumi_archive`）：启用 `bangumi.archive.enabled` 后，应用后台下载 bangumi/Archive release（约 400+MB zip）并构建本地 SQLite（FTS5 trigram）索引 + mmap jsonlines。搜索与元数据解析离线优先（series/type/标签/mediaType 过滤、别名感知相似度复用、单行本 relations），索引未就绪或未命中时自动回退在线 API；封面始终走在线 API 获取。可配置 `dir`（缺省 `workDir/bangumi-archive`）与 `updateIntervalHours`（缺省 168）。
 - **搜索标题提取**可按库配置（`searchTitleExtraction`）：括号/标题正则、作者分隔符、标题拆分符、符号归一与字符映射均可自定义，不再硬编码。
+- **mylar `series.json` 导出**（Rust 扩展，移植自 [komga-mylar.py](https://github.com/dyphire/komga-mylar.py) 语义）：在 `metadataUpdate.<default|library>.<id>.updateModes` 加入 `MYLAR_SERIES_JSON` 后，每次元数据更新会把系列元数据导出为 mylar 格式 `series.json`（oneshot 为 `<url 中 zip 文件名>.oneshot.json`，写入 zip 所在目录）——publisher、标题、year（取 releaseDate 年份）、简介、mylar 分级（All/9+/12+/15+/17+/Adult）、总册数、mylar 状态（Continuing/Ended）、语言、阅读方向、发行日期、作者（role 小写）、链接、备选标题、体裁与标签。`mylarCovers: true` 额外下载系列封面（`cover.jpg` / `<zip 文件名>.cover.jpg`，已存在跳过）。`mylarOutputDir` 可重定向导出根目录（对应脚本的 `--output`；库根目录由应用内部从媒体服务器 API 自动获取，用于还原相对目录结构，无需配置）。路径支持 `${configDir}` 占位符（=配置目录，作为稳定的相对基准）。
 
 ## 鸣谢
 

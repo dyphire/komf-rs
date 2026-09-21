@@ -28,6 +28,9 @@ pub struct KomgaSeriesDto {
     pub url: String,
     #[serde(default)]
     pub deleted: bool,
+    /// oneshot 单本系列（mylar 导出文件名区分用）。
+    #[serde(default)]
+    pub oneshot: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -430,6 +433,7 @@ impl KomgaClient {
                 .unwrap_or_default(),
             url: dto.url.clone(),
             deleted: dto.deleted,
+            oneshot: dto.oneshot,
         }
     }
 
