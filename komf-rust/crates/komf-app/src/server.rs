@@ -31,6 +31,12 @@ pub fn build_router(state: SharedState) -> Router {
             Router::new()
                 .merge(metadata_routes::router(ServerKind::Kavita))
                 .merge(media_server_routes::router(ServerKind::Kavita)),
+        )
+        .nest(
+            "/stump",
+            Router::new()
+                .merge(metadata_routes::router(ServerKind::Stump))
+                .merge(media_server_routes::router(ServerKind::Stump)),
         );
 
     let deprecated = deprecated::router();

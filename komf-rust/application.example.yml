@@ -73,6 +73,65 @@ komga:
           fields: [title]           #   应用字段：title / genres / tags / summary
     library: {}                     # 按库覆盖（komga/kavita 库 id → 同 default 结构）
 
+stump:                                # Stump 媒体服务器（Rust 扩展）
+  baseUri: http://localhost:10801   # Stump 服务地址
+  username: ''                      # 登录用户名（apiKey 为空时用账号密码登录换取 JWT）
+  password: ''
+  apiKey: ''                        # Stump API Key（`stump_` 前缀；推荐，非空时优先于账号密码）
+  eventListener:
+    enabled: false                  # GraphQL WS 事件监听（readEvents 订阅）
+    metadataLibraryFilter: []       # 仅监听这些库（空 = 全部）
+    metadataSeriesExcludeFilter: [] # 跳过这些系列
+    notificationsLibraryFilter: []  # 通知过滤的库
+  metadataUpdate:
+    default:
+      libraryType: MANGA
+      aggregate: false
+      mergeTags: false
+      mergeGenres: false
+      bookCovers: false
+      seriesCovers: false
+      overrideExistingCovers: true
+      lockCovers: true
+      updateModes: [API]
+      overrideComicInfo: false
+      postProcessing:
+        seriesTitle: false
+        seriesTitleLanguage: en
+        alternativeSeriesTitles: false
+        alternativeSeriesTitleLanguages: [en, ja, ja-ro]
+        fallbackToAltTitle: false
+        orderBooks: false
+        readingDirectionValue: null
+        languageValue: null
+        scoreTagName: null
+        originalPublisherTagName: null
+        publisherTagNames: []
+        alternateTitleLabels:
+          romaji: null
+          native: null
+          localized: null
+        linksSkipEnabled: true
+        linksMatchEnabled: true
+      searchTitleExtraction:
+        enabled: false
+        bracketRegex: null
+        authorSeparator: null
+        titleSplitters: []
+        symbolNormalizeRegex: '[:：•·․,，。''’?？!！~⁓～]'
+        charMappings: []
+        cleanupRegex: []
+      failedMatchCollectionName: null
+      chineseConversion:
+        enabled: false
+        direction: t2s
+        search: true
+        matching: true
+        update:
+          enabled: true
+          fields: [title]
+    library: {}
+
 kavita:
   baseUri: http://localhost:5000    # Kavita 服务地址
   apiKey: ''                        # Kavita API Key

@@ -212,6 +212,7 @@ impl SeriesAndBookMetadata {
 pub enum MediaServer {
     Komga,
     Kavita,
+    Stump,
 }
 
 impl MediaServer {
@@ -219,6 +220,7 @@ impl MediaServer {
         match self {
             MediaServer::Komga => "KOMGA",
             MediaServer::Kavita => "KAVITA",
+            MediaServer::Stump => "STUMP",
         }
     }
 }

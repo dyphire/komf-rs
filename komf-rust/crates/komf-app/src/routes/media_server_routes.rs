@@ -1,4 +1,4 @@
-//! 媒体服务器路由 —— 对应 `MediaServerRoutes.kt`（Komga / Kavita 各挂一套）。
+//! 媒体服务器路由 —— 对应 `MediaServerRoutes.kt`（Komga / Kavita / Stump 各挂一套）。
 use crate::routes::{ServerKind, SharedState};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -71,5 +71,6 @@ fn select_client(
     match kind {
         ServerKind::Komga => state.komga_client.clone(),
         ServerKind::Kavita => state.kavita_client.clone(),
+        ServerKind::Stump => state.stump_client.clone(),
     }
 }

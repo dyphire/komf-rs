@@ -5,7 +5,7 @@ use komf_core::config::{BangumiConfig, EHentaiArchiveConfig, EHentaiConfig, Meta
 use komf_core::model::{AuthorRole, MediaType, ReadingDirection, UpdateMode};
 use komf_core::util::NameSimilarityMatcher;
 use komf_mediaserver::config::{
-    AlternateTitleLabelsConfig, EventListenerConfig, KavitaConfig, KomgaConfig,
+    AlternateTitleLabelsConfig, EventListenerConfig, KavitaConfig, KomgaConfig, StumpConfig,
     MetadataProcessingConfig, MetadataPostProcessingConfig, MetadataUpdateConfig,
 };
 use komf_notifications::NotificationsConfig;
@@ -25,6 +25,7 @@ pub fn to_config_dto(
     KomfConfig {
         komga: to_komga_dto(&config.komga),
         kavita: to_kavita_dto(&config.kavita),
+        stump: to_stump_dto(&config.stump),
         notifications: to_notifications_dto(&config.notifications),
         metadata_providers: to_metadata_providers_dto(
             &config.metadata_providers,
@@ -97,6 +98,18 @@ fn to_kavita_dto(config: &KavitaConfig) -> KavitaConfigDto {
         notifications: Some(KomgaNotificationsDto {
             libraries: Some(config.event_listener.notifications_library_filter.clone()),
         }),
+        metadata_update: Some(to_metadata_update_dto(&config.metadata_update)),
+    }
+}
+
+fn to_stump_dto(config: &StumpConfig) -> StumpConfigDto {
+    StumpConfigDto {
+        base_uri: Some(config.base_uri.clone()),
+        username: Some(config.username.clone()),
+        // 凭据扩展：GET 不输出（skip_serializing）
+        password: None,
+        api_key: None,
+        event_listener: Some(to_event_listener_dto(&config.event_listener)),
         metadata_update: Some(to_metadata_update_dto(&config.metadata_update)),
     }
 }
@@ -635,6 +648,27 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
         }
         if let Some(metadata_update) = &kavita.metadata_update {
             config.kavita.metadata_update = from_metadata_update_dto(metadata_update, &config.kavita.metadata_update);
+        }
+    }
+    if let Some(stump) = &request.stump {
+        if let Some(base_uri) = &stump.base_uri {
+            config.stump.base_uri = base_uri.clone();
+        }
+        if let Some(username) = &stump.username {
+            config.stump.username = username.clone();
+        }
+        // 凭据扩展：PATCH 显式提供时覆盖，缺省保持原值（避免清掉 env/yml 配置）
+        if let Some(password) = &stump.password {
+            config.stump.password = password.clone();
+        }
+        if let Some(api_key) = &stump.api_key {
+            config.stump.api_key = api_key.clone();
+        }
+        if let Some(event_listener) = &stump.event_listener {
+            config.stump.event_listener = from_event_listener_dto(event_listener, &config.stump.event_listener);
+        }
+        if let Some(metadata_update) = &stump.metadata_update {
+            config.stump.metadata_update = from_metadata_update_dto(metadata_update, &config.stump.metadata_update);
         }
     }
     if let Some(notifications) = &request.notifications {
@@ -1661,5 +1695,37 @@ mod tests {
             .as_str()
             .map(|s| s.to_string());
         assert_eq!(komga_lang, None, "komga seriesTitleLanguage must be cleared");
+    }
+
+    /// Stump PATCH 应用：凭据/事件/元数据更新写入配置；缺省保持；GET 不输出凭据。
+    #[test]
+    fn patch_stump_config_and_get_hides_credentials() {
+        let request: KomfConfigUpdateRequest = serde_json::from_str(
+            r#"{"stump":{"baseUri":"http://127.0.0.1:10801","username":"alice","password":"s3cret","apiKey":"key-123","eventListener":{"enabled":true},"metadataUpdate":{"default":{"bookCovers":true}}}}"#,
+        )
+        .unwrap();
+        let config = apply_config_update(AppConfig::default(), &request);
+        assert_eq!(config.stump.base_uri, "http://127.0.0.1:10801");
+        assert_eq!(config.stump.username, "alice");
+        assert_eq!(config.stump.password, "s3cret");
+        assert_eq!(config.stump.api_key, "key-123");
+        assert!(config.stump.event_listener.enabled);
+        assert!(config.stump.metadata_update.default.book_covers);
+
+        // 缺省（仅改 baseUri）→ 凭据与其余字段保持
+        let request2: KomfConfigUpdateRequest =
+            serde_json::from_str(r#"{"stump":{"baseUri":"http://127.0.0.1:10999"}}"#).unwrap();
+        let config2 = apply_config_update(config, &request2);
+        assert_eq!(config2.stump.base_uri, "http://127.0.0.1:10999");
+        assert_eq!(config2.stump.username, "alice");
+        assert_eq!(config2.stump.password, "s3cret");
+        assert_eq!(config2.stump.api_key, "key-123");
+
+        // GET：输出 stump 段、不输出凭据
+        let dto = to_config_dto(&config2, None, None, None);
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"stump\""), "GET must output stump section, got {json}");
+        assert!(!json.contains("s3cret"));
+        assert!(!json.contains("key-123"));
     }
 }

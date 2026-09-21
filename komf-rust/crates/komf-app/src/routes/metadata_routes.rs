@@ -282,6 +282,7 @@ async fn reset_series(
         match kind {
             ServerKind::Komga => state.komga_services.update_service_for(&library_id),
             ServerKind::Kavita => state.kavita_services.update_service_for(&library_id),
+            ServerKind::Stump => state.stump_services.update_service_for(&library_id),
         }
     };
     match update_service
@@ -317,6 +318,7 @@ async fn reset_library(
         match kind {
             ServerKind::Komga => state.komga_services.update_service_for(&library_id),
             ServerKind::Kavita => state.kavita_services.update_service_for(&library_id),
+            ServerKind::Stump => state.stump_services.update_service_for(&library_id),
         }
     };
     match update_service
@@ -340,6 +342,7 @@ pub(crate) fn select_services_for(
     match kind {
         ServerKind::Komga => state.komga_services.clone(),
         ServerKind::Kavita => state.kavita_services.clone(),
+        ServerKind::Stump => state.stump_services.clone(),
     }
 }
 
@@ -354,6 +357,7 @@ pub(crate) fn select_all_for(
     match kind {
         ServerKind::Komga => (state.komga_services.clone(), state.komga_client.clone()),
         ServerKind::Kavita => (state.kavita_services.clone(), state.kavita_client.clone()),
+        ServerKind::Stump => (state.stump_services.clone(), state.stump_client.clone()),
     }
 }
 

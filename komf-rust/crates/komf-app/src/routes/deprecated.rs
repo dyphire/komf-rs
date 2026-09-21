@@ -1,6 +1,6 @@
 //! 已弃用路由 —— 对应 `DeprecatedConfigRoutes.kt` / `DeprecatedMetadataRoutes.kt`。
 //!
-//! 保持与 Kotlin 版非 `/api` 前缀的旧接口兼容（`/config` 与 `/{komga,kavita}/...`）。
+//! 保持与 Kotlin 版非 `/api` 前缀的旧接口兼容（`/config` 与 `/{komga,kavita,stump}/...`）。
 use crate::mappers;
 use crate::routes::{metadata_routes, ServerKind, SharedState};
 use axum::extract::{Path, Query, State};
@@ -16,6 +16,7 @@ pub fn router() -> Router<SharedState> {
         .route("/config", get(get_config).patch(update_config))
         .nest("/komga", deprecated_metadata_routes(ServerKind::Komga))
         .nest("/kavita", deprecated_metadata_routes(ServerKind::Kavita))
+        .nest("/stump", deprecated_metadata_routes(ServerKind::Stump))
 }
 
 fn deprecated_metadata_routes(kind: ServerKind) -> Router<SharedState> {
@@ -228,6 +229,7 @@ async fn reset_series(
         match kind {
             ServerKind::Komga => state.komga_services.update_service_for(&library_id),
             ServerKind::Kavita => state.kavita_services.update_service_for(&library_id),
+            ServerKind::Stump => state.stump_services.update_service_for(&library_id),
         }
     };
     match update_service
@@ -255,6 +257,7 @@ async fn reset_library(
         match kind {
             ServerKind::Komga => state.komga_services.update_service_for(&library_id),
             ServerKind::Kavita => state.kavita_services.update_service_for(&library_id),
+            ServerKind::Stump => state.stump_services.update_service_for(&library_id),
         }
     };
     match update_service

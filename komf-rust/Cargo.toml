@@ -45,6 +45,7 @@ sha1 = "0.10"
 image = "0.25"
 scraper = "0.19"
 percent-encoding = "2"
+tokio-tungstenite = { version = "0.24", features = ["connect"] }
 
 mimalloc = "0.1"
 memmap2 = "0.9"

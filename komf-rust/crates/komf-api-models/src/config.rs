@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct KomfConfig {
     pub komga: KomgaConfigDto,
     pub kavita: KavitaConfigDto,
+    pub stump: StumpConfigDto,
     pub notifications: NotificationConfigDto,
     pub metadata_providers: MetadataProvidersConfigDto,
 }
@@ -49,6 +50,25 @@ pub struct KavitaConfigDto {
     pub event_listener: Option<EventListenerConfigDto>,
     /// komf ≤0.12 旧字段：通知库过滤（同 `KomgaConfigDto.notifications` 语义）。
     pub notifications: Option<KomgaNotificationsDto>,
+    pub metadata_update: Option<MetadataUpdateConfigDto>,
+}
+
+/// Stump 媒体服务器配置（Rust 扩展；Kotlin komf 无此 DTO）。
+///
+/// 凭据同 Komga/Kavita 契约：GET 不输出 password/apiKey（skip_serializing），
+/// PATCH 仅在显式提供时覆盖，缺省保持原值。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StumpConfigDto {
+    pub base_uri: Option<String>,
+    pub username: Option<String>,
+    /// 凭据扩展：GET 不输出；PATCH 接收后覆盖 `StumpConfig.password`（登录换 JWT 用）。
+    #[serde(skip_serializing)]
+    pub password: Option<String>,
+    /// 凭据扩展：GET 不输出；PATCH 接收后覆盖 `StumpConfig.api_key`（推荐认证方式）。
+    #[serde(skip_serializing)]
+    pub api_key: Option<String>,
+    pub event_listener: Option<EventListenerConfigDto>,
     pub metadata_update: Option<MetadataUpdateConfigDto>,
 }
 
@@ -581,6 +601,8 @@ pub struct KomfConfigUpdateRequest {
     #[serde(default)]
     pub kavita: Option<KavitaConfigDto>,
     #[serde(default)]
+    pub stump: Option<StumpConfigDto>,
+    #[serde(default)]
     pub notifications: Option<NotificationConfigDto>,
     #[serde(default)]
     pub metadata_providers: Option<MetadataProvidersConfigDto>,
@@ -657,5 +679,39 @@ mod tests {
         let base = vec!["old0".to_string(), "old1".to_string(), "old2".to_string()];
         let merged = patch.webhooks.unwrap().apply_merge(&base);
         assert_eq!(merged, vec!["new".to_string(), "add".to_string()]);
+    }
+
+    /// Stump DTO 凭据契约：GET 不输出 password/apiKey；PATCH 可接收。
+    #[test]
+    fn stump_config_dto_credential_contract() {
+        let dto = StumpConfigDto {
+            base_uri: Some("http://127.0.0.1:10801".into()),
+            username: Some("alice".into()),
+            password: Some("s3cret".into()),
+            api_key: Some("key-123".into()),
+            event_listener: None,
+            metadata_update: None,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"baseUri\""), "GET must output baseUri, got {json}");
+        assert!(!json.contains("password"));
+        assert!(!json.contains("apiKey"));
+        assert!(!json.contains("s3cret"));
+        assert!(!json.contains("key-123"));
+
+        // PATCH 形态：接收凭据
+        let parsed: StumpConfigDto = serde_json::from_str(
+            r#"{"baseUri":"http://127.0.0.1:10801","username":"alice","password":"s3cret","apiKey":"key-123"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.base_uri.as_deref(), Some("http://127.0.0.1:10801"));
+        assert_eq!(parsed.username.as_deref(), Some("alice"));
+        assert_eq!(parsed.password.as_deref(), Some("s3cret"));
+        assert_eq!(parsed.api_key.as_deref(), Some("key-123"));
+
+        // 缺省字段 → None（PATCH 增量语义）
+        let empty: StumpConfigDto = serde_json::from_str("{}").unwrap();
+        assert!(empty.base_uri.is_none());
+        assert!(empty.api_key.is_none());
     }
 }

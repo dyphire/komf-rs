@@ -49,6 +49,33 @@ impl Default for KavitaConfig {
     }
 }
 
+/// Stump 媒体服务器配置（Rust 扩展）。
+/// 认证优先 `api_key`（Bearer 直用）；为空时用账号密码登录换取 JWT。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StumpConfig {
+    pub base_uri: String,
+    pub username: String,
+    pub password: String,
+    /// Stump API Key（`stump_...` 前缀）；非空时优先于账号密码。
+    pub api_key: String,
+    pub event_listener: EventListenerConfig,
+    pub metadata_update: MetadataUpdateConfig,
+}
+
+impl Default for StumpConfig {
+    fn default() -> Self {
+        Self {
+            base_uri: "http://localhost:10801".to_string(),
+            username: String::new(),
+            password: String::new(),
+            api_key: String::new(),
+            event_listener: EventListenerConfig { enabled: false, ..Default::default() },
+            metadata_update: MetadataUpdateConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EventListenerConfig {
