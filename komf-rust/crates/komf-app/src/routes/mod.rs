@@ -23,6 +23,8 @@ pub struct AppState {
     pub komga_services: Arc<komf_mediaserver::MetadataServiceProvider>,
     pub kavita_client: Arc<dyn komf_mediaserver::MediaServerClient>,
     pub kavita_services: Arc<komf_mediaserver::MetadataServiceProvider>,
+    pub stump_client: Arc<dyn komf_mediaserver::MediaServerClient>,
+    pub stump_services: Arc<komf_mediaserver::MetadataServiceProvider>,
     pub discord_service: DiscordWebhookService,
     pub discord_renderer: DiscordVelocityTemplates,
     pub apprise_service: AppriseCliService,
@@ -36,11 +38,12 @@ pub struct AppState {
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
-/// 路由所属媒体服务器（Komga / Kavita 各挂一套并行路由）。
+/// 路由所属媒体服务器（Komga / Kavita / Stump 各挂一套并行路由）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
     Komga,
     Kavita,
+    Stump,
 }
 
 impl ServerKind {
@@ -48,6 +51,7 @@ impl ServerKind {
         match self {
             ServerKind::Komga => "komga",
             ServerKind::Kavita => "kavita",
+            ServerKind::Stump => "stump",
         }
     }
 }
@@ -71,6 +75,8 @@ impl AppState {
             komga_services: module.komga_metadata_service_provider.clone(),
             kavita_client: module.kavita_client.clone(),
             kavita_services: module.kavita_metadata_service_provider.clone(),
+            stump_client: module.stump_client.clone(),
+            stump_services: module.stump_metadata_service_provider.clone(),
             discord_service: notifications.discord_webhook_service,
             discord_renderer: notifications.discord_velocity_renderer,
             apprise_service: notifications.apprise_service,

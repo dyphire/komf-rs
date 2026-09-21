@@ -1,5 +1,5 @@
 //! 应用配置 —— 对应 `AppConfig.kt`、`ConfigLoader.kt`、`ConfigWriter.kt`。
-use komf_mediaserver::config::{DatabaseConfig, KavitaConfig, KomgaConfig};
+use komf_mediaserver::config::{DatabaseConfig, KavitaConfig, KomgaConfig, StumpConfig};
 use komf_notifications::NotificationsConfig;
 use komf_core::config::MetadataProvidersConfig;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     pub komga: KomgaConfig,
     pub kavita: KavitaConfig,
+    pub stump: StumpConfig,
     pub database: DatabaseConfig,
     pub metadata_providers: MetadataProvidersConfig,
     pub notifications: NotificationsConfig,
@@ -22,6 +23,7 @@ impl Default for AppConfig {
         Self {
             komga: KomgaConfig::default(),
             kavita: KavitaConfig::default(),
+            stump: StumpConfig::default(),
             database: DatabaseConfig::default(),
             metadata_providers: MetadataProvidersConfig::default(),
             notifications: NotificationsConfig::default(),
@@ -126,6 +128,18 @@ fn override_with_env(mut config: AppConfig, config_dir: Option<&std::path::Path>
     }
     if let Some(api_key) = env("KOMF_KAVITA_API_KEY") {
         config.kavita.api_key = api_key;
+    }
+    if let Some(uri) = env("KOMF_STUMP_BASE_URI") {
+        config.stump.base_uri = uri;
+    }
+    if let Some(user) = env("KOMF_STUMP_USER") {
+        config.stump.username = user;
+    }
+    if let Some(password) = env("KOMF_STUMP_PASSWORD") {
+        config.stump.password = password;
+    }
+    if let Some(api_key) = env("KOMF_STUMP_API_KEY") {
+        config.stump.api_key = api_key;
     }
     if let Some(port) = env("KOMF_SERVER_PORT").and_then(|p| p.parse::<u16>().ok()) {
         config.server.port = port;

@@ -1,10 +1,11 @@
 //! 媒体服务器模块装配 —— 对应 `MediaServerModule.kt`。
 //!
-//! 组装 Komga/Kavita 客户端、任务追踪、各 library 的元数据服务与更新器，
-//! 以及事件监听器（Komga SSE / Kavita SignalR），`eventListener.enabled` 时自动启动。
+//! 组装 Komga/Kavita/Stump 客户端、任务追踪、各 library 的元数据服务与更新器，
+//! 以及事件监听器（Komga SSE / Kavita SignalR / Stump GraphQL WS），
+//! `eventListener.enabled` 时自动启动。
 use crate::client::MediaServerClient;
 use crate::config::{
-    DatabaseConfig, KavitaConfig, KomgaConfig, MetadataProcessingConfig, MetadataUpdateConfig,
+    DatabaseConfig, KavitaConfig, KomgaConfig, MetadataProcessingConfig, MetadataUpdateConfig, StumpConfig,
 };
 use crate::event_listener::{
     KomgaEventHandler, MediaServerEventListener, MetadataEventHandler, NotificationsEventHandler,
@@ -18,6 +19,8 @@ use crate::metadata_post_processor::{MetadataPostProcessor, PublisherTagNameConf
 use crate::metadata_service::{MetadataService, MetadataServiceProvider};
 use crate::metadata_updater::MetadataUpdater;
 use crate::model::{MediaServer, MediaServerLibraryId};
+use crate::stump::{StumpClient, StumpMediaServerClientAdapter};
+use crate::stump_event::StumpEventHandler;
 use komf_core::providers::MetadataProviders;
 use komf_notifications::apprise::AppriseCliService;
 use komf_notifications::discord::DiscordWebhookService;
@@ -34,6 +37,9 @@ pub struct MediaServerModule {
     pub kavita_client: Arc<dyn MediaServerClient>,
     kavita_client_core: Arc<KavitaClient>,
     pub kavita_metadata_service_provider: Arc<MetadataServiceProvider>,
+    pub stump_client: Arc<dyn MediaServerClient>,
+    stump_client_core: Arc<StumpClient>,
+    pub stump_metadata_service_provider: Arc<MetadataServiceProvider>,
     listener_tokens: Vec<CancellationToken>,
     /// mylar ${configDir} 占位符基准（=配置目录，热重载重建 updater 时复用）。
     mylar_config_dir: Option<std::path::PathBuf>,
@@ -53,6 +59,7 @@ impl MediaServerModule {
     pub fn new(
         komga_config: &KomgaConfig,
         kavita_config: &KavitaConfig,
+        stump_config: &StumpConfig,
         database_config: &DatabaseConfig,
         metadata_providers: Arc<MetadataProviders>,
         http_client: reqwest::Client,
@@ -111,6 +118,29 @@ impl MediaServerModule {
             mylar_config_dir.clone(),
         ));
 
+        // Stump：GraphQL 客户端；API Key 为空时退回账号密码登录 JWT（login 在首次请求时惰性执行）
+        let stump_client_core = Arc::new(
+            StumpClient::new(
+                &stump_config.base_uri,
+                &stump_config.username,
+                &stump_config.password,
+                &stump_config.api_key,
+            )
+            .expect("failed to create stump client"),
+        );
+        let stump_client: Arc<dyn MediaServerClient> = Arc::new(
+            StumpMediaServerClientAdapter::new((*stump_client_core).clone()),
+        );
+        let stump_metadata_service_provider = Arc::new(Self::create_metadata_service_provider(
+            &stump_config.metadata_update,
+            stump_client.clone(),
+            metadata_providers.clone(),
+            repository.clone(),
+            job_tracker.clone(),
+            MediaServer::Stump,
+            mylar_config_dir.clone(),
+        ));
+
         let mut module = Self {
             job_repository: repository,
             job_tracker,
@@ -119,6 +149,9 @@ impl MediaServerModule {
             kavita_client,
             kavita_client_core,
             kavita_metadata_service_provider,
+            stump_client,
+            stump_client_core,
+            stump_metadata_service_provider,
             listener_tokens: Vec::new(),
             mylar_config_dir,
         };
@@ -132,7 +165,18 @@ impl MediaServerModule {
             );
         }
         if kavita_config.event_listener.enabled {
-            module.start_kavita_listener(&kavita_config, discord_service, apprise_service);
+            module.start_kavita_listener(
+                &kavita_config,
+                discord_service.clone(),
+                apprise_service.clone(),
+            );
+        }
+        if stump_config.event_listener.enabled {
+            module.start_stump_listener(
+                &stump_config,
+                discord_service,
+                apprise_service,
+            );
         }
 
         module
@@ -208,6 +252,40 @@ impl MediaServerModule {
         });
         self.listener_tokens.push(token);
         tracing::info!("Kavita event listener started (signalr)");
+    }
+
+    fn start_stump_listener(
+        &mut self,
+        config: &StumpConfig,
+        discord_service: DiscordWebhookService,
+        apprise_service: AppriseCliService,
+    ) {
+        let listeners: Vec<Arc<dyn MediaServerEventListener>> = vec![
+            Arc::new(MetadataEventHandler::new(
+                self.stump_metadata_service_provider.clone(),
+                self.job_repository.clone(),
+                self.job_tracker.clone(),
+                config.event_listener.metadata_library_filter.clone(),
+                config.event_listener.metadata_series_exclude_filter.clone(),
+                MediaServer::Stump,
+            )),
+            Arc::new(NotificationsEventHandler::new(
+                self.stump_client.clone(),
+                Some(discord_service),
+                Some(apprise_service),
+                config.event_listener.notifications_library_filter.clone(),
+                MediaServer::Stump,
+            )),
+        ];
+        let handler = Arc::new(StumpEventHandler::new(self.stump_client_core.clone(), listeners));
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let task_handler = handler.clone();
+        tokio::spawn(async move {
+            task_handler.run(task_token).await;
+        });
+        self.listener_tokens.push(token);
+        tracing::info!("Stump event listener started (graphql ws)");
     }
 
     #[allow(clippy::too_many_arguments)]

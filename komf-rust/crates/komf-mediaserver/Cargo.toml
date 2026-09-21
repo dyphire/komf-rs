@@ -23,6 +23,7 @@ zip = { workspace = true }
 bytes = { workspace = true }
 mime_guess = { workspace = true }
 async-trait = "0.1"
+tokio-tungstenite = { workspace = true }
 komf-core = { workspace = true }
 komf-api-models = { workspace = true }
 komf-notifications = { path = "../komf-notifications" }

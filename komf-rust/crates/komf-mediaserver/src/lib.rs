@@ -17,6 +17,8 @@ pub mod metadata_post_processor;
 pub mod metadata_service;
 pub mod metadata_updater;
 pub mod model;
+pub mod stump;
+pub mod stump_event;
 
 pub use client::{MediaServerClient, MediaServerError};
 pub use media_server_module::MediaServerModule;

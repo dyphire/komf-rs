@@ -1,8 +1,8 @@
-# Komga 与 Kavita 元数据抓取器（Rust）
+# Komga、Kavita 与 Stump 元数据抓取器（Rust）
 
 [English](README.md) | **简体中文**
 
-这是 [komf](https://github.com/Snd-R/komf) 的 **Rust 重写版**，用于为你的数字漫画库获取元数据与缩略图。它能自动捕获 **Komga** 和 **Kavita** 中新添加的系列并更新元数据、缩略图和书籍级数据；也支持手动按系列、按库或全库进行搜索、识别与匹配。
+这是 [komf](https://github.com/Snd-R/komf) 的 **Rust 重写版**，用于为你的数字漫画库获取元数据与缩略图。它能自动捕获 **Komga**、**Kavita** 和 **Stump** 中新添加的系列并更新元数据、缩略图和书籍级数据；也支持手动按系列、按库或全库进行搜索、识别与匹配。
 
 Rust 实现位于 [`komf-rust/`](komf-rust/README.md)，是独立隔离的 Cargo workspace：独立依赖、独立构建、独立二进制（`komf-app`）。它不读取也不修改 Kotlin 实现。
 
@@ -10,6 +10,7 @@ Rust 实现位于 [`komf-rust/`](komf-rust/README.md)，是独立隔离的 Cargo
 
 - Komga：REST API + SSE 事件监听（自动更新、通知）
 - Kavita：REST API + SignalR 事件监听（JWT 认证、自动刷新）
+- Stump（仅 Rust）：GraphQL API + GraphQL WebSocket 事件监听（基于任务批量窗口的自动更新，API Key 或 JWT 认证）
 - 12 个元数据 provider 已实现，支持按 provider 与按库配置
 - Discord webhook + Apprise 通知（Velocity 模板）
 - ComicInfo 读写、书籍排序、评分标签、阅读方向覆盖
@@ -56,7 +57,7 @@ cargo test --workspace # 运行单元测试
 cd komf-rust
 cp application.example.yml application.yml # Linux/macOS
 copy application.example.yml application.yml # Windows
-# 编辑 application.yml：Komga/Kavita 凭据、providers、元数据更新等
+# 编辑 application.yml：Komga/Kavita/Stump 凭据、providers、元数据更新等
 ./komf-app [path to config] # application.yml 的路径或其所在目录
 ```
 
@@ -72,6 +73,8 @@ copy application.example.yml application.yml # Windows
 | `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                         |
 | `KOMF_KOMGA_API_KEY`                           | Komga API key（`X-API-Key` 认证，设置后优先于账号密码） |
 | `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita 地址 + API key                      |
+| `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump 地址 + API key（`stump_` 前缀，设置后优先于账号密码） |
+| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump 账号密码（仅当未配置 API key 时用于换取 JWT）       |
 | `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085）                         |
 | `KOMF_LOG_LEVEL`                               | 日志级别（默认 INFO）                            |
 | `KOMF_DISCORD_WEBHOOKS`                        | 逗号分隔的 Discord webhook URL                |
@@ -97,14 +100,14 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
 使用方法：
 
 1. 将模板复制为 `application.yml`（具体命令见 [运行](#运行)）。
-2. 编辑 `application.yml`：填写 Komga/Kavita 凭据并启用需要的 provider；每个选项都有行内说明。
+2. 编辑 `application.yml`：填写 Komga/Kavita/Stump 凭据并启用需要的 provider；每个选项都有行内说明。
 3. 用配置文件启动服务（路径参数或 `KOMF_CONFIG_DIR`）；无配置文件时以内置默认运行。
 
 e-hentai / bangumi 的 provider 参考见 [`komf-rust/README.md`](komf-rust/README.md)。
 
 ## 按库配置
 
-任何元数据更新选项或 provider 都可以按库（Komga 或 Kavita 库 id）限定作用范围：`metadataUpdate.library.<libraryId>` 与 `metadataProviders.libraryProviders.<libraryId>`——参见模板（`application.example.yml`）中的注释占位。
+任何元数据更新选项或 provider 都可以按库（Komga、Kavita 或 Stump 库 id）限定作用范围：`metadataUpdate.library.<libraryId>` 与 `metadataProviders.libraryProviders.<libraryId>`——参见模板（`application.example.yml`）中的注释占位。
 
 ## 元数据聚合
 
@@ -129,7 +132,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 - `GET /api/jobs`、`GET /api/jobs/all`（`DELETE`）、`GET /api/jobs/{jobId}/events`（SSE）
 
-### 元数据（`{media-server}` = `komga` 或 `kavita`）
+### 元数据（`{media-server}` = `komga`、`kavita` 或 `stump`）
 
 - `GET /api/{media-server}/metadata/providers` —— 已启用的 provider（可选 `libraryId`）
 - `GET /api/{media-server}/metadata/search?name=...` —— 搜索（可选 `libraryId`）
@@ -175,6 +178,8 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ## 与 Kotlin 版的差异
 
+- **Stump 媒体服务器**（仅 Rust 扩展）：完整的 Stump 支持——GraphQL 客户端（API Key 认证，或账号密码 → JWT 换取）、GraphQL WebSocket 事件监听（`readEvents` 订阅 + 基于任务状态的批量窗口，一次扫描只产生一批匹配任务）、系列/书籍元数据更新（`SeriesMetadataInput` / `MediaMetadataInput`）、封面上传（`uploadSeriesThumbnailBase64` / `uploadMediaThumbnailBase64`）、系列标签（`setSeriesTags`）、书籍列表翻页、系列重置（系列元数据 + 系列标签 + 书级重置）。已知限制：Stump 的 `Series.tags` 是 Tag 对象（读取侧返回空标签）、`CreatedManySeries` 事件不带系列 id（记日志后忽略）、书级重置以 `updateMediaMetadata` 置空变通。实施与测试记录见 [`komf-rust/STUMP-SUPPORT.md`](komf-rust/STUMP-SUPPORT.md)。
+- **中文库工作流**（bangumi + `seriesTitleLanguage`）：bangumi provider 用 `name` + `name_cn` + 别名匹配，中文系列名可自动命中；配置 `postProcessing.seriesTitle: true` + `seriesTitleLanguage: zh` 后，系列主标题按语言从 provider 的 `titles` 数组选择（bangumi 的 `name_cn` 成为系列标题，如「无能的奈奈」）。
 - **eHentai provider**（来自 [PR #284](https://github.com/Snd-R/komf/pull/284)）在 Rust 版可用；画廊搜索需要能访问 e-hentai.org（通常需代理）。PR 之上的扩展：可配置 `searchDomain`（`e-hentai` / `exhentai`，仅搜索请求域名）+ exhentai cookie 自动预热与 403 自动刷新（`ipbMemberId`/`ipbPassHash`）、`titlePriority`、`translatorKeywords`、`maleOnlyTagsFile`、参考实现 hentai-assistant 风格的系列标题 `titleTemplate`，以及 `gidOnlyMatch`（自动匹配仅做 gid 精准搜索：无 gid 或 gid 无结果都跳过，不回落普通标题相似度；links 匹配不受影响）。
 - **Bangumi provider** 增强了内置 154 项标签白名单（源自 KomgaBangumi.user.js）、通过 `tagWhitelist`/`tagWhitelistFile` 配置额外白名单、动态标签计数阈值（3~35）+ 前 10 增强、搜索显示与匹配双向的 mediaType 过滤（库级覆盖优先）、`score:N` 标签解析为数值评分，以及尊重 `seriesTitleLanguage` 的 name_cn 处理。
 - **Bangumi 离线数据源**（移植自 [BangumiKomga](https://github.com/kalxd/BangumiKomga) 的 `bangumi_archive`）：启用 `bangumi.archive.enabled` 后，应用后台下载 bangumi/Archive release（约 400+MB zip）并构建本地 SQLite（FTS5 trigram）索引 + mmap jsonlines。搜索与元数据解析离线优先（series/type/标签/mediaType 过滤、别名感知相似度复用、单行本 relations），索引未就绪或未命中时自动回退在线 API；封面始终走在线 API 获取。可配置 `dir`（缺省 `workDir/bangumi-archive`）与 `updateIntervalHours`（缺省 168）。

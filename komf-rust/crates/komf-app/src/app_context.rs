@@ -81,6 +81,7 @@ fn build_state(
     let media_server_module = MediaServerModule::new(
         &config.komga,
         &config.kavita,
+        &config.stump,
         &config.database,
         Arc::new(providers_module.metadata_providers),
         http_client.clone(),
