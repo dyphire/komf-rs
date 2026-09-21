@@ -17,6 +17,9 @@ pub enum MediaServerError {
     /// ComicInfo 写入/移除失败（对应 Kotlin `ComicInfoWriter.ComicInfoException`）。
     #[error("comic info error: {0}")]
     ComicInfo(String),
+    /// mylar series.json 写入/封面保存失败。
+    #[error("mylar export error: {0}")]
+    Mylar(String),
 }
 
 impl MediaServerError {

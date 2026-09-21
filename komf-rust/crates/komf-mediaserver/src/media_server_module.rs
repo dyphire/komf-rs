@@ -35,6 +35,8 @@ pub struct MediaServerModule {
     kavita_client_core: Arc<KavitaClient>,
     pub kavita_metadata_service_provider: Arc<MetadataServiceProvider>,
     listener_tokens: Vec<CancellationToken>,
+    /// mylar ${configDir} 占位符基准（=配置目录，热重载重建 updater 时复用）。
+    mylar_config_dir: Option<std::path::PathBuf>,
 }
 
 impl Drop for MediaServerModule {
@@ -56,6 +58,7 @@ impl MediaServerModule {
         http_client: reqwest::Client,
         discord_service: DiscordWebhookService,
         apprise_service: AppriseCliService,
+        mylar_config_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let repository = Arc::new(
             KomfJobsRepository::open(Path::new(&database_config.file))
@@ -88,6 +91,7 @@ impl MediaServerModule {
             repository.clone(),
             job_tracker.clone(),
             MediaServer::Komga,
+            mylar_config_dir.clone(),
         ));
 
         let kavita_client_core = Arc::new(
@@ -104,6 +108,7 @@ impl MediaServerModule {
             repository.clone(),
             job_tracker.clone(),
             MediaServer::Kavita,
+            mylar_config_dir.clone(),
         ));
 
         let mut module = Self {
@@ -115,6 +120,7 @@ impl MediaServerModule {
             kavita_client_core,
             kavita_metadata_service_provider,
             listener_tokens: Vec::new(),
+            mylar_config_dir,
         };
 
         if komga_config.event_listener.enabled {
@@ -212,12 +218,14 @@ impl MediaServerModule {
         repository: Arc<KomfJobsRepository>,
         job_tracker: Arc<KomfJobTracker>,
         media_server: MediaServer,
+        mylar_config_dir: Option<std::path::PathBuf>,
     ) -> MetadataServiceProvider {
         let default_updater = Self::create_metadata_update_service(
             &config.default,
             media_server_client.clone(),
             repository.clone(),
             media_server,
+            mylar_config_dir.clone(),
         );
 
         let library_updaters: HashMap<String, Arc<MetadataUpdater>> = config
@@ -231,6 +239,7 @@ impl MediaServerModule {
                         media_server_client.clone(),
                         repository.clone(),
                         media_server,
+                        mylar_config_dir.clone(),
                     ),
                 )
             })
@@ -310,6 +319,7 @@ impl MediaServerModule {
         media_server_client: Arc<dyn MediaServerClient>,
         repository: Arc<KomfJobsRepository>,
         media_server: MediaServer,
+        mylar_config_dir: Option<std::path::PathBuf>,
     ) -> Arc<MetadataUpdater> {
         let post_processor = MetadataPostProcessor::new(
             config.library_type,
@@ -345,6 +355,9 @@ impl MediaServerModule {
             config.series_covers,
             config.lock_covers,
             config.override_comic_info,
+            config.mylar_covers,
+            config.mylar_output_dir.clone(),
+            mylar_config_dir,
         ))
     }
 }

@@ -31,8 +31,11 @@ komga:
       seriesCovers: false           # 更新系列封面
       overrideExistingCovers: true  # 已存在封面也覆盖
       lockCovers: true              # 封面写入后加锁
-      updateModes: [API]            # 更新方式：API / DISK
-      overrideComicInfo: false      # DISK 模式覆盖 ComicInfo.xml
+      updateModes: [API]            # 更新方式：API / COMIC_INFO / MYLAR_SERIES_JSON
+      overrideComicInfo: false      # COMIC_INFO 模式覆盖 ComicInfo.xml
+      mylarCovers: false            # MYLAR_SERIES_JSON 模式同时下载系列封面（cover.jpg / <zip 文件名>.cover.jpg）
+      mylarOutputDir: null          # mylar 导出根目录（null=系列原目录；支持 ${configDir} 占位符=配置目录；
+                                    #   库根目录由应用内部从媒体服务器 API 自动获取，用于还原相对目录结构
       postProcessing:
         seriesTitle: false          # 设置系列主标题
         seriesTitleLanguage: en     # 主标题语言（null = 不设置语言）

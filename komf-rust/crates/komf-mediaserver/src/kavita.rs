@@ -1200,6 +1200,8 @@ fn to_media_server_series(
         },
         url: series.folder_path.clone(),
         deleted: false,
+        // Kavita 无 oneshot 概念：mylar 导出按非 oneshot 命名（series.json）。
+        oneshot: false,
     }
 }
 

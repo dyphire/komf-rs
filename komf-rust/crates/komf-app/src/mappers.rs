@@ -164,6 +164,9 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
         update_modes: Some(config.update_modes.iter().map(|m| to_update_mode_dto(*m)).collect()),
         // 对齐 Kotlin GET（AppConfigMapper 不输出 overrideComicInfo）：PATCH 专用，GET 不输出
         override_comic_info: None,
+        mylar_covers: Some(config.mylar_covers),
+        // Rust 扩展：GET 输出 mylar 导出路径配置（Kotlin 无）。
+        mylar_output_dir: config.mylar_output_dir.clone().map(Some),
         post_processing: Some(MetadataPostProcessingConfigDto {
             series_title: Some(config.post_processing.series_title),
             series_title_language: config.post_processing.series_title_language.clone().map(Some),
@@ -778,6 +781,11 @@ fn from_processing_dto(dto: &MetadataProcessingConfigDto, base: &MetadataProcess
             .map(|m| m.iter().map(|m| from_update_mode_dto(*m)).collect())
             .unwrap_or_else(|| base.update_modes.clone()),
         override_comic_info: dto.override_comic_info.unwrap_or(base.override_comic_info),
+        mylar_covers: dto.mylar_covers.unwrap_or(base.mylar_covers),
+        mylar_output_dir: match &dto.mylar_output_dir {
+            Some(v) => v.clone(),
+            None => base.mylar_output_dir.clone(),
+        },
         post_processing: dto
             .post_processing
             .as_ref()
@@ -1310,6 +1318,7 @@ fn to_update_mode_dto(v: UpdateMode) -> KomfUpdateMode {
     match v {
         UpdateMode::Api => KomfUpdateMode::Api,
         UpdateMode::ComicInfo => KomfUpdateMode::ComicInfo,
+        UpdateMode::MylarSeriesJson => KomfUpdateMode::MylarSeriesJson,
     }
 }
 
@@ -1317,6 +1326,7 @@ fn from_update_mode_dto(v: KomfUpdateMode) -> UpdateMode {
     match v {
         KomfUpdateMode::Api => UpdateMode::Api,
         KomfUpdateMode::ComicInfo => UpdateMode::ComicInfo,
+        KomfUpdateMode::MylarSeriesJson => UpdateMode::MylarSeriesJson,
     }
 }
 

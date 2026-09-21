@@ -11,6 +11,7 @@ pub mod kavita_signalr;
 pub mod komga;
 pub mod media_server_module;
 pub mod metadata_mapper;
+pub mod mylar;
 pub mod metadata_merger;
 pub mod metadata_post_processor;
 pub mod metadata_service;
