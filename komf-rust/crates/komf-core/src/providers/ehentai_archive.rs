@@ -83,6 +83,7 @@ fn file_stamp(path: &Path) -> Option<(u64, u64)> {
 pub(crate) struct EHentaiArchiveStore {
     conn: Mutex<rusqlite::Connection>,
     last_used: AtomicU64,
+    last_release: AtomicU64,
     idle_release_ms: u64,
 }
 
@@ -102,6 +103,7 @@ impl EHentaiArchiveStore {
         Ok(Self {
             conn: Mutex::new(conn),
             last_used: AtomicU64::new(now_ms()),
+            last_release: AtomicU64::new(now_ms()),
             idle_release_ms: idle_release_secs.saturating_mul(1000),
         })
     }
@@ -247,17 +249,23 @@ impl EHentaiArchiveStore {
         out
     }
 
-    /// 空闲释放：距上次查询超过 idle 阈值 → `PRAGMA shrink_memory` 归还未使用页面缓存。
-    pub fn release_if_idle(&self) {
-        let now = now_ms();
-        let last = self.last_used.load(Ordering::Relaxed);
+    /// 周期强制释放：每 idle 秒无条件 `PRAGMA shrink_memory` 归还未使用页面缓存
+    /// （CAS 防并发；供周期任务调用）。与旧"空闲释放"的关键区别：不再要求
+    /// "距上次查询 ≥ idle"——密集查询持续刷新 last_used 时旧逻辑永不释放。
+    pub fn release_periodic(&self) {
         let idle = self.idle_release_ms;
-        if idle > 0
-            && now.saturating_sub(last) >= idle
-            && self
-                .last_used
-                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
+        if idle == 0 {
+            return;
+        }
+        let now = now_ms();
+        let last = self.last_release.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < idle {
+            return;
+        }
+        if self
+            .last_release
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
         {
             let _ = self.conn.lock().unwrap().execute_batch("PRAGMA shrink_memory;");
             tracing::debug!("ehentai archive: released sqlite page cache");
@@ -265,20 +273,7 @@ impl EHentaiArchiveStore {
     }
 
     fn touch(&self) {
-        let now = now_ms();
-        let last = self.last_used.load(Ordering::Relaxed);
-        let idle = self.idle_release_ms;
-        if idle > 0 && now.saturating_sub(last) >= idle {
-            if self
-                .last_used
-                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                let _ = self.conn.lock().unwrap().execute_batch("PRAGMA shrink_memory;");
-            }
-        } else {
-            self.last_used.store(now, Ordering::Relaxed);
-        }
+        self.last_used.store(now_ms(), Ordering::Relaxed);
     }
 }
 
@@ -744,7 +739,7 @@ impl EHentaiArchiveService {
                 loop {
                     tokio::time::sleep(tick).await;
                     if let Some(s) = svc_idle.store.read().unwrap().as_ref() {
-                        s.release_if_idle();
+                        s.release_periodic();
                     }
                 }
             });

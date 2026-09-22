@@ -460,9 +460,11 @@ fn map_relation_type(t: Option<String>) -> Option<String> {
 pub struct BangumiArchiveStore {
     conn: Mutex<rusqlite::Connection>,
     mm: Option<memmap2::Mmap>,
-    /// 最近一次 mmap 读取的毫秒时间戳（活动标记，用于空闲释放）。
+    /// 最近一次 mmap 读取的毫秒时间戳（活动标记，供诊断/统计）。
     last_used: std::sync::atomic::AtomicU64,
-    /// 空闲释放阈值（毫秒）；0 = 禁用。
+    /// 最近一次周期强制释放的毫秒时间戳。
+    last_release: std::sync::atomic::AtomicU64,
+    /// 周期强制释放间隔（毫秒）；0 = 禁用。
     idle_release_ms: u64,
 }
 
@@ -498,6 +500,7 @@ impl BangumiArchiveStore {
             conn: Mutex::new(conn),
             mm,
             last_used: std::sync::atomic::AtomicU64::new(now_ms()),
+            last_release: std::sync::atomic::AtomicU64::new(now_ms()),
             idle_release_ms: idle_release_secs.saturating_mul(1000),
         })
     }
@@ -517,50 +520,39 @@ impl BangumiArchiveStore {
         }
     }
 
-    /// 后台空闲释放：距上次查询超过 idle 阈值时释放热页并重置时间戳
-    /// （CAS 防并发；供周期任务调用，使空闲期内存可回落）。
-    pub fn release_if_idle(&self) {
-        let now = now_ms();
-        let last = self.last_used.load(std::sync::atomic::Ordering::Relaxed);
+    /// 周期强制释放 mmap 热页：每 idle 秒无条件 MADV_DONTNEED（CAS 防并发，
+    /// 供周期任务调用）。与旧"空闲释放"的关键区别：不再要求"距上次查询 ≥ idle"——
+    /// 密集查询（Auto-Identify 全库扫 / SSE 触发的匹配）会持续刷新 last_used，
+    /// 旧逻辑下热页永不释放、RSS 涨到 mmap 全量（jsonlines 1GB+）。
+    /// 下次查询按需从磁盘重读，代价仅为随机读几 KB 行。
+    pub fn release_periodic(&self) {
         let idle = self.idle_release_ms;
-        if idle > 0
-            && now.saturating_sub(last) >= idle
-            && self
-                .last_used
-                .compare_exchange(
-                    last,
-                    now,
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
+        if idle == 0 {
+            return;
+        }
+        let now = now_ms();
+        let last = self.last_release.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) < idle {
+            return;
+        }
+        if self
+            .last_release
+            .compare_exchange(
+                last,
+                now,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
         {
             self.release_hot_pages();
         }
     }
 
-    /// 标记活动：距上次查询超过 idle 阈值时先释放 mmap 热页，随后更新活动时间戳。
+    /// 标记活动：仅更新时间戳（供未来诊断/统计用；释放由周期任务统一负责）。
     fn touch(&self) {
-        let now = now_ms();
-        let last = self.last_used.load(std::sync::atomic::Ordering::Relaxed);
-        let idle = self.idle_release_ms;
-        if idle > 0 && now.saturating_sub(last) >= idle {
-            // CAS 防止并发重复释放
-            if self
-                .last_used
-                .compare_exchange(
-                    last,
-                    now,
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                self.release_hot_pages();
-            }
-        } else {
-            self.last_used.store(now, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.last_used
+            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn init_schema(&self) -> Result<(), ProviderError> {
@@ -1199,7 +1191,7 @@ impl BangumiArchiveService {
                 loop {
                     tokio::time::sleep(tick).await;
                     if let Some(s) = svc_idle.store.read().unwrap().as_ref() {
-                        s.release_if_idle();
+                        s.release_periodic();
                     }
                 }
             });

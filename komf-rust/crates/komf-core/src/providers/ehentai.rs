@@ -1932,9 +1932,12 @@ fn posted_to_release_date(posted: Option<i64>) -> Option<ReleaseDate> {
 // ---------------------------------------------------------------------------
 
 /// 简单 TTL 缓存 —— 对应 Kotlin cache4k expireAfterWrite(5.minutes)。
+/// Kotlin cache4k 默认 maximumSize=10000：容量超限时淘汰最旧条目（近似 LRU）。
+/// Rust 实现同样带上限，避免 Auto-Identify 扫库（gid 数量级可达数万）把缓存无限撑大。
 struct TtlCache<K, V> {
     inner: tokio::sync::Mutex<HashMap<K, (V, std::time::Instant)>>,
     ttl: Duration,
+    capacity: usize,
 }
 
 impl<K, V> TtlCache<K, V>
@@ -1946,6 +1949,7 @@ where
         Self {
             inner: tokio::sync::Mutex::new(HashMap::new()),
             ttl,
+            capacity: 10_000,
         }
     }
 
@@ -1965,13 +1969,45 @@ where
         }
         let value = load().await?;
         let mut guard = self.inner.lock().await;
-        guard.insert(key, (value.clone(), std::time::Instant::now()));
+        self.insert_limited(&mut guard, key, value.clone());
         Ok(value)
     }
 
     async fn put(&self, key: K, value: V) {
         let mut guard = self.inner.lock().await;
+        self.insert_limited(&mut guard, key, value);
+    }
+
+    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
+    /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按遍历顺序取
+    /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
+    fn insert_limited(
+        &self,
+        guard: &mut HashMap<K, (V, std::time::Instant)>,
+        key: K,
+        value: V,
+    ) {
+        if guard.len() >= self.capacity {
+            let now = std::time::Instant::now();
+            guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
+        }
         guard.insert(key, (value, std::time::Instant::now()));
+        if guard.len() > self.capacity {
+            let excess = guard.len() - self.capacity;
+            let oldest: Vec<K> = {
+                let mut entries: Vec<(&K, &std::time::Instant)> =
+                    guard.iter().map(|(k, (_, c))| (k, c)).collect();
+                entries.sort_by_key(|(_, c)| **c);
+                entries
+                    .into_iter()
+                    .take(excess)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            };
+            for k in oldest {
+                guard.remove(&k);
+            }
+        }
     }
 }
 
