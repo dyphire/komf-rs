@@ -21,7 +21,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn new(config_path: Option<PathBuf>) -> Self {
         let config = ConfigLoader::load(config_path.as_deref());
-        init_logging(&config.log_level);
+        init_logging(&config.log_level, config_path.as_deref());
 
         let http_client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
@@ -115,8 +115,36 @@ pub async fn reload_with_config(config: crate::config::AppConfig) -> anyhow::Res
     context.reload(config)
 }
 
+/// Windows 下将控制台代码页切换为 UTF-8（65001），保证中文日志在交互
+/// 终端正常显示；stdout 始终输出 UTF-8 字节，重定向到文件时此调用无副作用。
+#[cfg(windows)]
+fn set_console_utf8() {
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleOutputCP(w_code_page_id: u32) -> i32;
+            fn SetConsoleCP(w_code_page_id: u32) -> i32;
+        }
+        const CP_UTF8: u32 = 65001;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_console_utf8() {}
+
 /// 初始化全局日志（重复调用被忽略；热重载改变日志级别需重启生效）。
-pub fn init_logging(level: &str) {
+///
+/// Rust 扩展：无配置项，控制台与日志文件双写。控制台保留 ANSI 彩色，
+/// 日志文件不带 ANSI 转义码；两者同受配置 logLevel（或 RUST_LOG）过滤。
+/// 日志统一放入 `work_dir/logs` 子目录（configPath 目录 / 文件父目录 /
+/// 当前目录），当日写入 `komf.log`，跨天把前一日备份为
+/// `komf.YYYY-MM-DD.log`（每日轮转）。
+pub fn init_logging(level: &str, config_path: Option<&std::path::Path>) {
+    // Windows 交互终端默认代码页（GBK）会把 UTF-8 中文显示成乱码，
+    // 启动时切换为 UTF-8（重定向到文件时无副作用）。
+    set_console_utf8();
     let filter = match level.to_uppercase().as_str() {
         "TRACE" => "trace",
         "DEBUG" => "debug",
@@ -124,11 +152,297 @@ pub fn init_logging(level: &str) {
         "ERROR" => "error",
         _ => "info",
     };
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
-        )
+    // work_dir 语义与 build_state 一致；日志统一放入 work_dir/logs 子目录
+    let log_dir: PathBuf = match config_path {
+        Some(path) if path.is_dir() => path.to_path_buf(),
+        Some(path) => path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        None => PathBuf::from("."),
+    }
+    .join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_writer: LogWriter = LogWriter(Arc::new(std::sync::Mutex::new(DailyLogFile::new(
+        log_dir,
+    ))));
+
+    // 同一过滤器（配置 logLevel / RUST_LOG），控制台与文件分别输出。
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
+
+    // 控制台 layer：保留 ANSI 彩色。
+    let console_layer = tracing_subscriber::fmt::layer().with_filter(filter.clone());
+
+    // 文件 layer：无 ANSI 转义码。
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_filter(filter);
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer as _; // with_filter 来自 Layer trait
+    let _ = tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer)
         .try_init();
+}
+
+/// 日志文件 writer（MakeWriter）：供文件 layer 使用。
+#[derive(Clone)]
+struct LogWriter(Arc<std::sync::Mutex<DailyLogFile>>);
+
+/// 每次 make_writer 克隆 Arc，写入时短暂持有锁。
+struct FileWriter(Arc<std::sync::Mutex<DailyLogFile>>);
+
+impl std::io::Write for FileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for LogWriter {
+    type Writer = FileWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        FileWriter(self.0.clone())
+    }
+}
+
+/// 备份日志保留天数（暂定 30 天）：跨天轮转时清理更早的备份文件。
+/// 后续如需配置化，把此常量改为配置项即可。
+const LOG_RETENTION_DAYS: i64 = 30;
+
+/// 每日轮转日志文件：当日写 `komf.log`，跨天首次写入时把前一日重命名为
+/// `komf.YYYY-MM-DD.log` 后新建当日文件。首次启动时若存在跨天残留的
+/// `komf.log`，按文件修改时间备份，避免旧日志被吞并。
+struct DailyLogFile {
+    dir: PathBuf,
+    date: String,
+    file: Option<std::fs::File>,
+}
+
+impl DailyLogFile {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            date: String::new(),
+            file: None,
+        }
+    }
+
+    fn rotate_if_needed(&mut self) -> std::io::Result<()> {
+        use chrono::Datelike;
+        let now = chrono::Local::now();
+        let today = format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day());
+        if self.date == today {
+            return Ok(());
+        }
+        if let Some(file) = self.file.take() {
+            drop(file); // 先关闭旧文件再重命名（Windows 上必需）
+        }
+        let current = self.dir.join("komf.log");
+        if current.exists() {
+            // 归档日期：跨天滚动用 self.date；首次启动用文件修改时间（若跨天）。
+            let mut archive_date = self.date.clone();
+            if archive_date.is_empty() {
+                if let Ok(meta) = current.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        let modified: chrono::DateTime<chrono::Local> = modified.into();
+                        let d = format!(
+                            "{:04}-{:02}-{:02}",
+                            modified.year(),
+                            modified.month(),
+                            modified.day()
+                        );
+                        if d != today {
+                            archive_date = d;
+                        }
+                    }
+                }
+            }
+            if !archive_date.is_empty() {
+                let backup = self.dir.join(format!("komf.{archive_date}.log"));
+                let _ = std::fs::rename(&current, &backup); // 备份已存在（同日重启）则忽略
+            }
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&current)?;
+        self.file = Some(file);
+        self.date = today;
+        self.prune_old_backups();
+        Ok(())
+    }
+
+    /// 删除超过保留期（默认 30 天）的备份日志，仅处理 `komf.YYYY-MM-DD.log`，
+    /// 当日 `komf.log` 不在此列；解析失败或删除失败一律静默忽略。
+    fn prune_old_backups(&mut self) {
+        let cutoff = chrono::Local::now() - chrono::Duration::days(LOG_RETENTION_DAYS);
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(date_str) = name.strip_prefix("komf.").and_then(|s| s.strip_suffix(".log")) else {
+                continue;
+            };
+            let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
+                continue;
+            };
+            if date < cutoff.date_naive() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+impl std::io::Write for DailyLogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.rotate_if_needed()?;
+        self.file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("log file not open"))?
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+        }
+        Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每日轮转：跨天首次写入把前一日 komf.log 备份为 komf.YYYY-MM-DD.log，
+    /// 同日继续写入不重复备份。
+    #[test]
+    fn daily_log_rotates_and_backs_up() {
+        use chrono::Datelike;
+        let dir = std::env::temp_dir().join(format!("komf-log-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let yesterday_dt = chrono::Local::now() - chrono::Duration::days(1);
+        let yesterday = format!(
+            "{:04}-{:02}-{:02}",
+            yesterday_dt.year(),
+            yesterday_dt.month(),
+            yesterday_dt.day()
+        );
+        let today = format!(
+            "{:04}-{:02}-{:02}",
+            chrono::Local::now().year(),
+            chrono::Local::now().month(),
+            chrono::Local::now().day()
+        );
+
+        // 模拟昨天已有日志文件 + 进程内 date 停留在昨天
+        std::fs::write(dir.join("komf.log"), b"old line\n").unwrap();
+        let mut log = DailyLogFile::new(dir.clone());
+        log.date = yesterday.clone();
+
+        use std::io::Write as _;
+        log.write_all(b"new line\n").unwrap();
+        log.flush().unwrap();
+
+        // 旧日志被备份，新日志写入当日文件
+        assert!(dir.join(format!("komf.{yesterday}.log")).exists(), "backup missing");
+        let cur = std::fs::read_to_string(dir.join("komf.log")).unwrap();
+        assert!(cur.contains("new line"), "current file missing new content");
+        assert!(!cur.contains("old line"), "old content leaked into current file");
+
+        // 同日再次写入：不重复备份
+        log.write_all(b"more\n").unwrap();
+        log.flush().unwrap();
+        assert!(!dir.join(format!("komf.{today}.log")).exists(), "unexpected same-day backup");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 首次启动残留跨天旧文件：按文件修改时间归档，不吞并旧日志。
+    #[test]
+    fn daily_log_first_start_archives_stale_file() {
+        let dir = std::env::temp_dir().join(format!("komf-log-test2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 制造一个昨天修改的 komf.log
+        std::fs::write(dir.join("komf.log"), b"stale\n").unwrap();
+        let yesterday_dt = chrono::Local::now() - chrono::Duration::days(1);
+        let stale: chrono::DateTime<chrono::Local> = yesterday_dt.into();
+        let filetime = std::fs::FileTimes::new()
+            .set_modified(stale.into());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("komf.log"))
+            .unwrap()
+            .set_times(filetime)
+            .unwrap();
+
+        let mut log = DailyLogFile::new(dir.clone()); // date 为空（首次）
+        use std::io::Write as _;
+        log.write_all(b"fresh\n").unwrap();
+        log.flush().unwrap();
+
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("komf.") && n.ends_with(".log") && n != "komf.log")
+            .collect();
+        assert_eq!(backups.len(), 1, "expected one backup, got {backups:?}");
+        let cur = std::fs::read_to_string(dir.join("komf.log")).unwrap();
+        assert!(cur.contains("fresh"));
+        assert!(!cur.contains("stale"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 过期日志清理：跨天轮转时删除超过 30 天的备份，近期备份与当日文件保留。
+    #[test]
+    fn prune_removes_old_backups_only() {
+        use chrono::Datelike;
+        let dir = std::env::temp_dir().join(format!("komf-log-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 构造：旧备份（60 天前）、近期备份（5 天前）、当日文件
+        let now = chrono::Local::now();
+        let old_date = (now - chrono::Duration::days(60)).format("%Y-%m-%d").to_string();
+        let recent_date = (now - chrono::Duration::days(5)).format("%Y-%m-%d").to_string();
+        let yesterday = (now - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        std::fs::write(dir.join(format!("komf.{old_date}.log")), b"old\n").unwrap();
+        std::fs::write(dir.join(format!("komf.{recent_date}.log")), b"recent\n").unwrap();
+        std::fs::write(dir.join("komf.log"), b"today\n").unwrap();
+
+        // 进程内 date 停在昨天，跨天首次写入触发轮转 + 清理
+        let mut log = DailyLogFile::new(dir.clone());
+        log.date = yesterday.clone();
+        use std::io::Write as _;
+        log.write_all(b"new\n").unwrap();
+        log.flush().unwrap();
+
+        assert!(!dir.join(format!("komf.{old_date}.log")).exists(), "old backup not pruned");
+        assert!(dir.join(format!("komf.{recent_date}.log")).exists(), "recent backup lost");
+        assert!(dir.join("komf.log").exists(), "current log lost");
+        assert!(dir.join(format!("komf.{yesterday}.log")).exists(), "yesterday backup missing");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

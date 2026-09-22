@@ -41,8 +41,6 @@ pub struct MediaServerModule {
     stump_client_core: Arc<StumpClient>,
     pub stump_metadata_service_provider: Arc<MetadataServiceProvider>,
     listener_tokens: Vec<CancellationToken>,
-    /// mylar ${configDir} 占位符基准（=配置目录，热重载重建 updater 时复用）。
-    mylar_config_dir: Option<std::path::PathBuf>,
 }
 
 impl Drop for MediaServerModule {
@@ -153,7 +151,6 @@ impl MediaServerModule {
             stump_client_core,
             stump_metadata_service_provider,
             listener_tokens: Vec::new(),
-            mylar_config_dir,
         };
 
         if komga_config.event_listener.enabled {

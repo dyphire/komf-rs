@@ -1931,9 +1931,10 @@ fn posted_to_release_date(posted: Option<i64>) -> Option<ReleaseDate> {
 // Provider —— 对应 Kotlin EHentaiMetadataProvider.kt
 // ---------------------------------------------------------------------------
 
-/// 简单 TTL 缓存 —— 对应 Kotlin cache4k expireAfterWrite(5.minutes)。
-/// Kotlin cache4k 默认 maximumSize=10000：容量超限时淘汰最旧条目（近似 LRU）。
-/// Rust 实现同样带上限，避免 Auto-Identify 扫库（gid 数量级可达数万）把缓存无限撑大。
+/// 简单 TTL 缓存 —— 语义参考 Kotlin cache4k expireAfterWrite(5.minutes)。
+/// Kotlin 原版没有 ehentai provider，本实现为 Rust 扩展；capacity 为 Rust 自定的
+/// 软上限（cache4k 默认无条目上限），用于避免 Auto-Identify 扫库（gid 数量级
+/// 可达数万）把缓存无限撑大。超限时淘汰最旧条目（近似 LRU）。
 struct TtlCache<K, V> {
     inner: tokio::sync::Mutex<HashMap<K, (V, std::time::Instant)>>,
     ttl: Duration,

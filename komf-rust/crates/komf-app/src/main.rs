@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::args().nth(1).map(std::path::PathBuf::from));
 
     let config = komf_app::config::ConfigLoader::load(config_path.as_deref());
-    init_logging(&config.log_level);
+    init_logging(&config.log_level, config_path.as_deref());
     tracing::info!("komf-rs starting, log level: {}", config.log_level);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
