@@ -20,24 +20,26 @@ use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
 use crate::util::NameSimilarityMatcher;
 use komf_api_models::config::DownloadProgress;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // API 模型（snake_case 与 MangaBaka API 一致）
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaSearchResponse {
     data: Vec<MangaBakaSeriesDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaSeriesResponse {
     data: MangaBakaSeriesDto,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct MangaBakaSeriesDto {
     id: i32,
@@ -59,7 +61,7 @@ struct MangaBakaSeriesDto {
     source: MangaBakaSourceDto,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct MangaBakaCoverDto {
     #[allow(dead_code)]
@@ -69,7 +71,7 @@ struct MangaBakaCoverDto {
     x350: Option<MangaBakaCoverDpiDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaCoverDpiDto {
     x1: Option<String>,
     #[allow(dead_code)]
@@ -78,26 +80,26 @@ struct MangaBakaCoverDpiDto {
     x3: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaPublisherDto {
     name: Option<String>,
     #[serde(rename = "type")]
     type_: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaLinkDto {
     name_display: String,
     url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct MangaBakaPublishedDateDto {
     start_date: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct MangaBakaTagDto {
     name: String,
@@ -105,7 +107,7 @@ struct MangaBakaTagDto {
     is_genre: bool,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct MangaBakaTitleDto {
     language: String,
     title: String,
@@ -114,7 +116,7 @@ struct MangaBakaTitleDto {
     is_primary: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaSourceDto {
     anilist: Option<MangaBakaSourceEntryDto>,
     anime_news_network: Option<MangaBakaSourceEntryDto>,
@@ -126,7 +128,7 @@ struct MangaBakaSourceDto {
     shikimori: Option<MangaBakaSourceEntryDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MangaBakaSourceEntryDto {
     id: Option<serde_json::Value>,
 }
@@ -653,6 +655,54 @@ fn decode_entity(entity: &str) -> String {
 // ---------------------------------------------------------------------------
 // Provider —— 对应 `MangaBakaMetadataProvider.kt`
 // ---------------------------------------------------------------------------
+// 简单 TTL 缓存 —— 对应 Kotlin cache4k expireAfterWrite(30.minutes)。
+// Kotlin 未配置 maximumSize（cache4k 默认无条目上限），此处保持一致。
+// ---------------------------------------------------------------------------
+
+struct TtlCache<K, V> {
+    inner: tokio::sync::Mutex<HashMap<K, (V, Instant)>>,
+    ttl: Duration,
+}
+
+impl<K, V> TtlCache<K, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+    V: Clone,
+{
+    fn new(ttl: Duration) -> Self {
+        Self {
+            inner: tokio::sync::Mutex::new(HashMap::new()),
+            ttl,
+        }
+    }
+
+    /// Kotlin cache4k：命中且未过期直接返回；未命中执行 load，仅成功结果入缓存。
+    async fn get_or_load<E, F, Fut>(&self, key: K, load: F) -> Result<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
+        {
+            let guard = self.inner.lock().await;
+            if let Some((value, created)) = guard.get(&key) {
+                if created.elapsed() < self.ttl {
+                    return Ok(value.clone());
+                }
+            }
+        }
+        let value = load().await?;
+        let mut guard = self.inner.lock().await;
+        guard.insert(key, (value.clone(), Instant::now()));
+        Ok(value)
+    }
+
+    async fn put(&self, key: K, value: V) {
+        let mut guard = self.inner.lock().await;
+        guard.insert(key, (value, Instant::now()));
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 pub struct MangaBakaMetadataProvider {
     data_source: MangaBakaDataSource,
@@ -661,6 +711,8 @@ pub struct MangaBakaMetadataProvider {
     cover_fetch_client: Option<reqwest::Client>,
     type_includes: Vec<MangaBakaTypeDto>,
     type_excludes: Vec<MangaBakaTypeDto>,
+    /// 对应 Kotlin cache4k expireAfterWrite(30.minutes)（无 maximumSize）
+    cache: TtlCache<i32, MangaBakaSeriesDto>,
 }
 
 pub fn create_provider(
@@ -719,6 +771,7 @@ pub fn create_provider(
             .then(|| http_client.clone()),
         type_includes,
         type_excludes,
+        cache: TtlCache::new(Duration::from_secs(30 * 60)),
     })
 }
 
@@ -764,8 +817,9 @@ impl MetadataProvider for MangaBakaMetadataProvider {
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
-        let id = self.resolve_link_id(query)?;
-        let series = self.data_source.get_series(id.parse().ok()?).await.ok()?;
+        let id: i32 = self.resolve_link_id(query)?.parse().ok()?;
+        let series = self.data_source.get_series(id).await.ok()?;
+        self.cache.put(id, series.clone()).await;
         Some(self.metadata_mapper.to_series_search_result(&series))
     }
 
@@ -776,7 +830,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         let id: i32 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
         })?;
-        let series = self.data_source.get_series(id).await?;
+        let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
         let cover = self.fetch_cover(&series).await;
         Ok(self.metadata_mapper.to_series_metadata(&series, cover))
     }
@@ -788,7 +842,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         let id: i32 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
         })?;
-        let series = self.data_source.get_series(id).await?;
+        let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
         Ok(self.fetch_cover(&series).await)
     }
 
@@ -811,6 +865,9 @@ impl MetadataProvider for MangaBakaMetadataProvider {
             .data_source
             .search(series_name, &self.type_includes, &self.type_excludes)
             .await?;
+        for r in &results {
+            self.cache.put(r.id, r.clone()).await;
+        }
         Ok(results
             .iter()
             .take(limit)
@@ -831,6 +888,9 @@ impl MetadataProvider for MangaBakaMetadataProvider {
                 &self.type_excludes,
             )
             .await?;
+        for r in &results {
+            self.cache.put(r.id, r.clone()).await;
+        }
         let matched = results.iter().find(|series| {
             let titles: Vec<String> = series
                 .titles

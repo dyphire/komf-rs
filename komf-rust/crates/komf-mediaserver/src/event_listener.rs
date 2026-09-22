@@ -407,6 +407,8 @@ impl KomgaEventHandler {
     }
 
     async fn handle_event(&self, event: crate::komga::KomgaEvent) {
+        // 对齐 Kotlin KomgaEventHandler `logger.debug { event }`：每个 SSE 事件入日志
+        tracing::debug!("komga event: {event:?}");
         match event {
             crate::komga::KomgaEvent::BookAdded { book_id, series_id, library_id } => {
                 self.book_added.lock().await.push(BookEvent {
