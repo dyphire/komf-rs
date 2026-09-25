@@ -48,9 +48,17 @@ macro_rules! series_fields {
   metadata {
     seriesId
     ageRating
+    booktype
+    characters
+    collects { series comicid issueid issues }
+    comicImage
+    comicid
     descriptionFormatted
     genres
+    imprint
     links
+    metaType
+    publicationRun
     publisher
     status
     summary
@@ -88,21 +96,40 @@ macro_rules! media_fields {
   metadata {
     mediaId
     ageRating
+    characters
+    colorists
+    coverArtists
     day
+    editors
+    format
+    genres
+    identifierAmazon
+    identifierCalibre
+    identifierGoogle
     identifierIsbn
+    identifierMobiAsin
+    identifierUuid
+    inkers
     language
+    letterers
+    links
     month
+    notes
     number
     pageCount
+    pencillers
     publisher
+    series
+    seriesGroup
+    storyArc
+    storyArcNumber
     summary
+    teams
     title
     titleSort
     volume
-    year
     writers
-    genres
-    links
+    year
   }
 }"#
     };
@@ -248,11 +275,28 @@ pub struct StumpSeriesMetadataDto {
     #[serde(default)]
     pub age_rating: Option<i32>,
     #[serde(default)]
+    pub booktype: Option<String>,
+    #[serde(default)]
+    pub characters: Vec<String>,
+    /// 收录项（`CollectedItem` 对象列表，先读后写时原样透传）。
+    #[serde(default)]
+    pub collects: Vec<Value>,
+    #[serde(default)]
+    pub comic_image: Option<String>,
+    #[serde(default)]
+    pub comicid: Option<i32>,
+    #[serde(default)]
     pub description_formatted: Option<String>,
     #[serde(default)]
     pub genres: Vec<String>,
     #[serde(default)]
+    pub imprint: Option<String>,
+    #[serde(default)]
     pub links: Vec<String>,
+    #[serde(default)]
+    pub meta_type: Option<String>,
+    #[serde(default)]
+    pub publication_run: Option<String>,
     #[serde(default)]
     pub publisher: Option<String>,
     /// "Continuing" / "Ended" / null
@@ -306,22 +350,65 @@ pub struct StumpMediaMetadataDto {
     #[serde(default)]
     pub age_rating: Option<i32>,
     #[serde(default)]
+    pub characters: Vec<String>,
+    #[serde(default)]
+    pub colorists: Vec<String>,
+    #[serde(default)]
+    pub cover_artists: Vec<String>,
+    #[serde(default)]
     pub day: Option<i32>,
+    #[serde(default)]
+    pub editors: Vec<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub identifier_amazon: Option<String>,
+    #[serde(default)]
+    pub identifier_calibre: Option<String>,
+    #[serde(default)]
+    pub identifier_google: Option<String>,
     #[serde(default)]
     pub identifier_isbn: Option<String>,
     #[serde(default)]
+    pub identifier_mobi_asin: Option<String>,
+    #[serde(default)]
+    pub identifier_uuid: Option<String>,
+    #[serde(default)]
+    pub inkers: Vec<String>,
+    #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
+    pub letterers: Vec<String>,
+    #[serde(default)]
+    pub links: Vec<String>,
+    #[serde(default)]
     pub month: Option<i32>,
+    #[serde(default)]
+    pub notes: Option<String>,
     /// Decimal 标量在 JSON 中以字符串传输（async-graphql rust_decimal 序列化）。
     #[serde(default)]
     pub number: Option<String>,
     #[serde(default)]
     pub page_count: Option<i32>,
     #[serde(default)]
+    pub pencillers: Vec<String>,
+    #[serde(default)]
     pub publisher: Option<String>,
     #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub series_group: Option<String>,
+    #[serde(default)]
+    pub story_arc: Option<String>,
+    /// Decimal 标量，字符串传输。
+    #[serde(default)]
+    pub story_arc_number: Option<String>,
+    #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
+    pub teams: Vec<String>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -329,13 +416,9 @@ pub struct StumpMediaMetadataDto {
     #[serde(default)]
     pub volume: Option<i32>,
     #[serde(default)]
-    pub year: Option<i32>,
-    #[serde(default)]
     pub writers: Vec<String>,
     #[serde(default)]
-    pub genres: Vec<String>,
-    #[serde(default)]
-    pub links: Vec<String>,
+    pub year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -913,111 +996,297 @@ fn to_media_server_library(dto: &StumpLibraryDto) -> MediaServerLibrary {
 // 更新输入构造：MediaServer*MetadataUpdate -> Stump GraphQL Input（camelCase）
 // ---------------------------------------------------------------------------
 
-/// 构造 `SeriesMetadataInput`。Stump 无对应列的字段（titleSort/readingDirection/
-/// language/alternativeTitles/alternativePublishers）静默丢弃；tags 经独立
-/// `setSeriesTags` 写入（见适配器 `update_series_metadata`）。
-fn build_series_metadata_input(metadata: &MediaServerSeriesMetadataUpdate) -> Value {
+/// 构造 `SeriesMetadataInput`（先读后写：`current` 为更新前读取的现有元数据）。
+///
+/// 实测 Stump update 为"缺省即清空"语义：input 中未出现的字段会被重置为空/None，
+/// 因此必须先读当前值、把所有要保留的字段显式带全，再用本次更新覆盖——
+/// 否则 provider 未返回的字段会被静默清空（P0 数据丢失）。
+/// 透传规则：本次更新 `Some(非空)` 覆盖；否则当前值非空则保留；否则省略
+/// （省略即清空，用于表达"清空"意图）。`booktype/collects/metaType` 等
+/// Stump 内部字段 komf 不更新，仅透传当前值以防误清。
+/// komf 无对应列的字段（titleSort/readingDirection/language/alternativeTitles/
+/// alternativePublishers）静默丢弃；tags 经独立 `setSeriesTags` 写入。
+fn build_series_metadata_input(
+    current: &StumpSeriesMetadataDto,
+    metadata: &MediaServerSeriesMetadataUpdate,
+) -> Value {
     let mut input = serde_json::Map::new();
-    if let Some(status) = metadata.status {
-        input.insert("status".to_string(), json!(to_stump_status(status)));
+
+    let status = match metadata.status {
+        Some(status) => Some(to_stump_status(status).to_string()),
+        None => current.status.clone(),
+    };
+    if let Some(status) = status {
+        input.insert("status".to_string(), json!(status));
     }
-    if let Some(title) = &metadata.title {
-        input.insert("title".to_string(), json!(title.name));
+
+    let title = metadata
+        .title
+        .as_ref()
+        .map(|t| t.name.clone())
+        .or_else(|| current.title.clone());
+    if let Some(title) = title {
+        input.insert("title".to_string(), json!(title));
     }
-    if let Some(summary) = &metadata.summary {
+
+    let summary = metadata.summary.clone().or_else(|| current.summary.clone());
+    if let Some(summary) = summary {
         input.insert("summary".to_string(), json!(summary));
     }
-    if let Some(publisher) = &metadata.publisher {
+
+    let publisher = metadata.publisher.clone().or_else(|| current.publisher.clone());
+    if let Some(publisher) = publisher {
         input.insert("publisher".to_string(), json!(publisher));
     }
-    if let Some(age_rating) = metadata.age_rating {
+
+    if let Some(age_rating) = metadata.age_rating.or(current.age_rating) {
         input.insert("ageRating".to_string(), json!(age_rating));
     }
-    if let Some(genres) = &metadata.genres {
-        if !genres.is_empty() {
-            input.insert("genres".to_string(), json!(genres));
-        }
-    }
-    if let Some(links) = &metadata.links {
-        let urls: Vec<String> = links.iter().map(|l| l.url.clone()).collect();
-        if !urls.is_empty() {
-            input.insert("links".to_string(), json!(urls));
-        }
-    }
-    if let Some(total_book_count) = metadata.total_book_count {
+
+    if let Some(total_book_count) = metadata.total_book_count.or(current.total_issues) {
         input.insert("totalIssues".to_string(), json!(total_book_count));
     }
-    if let Some(authors) = &metadata.authors {
-        let writers: Vec<String> = authors
-            .iter()
-            .filter(|a| is_writer_role(&a.role))
-            .map(|a| a.name.clone())
-            .collect();
-        if !writers.is_empty() {
-            input.insert("writers".to_string(), json!(writers));
-        }
-    }
-    if let Some(release_year) = metadata.release_year {
+
+    if let Some(release_year) = metadata.release_year.or(current.year) {
         input.insert("year".to_string(), json!(release_year));
     }
+
+    // 列表字段：update Some(非空)=覆盖；Some(空)=清空意图（省略，靠缺省清空）；None 且当前非空=保留。
+    let genres = match &metadata.genres {
+        Some(genres) if !genres.is_empty() => Some(genres.clone()),
+        Some(_) => None,
+        None => (!current.genres.is_empty()).then(|| current.genres.clone()),
+    };
+    if let Some(genres) = genres {
+        input.insert("genres".to_string(), json!(genres));
+    }
+
+    let links = match &metadata.links {
+        Some(links) if !links.is_empty() => Some(links.iter().map(|l| l.url.clone()).collect::<Vec<_>>()),
+        Some(_) => None,
+        None => (!current.links.is_empty()).then(|| current.links.clone()),
+    };
+    if let Some(links) = links {
+        input.insert("links".to_string(), json!(links));
+    }
+
+    // writers：仅收纳 Writer 角色；Some(过滤后空)=清空；None 且当前非空=保留。
+    let writers = match &metadata.authors {
+        Some(authors) => {
+            let writers: Vec<String> = authors
+                .iter()
+                .filter(|a| is_writer_role(&a.role))
+                .map(|a| a.name.clone())
+                .collect();
+            if writers.is_empty() {
+                None
+            } else {
+                Some(writers)
+            }
+        }
+        None => (!current.writers.is_empty()).then(|| current.writers.clone()),
+    };
+    if let Some(writers) = writers {
+        input.insert("writers".to_string(), json!(writers));
+    }
+
+    // Stump 内部/未映射字段：仅透传当前值（komf 不更新它们，保留原样防清空）。
+    if let Some(booktype) = &current.booktype {
+        input.insert("booktype".to_string(), json!(booktype));
+    }
+    if let Some(comic_image) = &current.comic_image {
+        input.insert("comicImage".to_string(), json!(comic_image));
+    }
+    if let Some(comicid) = current.comicid {
+        input.insert("comicid".to_string(), json!(comicid));
+    }
+    if let Some(description_formatted) = &current.description_formatted {
+        input.insert("descriptionFormatted".to_string(), json!(description_formatted));
+    }
+    if let Some(imprint) = &current.imprint {
+        input.insert("imprint".to_string(), json!(imprint));
+    }
+    if let Some(meta_type) = &current.meta_type {
+        input.insert("metaType".to_string(), json!(meta_type));
+    }
+    if let Some(publication_run) = &current.publication_run {
+        input.insert("publicationRun".to_string(), json!(publication_run));
+    }
+    if !current.characters.is_empty() {
+        input.insert("characters".to_string(), json!(current.characters));
+    }
+    if !current.collects.is_empty() {
+        input.insert("collects".to_string(), json!(current.collects));
+    }
+
     Value::Object(input)
 }
 
-/// 构造 `MediaMetadataInput`。字段全部可写；None = 不改（Stump ActiveValue 语义）。
-fn build_media_metadata_input(metadata: &MediaServerBookMetadataUpdate) -> Value {
+/// 构造 `MediaMetadataInput`（先读后写：`current` 为更新前读取的现有元数据）。
+/// 语义与 `build_series_metadata_input` 相同：未更新且当前有值的字段显式保留，
+/// 避免 Stump"缺省即清空"误清；`update` 的 `Some(非空)` 覆盖、`Some(空)` 清空。
+fn build_media_metadata_input(
+    current: &StumpMediaMetadataDto,
+    metadata: &MediaServerBookMetadataUpdate,
+) -> Value {
     let mut input = serde_json::Map::new();
-    if let Some(title) = &metadata.title {
+
+    let title = metadata.title.clone().or_else(|| current.title.clone());
+    if let Some(title) = title {
         input.insert("title".to_string(), json!(title));
     }
-    if let Some(summary) = &metadata.summary {
+
+    let summary = metadata.summary.clone().or_else(|| current.summary.clone());
+    if let Some(summary) = summary {
         input.insert("summary".to_string(), json!(summary));
     }
-    if let Some(number) = &metadata.number {
+
+    let number = metadata.number.clone().or_else(|| current.number.clone());
+    if let Some(number) = number {
         // Decimal 标量以字符串传输
         input.insert("number".to_string(), json!(number));
     }
-    if let Some(authors) = &metadata.authors {
-        let writers: Vec<String> = authors
-            .iter()
-            .filter(|a| is_writer_role(&a.role))
-            .map(|a| a.name.clone())
-            .collect();
-        if !writers.is_empty() {
-            input.insert("writers".to_string(), json!(writers));
-        }
-    }
-    if let Some(tags) = &metadata.tags {
-        if !tags.is_empty() {
-            input.insert("genres".to_string(), json!(tags));
-        }
-    }
-    if let Some(isbn) = &metadata.isbn {
+
+    let isbn = metadata.isbn.clone().or_else(|| current.identifier_isbn.clone());
+    if let Some(isbn) = isbn {
         input.insert("identifierIsbn".to_string(), json!(isbn));
     }
-    if let Some(links) = &metadata.links {
-        let urls: Vec<String> = links.iter().map(|l| l.url.clone()).collect();
-        if !urls.is_empty() {
-            input.insert("links".to_string(), json!(urls));
+
+    // writers：仅收纳 Writer 角色；Some(过滤后空)=清空；None 且当前非空=保留。
+    let writers = match &metadata.authors {
+        Some(authors) => {
+            let writers: Vec<String> = authors
+                .iter()
+                .filter(|a| is_writer_role(&a.role))
+                .map(|a| a.name.clone())
+                .collect();
+            if writers.is_empty() {
+                None
+            } else {
+                Some(writers)
+            }
         }
+        None => (!current.writers.is_empty()).then(|| current.writers.clone()),
+    };
+    if let Some(writers) = writers {
+        input.insert("writers".to_string(), json!(writers));
     }
-    if let Some(release_date) = &metadata.release_date {
-        let (year, month, day) = parse_release_date(release_date);
-        if let Some(year) = year {
-            input.insert("year".to_string(), json!(year));
-        }
-        if let Some(month) = month {
-            input.insert("month".to_string(), json!(month));
-        }
-        if let Some(day) = day {
-            input.insert("day".to_string(), json!(day));
-        }
+
+    // genres：komf `tags` 写入 Stump `genres`（既有映射）。
+    let genres = match &metadata.tags {
+        Some(tags) if !tags.is_empty() => Some(tags.clone()),
+        Some(_) => None,
+        None => (!current.genres.is_empty()).then(|| current.genres.clone()),
+    };
+    if let Some(genres) = genres {
+        input.insert("genres".to_string(), json!(genres));
     }
+
+    let links = match &metadata.links {
+        Some(links) if !links.is_empty() => Some(links.iter().map(|l| l.url.clone()).collect::<Vec<_>>()),
+        Some(_) => None,
+        None => (!current.links.is_empty()).then(|| current.links.clone()),
+    };
+    if let Some(links) = links {
+        input.insert("links".to_string(), json!(links));
+    }
+
+    // 出版日期：update 提供的段覆盖；未提供的段保留当前值（防误清）；update 未提供则全部保留。
+    let (year, month, day) = match &metadata.release_date {
+        Some(release_date) => parse_release_date(release_date),
+        None => (None, None, None),
+    };
+    if let Some(year) = year.map(|y| y as i32).or(current.year) {
+        input.insert("year".to_string(), json!(year));
+    }
+    if let Some(month) = month.map(|m| m as i32).or(current.month) {
+        input.insert("month".to_string(), json!(month));
+    }
+    if let Some(day) = day.map(|d| d as i32).or(current.day) {
+        input.insert("day".to_string(), json!(day));
+    }
+
+    // Stump 其余可写字段：仅透传当前值（komf 不更新，保留原样防清空）。
+    if let Some(title_sort) = &current.title_sort {
+        input.insert("titleSort".to_string(), json!(title_sort));
+    }
+    if let Some(series) = &current.series {
+        input.insert("series".to_string(), json!(series));
+    }
+    if let Some(series_group) = &current.series_group {
+        input.insert("seriesGroup".to_string(), json!(series_group));
+    }
+    if let Some(story_arc) = &current.story_arc {
+        input.insert("storyArc".to_string(), json!(story_arc));
+    }
+    if let Some(story_arc_number) = &current.story_arc_number {
+        input.insert("storyArcNumber".to_string(), json!(story_arc_number));
+    }
+    if let Some(notes) = &current.notes {
+        input.insert("notes".to_string(), json!(notes));
+    }
+    if let Some(format) = &current.format {
+        input.insert("format".to_string(), json!(format));
+    }
+    if let Some(page_count) = current.page_count {
+        input.insert("pageCount".to_string(), json!(page_count));
+    }
+    if let Some(age_rating) = current.age_rating {
+        input.insert("ageRating".to_string(), json!(age_rating));
+    }
+    if let Some(language) = &current.language {
+        input.insert("language".to_string(), json!(language));
+    }
+    if let Some(identifier_amazon) = &current.identifier_amazon {
+        input.insert("identifierAmazon".to_string(), json!(identifier_amazon));
+    }
+    if let Some(identifier_calibre) = &current.identifier_calibre {
+        input.insert("identifierCalibre".to_string(), json!(identifier_calibre));
+    }
+    if let Some(identifier_google) = &current.identifier_google {
+        input.insert("identifierGoogle".to_string(), json!(identifier_google));
+    }
+    if let Some(identifier_mobi_asin) = &current.identifier_mobi_asin {
+        input.insert("identifierMobiAsin".to_string(), json!(identifier_mobi_asin));
+    }
+    if let Some(identifier_uuid) = &current.identifier_uuid {
+        input.insert("identifierUuid".to_string(), json!(identifier_uuid));
+    }
+    if let Some(volume) = current.volume {
+        input.insert("volume".to_string(), json!(volume));
+    }
+    if !current.characters.is_empty() {
+        input.insert("characters".to_string(), json!(current.characters));
+    }
+    if !current.pencillers.is_empty() {
+        input.insert("pencillers".to_string(), json!(current.pencillers));
+    }
+    if !current.inkers.is_empty() {
+        input.insert("inkers".to_string(), json!(current.inkers));
+    }
+    if !current.colorists.is_empty() {
+        input.insert("colorists".to_string(), json!(current.colorists));
+    }
+    if !current.letterers.is_empty() {
+        input.insert("letterers".to_string(), json!(current.letterers));
+    }
+    if !current.cover_artists.is_empty() {
+        input.insert("coverArtists".to_string(), json!(current.cover_artists));
+    }
+    if !current.editors.is_empty() {
+        input.insert("editors".to_string(), json!(current.editors));
+    }
+    if !current.teams.is_empty() {
+        input.insert("teams".to_string(), json!(current.teams));
+    }
+
     Value::Object(input)
 }
 
 /// 书级重置（Stump 无 resetMediaMetadata）：用 updateMediaMetadata 置空可清字段。
-/// 注意 Stump 对 None 输入为"不改"，故清空用空串/空列表；number/identifiers 等
-/// 无法用空值表达，需 Stump 侧补 resetMediaMetadata 才能完全等价（TODO）。
+/// 实测 Stump update 为"缺省即清空"语义：显式传 title（保留书名），其余字段
+/// 靠缺省被清空，恰好达到重置目的；若未来 Stump 改为部分更新（ActiveValue），
+/// 需补全其余字段的显式空值（number/identifiers 等暂无空值表达，TODO）。
 fn build_media_reset_input(book: &MediaServerBook) -> Value {
     json!({
         "title": book.metadata.title,
@@ -1161,7 +1430,13 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         series_id: &MediaServerSeriesId,
         metadata: &MediaServerSeriesMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let input = build_series_metadata_input(metadata);
+        // 先读后写：Stump update 为"缺省即清空"语义，必须以当前值全量提交，
+        // 否则本次更新会静默清空未传入字段（见 build_series_metadata_input）。
+        let current = self.client.get_series_dto(&series_id.0).await?;
+        let input = build_series_metadata_input(
+            current.metadata.as_ref().unwrap_or(&StumpSeriesMetadataDto::default()),
+            metadata,
+        );
         self.client.update_series_metadata(&series_id.0, &input).await?;
         // 系列 tags（与 genres 分离）经独立 setSeriesTags 写入
         if let Some(tags) = &metadata.tags {
@@ -1186,7 +1461,12 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         book_id: &MediaServerBookId,
         metadata: &MediaServerBookMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let input = build_media_metadata_input(metadata);
+        // 同 update_series_metadata：先读当前值再全量提交，防止缺省清空误伤。
+        let current = self.client.get_media_dto(&book_id.0).await?;
+        let input = build_media_metadata_input(
+            current.metadata.as_ref().unwrap_or(&StumpMediaMetadataDto::default()),
+            metadata,
+        );
         self.client.update_media_metadata(&book_id.0, &input).await
     }
 
@@ -1294,6 +1574,10 @@ mod tests {
             "metadata": {
                 "seriesId": "series-1",
                 "ageRating": 17,
+                "booktype": "MANGA",
+                "characters": ["Denji"],
+                "comicImage": "https://example.com/c.jpg",
+                "comicid": 123,
                 "genres": ["Action", "Dark Fantasy"],
                 "links": ["https://example.com/series/berserk"],
                 "publisher": "Hakusensha",
@@ -1347,6 +1631,8 @@ mod tests {
 
     #[test]
     fn series_metadata_input_builder() {
+        let current: StumpSeriesMetadataDto =
+            serde_json::from_value(series_dto_sample()["metadata"].clone()).unwrap();
         let update = MediaServerSeriesMetadataUpdate {
             status: Some(SeriesStatus::Ended),
             title: Some(komf_core::model::SeriesTitle {
@@ -1367,7 +1653,7 @@ mod tests {
             release_year: Some(1989),
             ..Default::default()
         };
-        let input = build_series_metadata_input(&update);
+        let input = build_series_metadata_input(&current, &update);
         assert_eq!(input["status"], "Ended");
         assert_eq!(input["title"], "Berserk");
         assert_eq!(input["totalIssues"], 41);
@@ -1378,7 +1664,61 @@ mod tests {
     }
 
     #[test]
+    fn series_metadata_input_builder_preserves_untouched_fields() {
+        // 只更新 title：其余当前有值字段（genres/writers/year/status/booktype 等）必须保留，
+        // 否则 Stump"缺省即清空"会静默清空它们（P0 回归）。
+        let current: StumpSeriesMetadataDto =
+            serde_json::from_value(series_dto_sample()["metadata"].clone()).unwrap();
+        let update = MediaServerSeriesMetadataUpdate {
+            title: Some(komf_core::model::SeriesTitle {
+                name: "Berserk 2".into(),
+                r#type: None,
+                language: None,
+            }),
+            ..Default::default()
+        };
+        let input = build_series_metadata_input(&current, &update);
+        assert_eq!(input["title"], "Berserk 2");
+        assert_eq!(input["status"], "Continuing");
+        assert_eq!(input["genres"], json!(["Action", "Dark Fantasy"]));
+        assert_eq!(input["writers"], json!(["Kentaro Miura"]));
+        assert_eq!(input["year"], 1989);
+        // Stump 内部字段透传保留
+        assert_eq!(input["booktype"], "MANGA");
+        assert_eq!(input["characters"], json!(["Denji"]));
+        assert_eq!(input["comicid"], 123);
+        assert_eq!(input["comicImage"], "https://example.com/c.jpg");
+    }
+
+    #[test]
+    fn series_metadata_input_builder_empty_list_means_clear() {
+        // update 显式 Some(空) 表示清空：省略该字段，靠 Stump 缺省清空语义实现。
+        let current: StumpSeriesMetadataDto =
+            serde_json::from_value(series_dto_sample()["metadata"].clone()).unwrap();
+        let update = MediaServerSeriesMetadataUpdate {
+            genres: Some(vec![]),
+            links: Some(vec![]),
+            ..Default::default()
+        };
+        let input = build_series_metadata_input(&current, &update);
+        assert!(input.get("genres").is_none());
+        assert!(input.get("links").is_none());
+        // 其余未提及字段仍保留
+        assert_eq!(input["title"], "Berserk");
+    }
+
+    #[test]
     fn media_metadata_input_builder() {
+        let current = StumpMediaMetadataDto {
+            title: Some("Vol 1".into()),
+            summary: Some("old summary".into()),
+            number: Some("1.0".into()),
+            writers: vec!["Old Writer".into()],
+            genres: vec!["Old Genre".into()],
+            year: Some(2010),
+            identifier_isbn: Some("978-4-00-000000-0".into()),
+            ..Default::default()
+        };
         let update = MediaServerBookMetadataUpdate {
             title: Some("Vol 1".into()),
             summary: Some("summary".into()),
@@ -1389,11 +1729,83 @@ mod tests {
             links: Some(vec![WebLink { label: "x".into(), url: "https://x".into() }]),
             ..Default::default()
         };
-        let input = build_media_metadata_input(&update);
+        let input = build_media_metadata_input(&current, &update);
         assert_eq!(input["number"], "1.5");
         assert_eq!(input["year"], 2016);
         assert_eq!(input["month"], 9);
         assert_eq!(input["day"], 2);
         assert_eq!(input["identifierIsbn"], "978-4-00-000000-0");
+        assert_eq!(input["writers"], json!(["Kentaro Miura"]));
+    }
+
+    #[test]
+    fn media_metadata_input_builder_preserves_untouched_fields() {
+        // 只更新 title：current 中未更新的字段（number/writers/genres/日期/ageRating 等）必须保留。
+        let current = StumpMediaMetadataDto {
+            title: Some("Vol 1".into()),
+            number: Some("1.5".into()),
+            writers: vec!["Kentaro Miura".into()],
+            genres: vec!["Action".into()],
+            year: Some(2016),
+            month: Some(9),
+            day: Some(2),
+            age_rating: Some(17),
+            language: Some("en".into()),
+            format: Some("Paperback".into()),
+            page_count: Some(208),
+            ..Default::default()
+        };
+        let update = MediaServerBookMetadataUpdate {
+            title: Some("Vol 1".into()),
+            ..Default::default()
+        };
+        let input = build_media_metadata_input(&current, &update);
+        assert_eq!(input["number"], "1.5");
+        assert_eq!(input["writers"], json!(["Kentaro Miura"]));
+        assert_eq!(input["genres"], json!(["Action"]));
+        assert_eq!(input["year"], 2016);
+        assert_eq!(input["month"], 9);
+        assert_eq!(input["day"], 2);
+        assert_eq!(input["ageRating"], 17);
+        assert_eq!(input["language"], "en");
+        assert_eq!(input["format"], "Paperback");
+        assert_eq!(input["pageCount"], 208);
+    }
+
+    #[test]
+    fn media_metadata_input_builder_partial_release_date_keeps_rest() {
+        // update 只提供年份：未提供的月/日保留当前值，防止缺省清空误伤。
+        let current = StumpMediaMetadataDto {
+            title: Some("Vol 1".into()),
+            year: Some(2016),
+            month: Some(9),
+            day: Some(2),
+            ..Default::default()
+        };
+        let update = MediaServerBookMetadataUpdate {
+            release_date: Some("2017".into()),
+            ..Default::default()
+        };
+        let input = build_media_metadata_input(&current, &update);
+        assert_eq!(input["year"], 2017);
+        assert_eq!(input["month"], 9);
+        assert_eq!(input["day"], 2);
+    }
+
+    #[test]
+    fn media_metadata_input_builder_empty_tags_means_clear() {
+        // update.tags = Some(空) 表示清空 genres：省略该字段，靠缺省清空。
+        let current = StumpMediaMetadataDto {
+            title: Some("Vol 1".into()),
+            genres: vec!["Action".into()],
+            ..Default::default()
+        };
+        let update = MediaServerBookMetadataUpdate {
+            tags: Some(vec![]),
+            ..Default::default()
+        };
+        let input = build_media_metadata_input(&current, &update);
+        assert!(input.get("genres").is_none());
+        assert_eq!(input["title"], "Vol 1");
     }
 }

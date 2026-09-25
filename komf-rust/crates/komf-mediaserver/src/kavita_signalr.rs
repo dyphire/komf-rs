@@ -9,6 +9,14 @@
 //! - `CoverUpdate`（entityType == "volume"）：记录卷 id（封面更新 = 扫描产物）。
 //! - `SeriesRemoved`：派发 `onSeriesDeleted`。
 //! 断线后每 10 秒自动重连（对应 Kotlin `onClosed` + `delaySubscription(10s)`）。
+//!
+//! 传输层按 ASP.NET Core SignalR 协议规范实现：
+//! - negotiate 必须为 **POST**（GET 会被服务端 405）；
+//! - `negotiateVersion=1` 的响应同时含 `connectionId` 与 `connectionToken`，
+//!   后续 SSE/LongPolling 连接请求的 `id` 查询值必须用 **connectionToken**；
+//! - SSE/LongPolling 连接请求必须携带 `transport` 查询参数（缺失 400）；
+//! - 传输建立后客户端必须先 POST 握手帧 `{"protocol":"json","version":1}\x1e`，
+//!   服务端在 SSE 流上回握手响应，之后才派发 hub 消息（HandshakeTimeout 默认 15s）。
 use crate::client::MediaServerError;
 use crate::event_listener::{BookEvent, MediaServerEventListener, SeriesEvent};
 use crate::kavita::{KavitaChapter, KavitaClient, KavitaVolume};
@@ -21,6 +29,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// SignalR 握手消息（`{"protocol":"json","version":1}\x1e`，record separator 结尾）。
+const HANDSHAKE_MESSAGE: &str = "{\"protocol\":\"json\",\"version\":1}\u{1e}";
 
 /// SignalR 心跳间隔（对应客户端默认 15s 空闲 Ping）。
 const PING_INTERVAL: Duration = Duration::from_secs(15);
@@ -93,9 +104,19 @@ impl SignalRState {
 #[serde(rename_all = "camelCase")]
 struct NegotiateResponse {
     connection_id: String,
+    /// `negotiateVersion>=1` 起服务端同时返回 connectionToken；连接请求的 `id`
+    /// 必须用该值（ASP.NET Core 规范），缺失时回退 connectionId。
+    connection_token: Option<String>,
     #[allow(dead_code)]
     negotiate_version: Option<i32>,
     available_transports: Option<Vec<TransportInfo>>,
+}
+
+impl NegotiateResponse {
+    /// 连接请求（SSE / LongPolling / 消息 POST）应使用的 `id` 查询值。
+    fn connection_id_for_requests(&self) -> &str {
+        self.connection_token.as_deref().unwrap_or(&self.connection_id)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,9 +176,11 @@ impl KavitaSignalREventHandler {
         let jwt = self.client.access_token().await?;
         tracing::debug!("kavita signalr: negotiating");
         let negotiate = self.negotiate(&jwt).await?;
+        let connection = negotiate.connection_id_for_requests();
         tracing::debug!(
-            "kavita signalr: negotiated connectionId={}",
-            negotiate.connection_id
+            "kavita signalr: negotiated connectionId={} (requests use token={})",
+            negotiate.connection_id,
+            connection
         );
 
         let supports_sse = negotiate.available_transports.as_ref().is_none_or(|transports| {
@@ -168,17 +191,20 @@ impl KavitaSignalREventHandler {
                 "Kavita signalr negotiate did not advertise ServerSentEvents; \
                  falling back to LongPolling transport"
             );
-            return self.run_long_polling(&jwt, &negotiate.connection_id, state, token).await;
+            return self.run_long_polling(&jwt, connection, state, token).await;
         }
 
-        let response = self.open_sse(&jwt, &negotiate.connection_id).await?;
+        let response = self.open_sse(&jwt, connection).await?;
         let status = response.status();
         tracing::debug!("kavita signalr: sse opened status={status}");
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(MediaServerError::Status(status, body));
         }
-        self.run_sse_loop(&jwt, &negotiate.connection_id, response, state, token)
+        // 传输建立后必须先发握手帧；服务端在 SSE 流上回握手响应。
+        self.send_handshake(&jwt, connection).await?;
+        tracing::debug!("kavita signalr: handshake sent");
+        self.run_sse_loop(&jwt, connection, response, state, token)
             .await
     }
 
@@ -188,7 +214,7 @@ impl KavitaSignalREventHandler {
         let response = self
             .client
             .http_client()
-            .get(format!("{}/hubs/messages/negotiate", self.client.base_uri()))
+            .post(format!("{}/hubs/messages/negotiate", self.client.base_uri()))
             .query(&[("negotiateVersion", "1"), ("access_token", jwt)])
             .send()
             .await?;
@@ -209,7 +235,11 @@ impl KavitaSignalREventHandler {
             .client
             .http_client()
             .get(format!("{}/hubs/messages", self.client.base_uri()))
-            .query(&[("id", connection_id), ("access_token", jwt)])
+            .query(&[
+                ("id", connection_id),
+                ("transport", "ServerSentEvents"),
+                ("access_token", jwt),
+            ])
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .send()
             .await?;
@@ -221,7 +251,11 @@ impl KavitaSignalREventHandler {
             .client
             .http_client()
             .post(format!("{}/hubs/messages", self.client.base_uri()))
-            .query(&[("id", connection_id), ("access_token", jwt)])
+            .query(&[
+                ("id", connection_id),
+                ("transport", "ServerSentEvents"),
+                ("access_token", jwt),
+            ])
             .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
             .body(payload.to_string())
             .send()
@@ -232,6 +266,11 @@ impl KavitaSignalREventHandler {
             return Err(MediaServerError::Status(status, body));
         }
         Ok(())
+    }
+
+    /// 发送 SignalR 握手帧（传输建立后客户端必须先发握手）。
+    async fn send_handshake(&self, jwt: &str, connection_id: &str) -> Result<(), MediaServerError> {
+        self.send_client_message(jwt, connection_id, HANDSHAKE_MESSAGE).await
     }
 
     /// 发送 SignalR Ping（`{"type":6}\x1e`）。
@@ -299,12 +338,16 @@ impl KavitaSignalREventHandler {
             if token.is_cancelled() {
                 return Ok(());
             }
-            // 轮询 GET：挂起直到服务器有消息或超时
+            // 轮询 GET：挂起直到服务器有消息或超时（transport 参数必需）
             let response = self
                 .client
                 .http_client()
                 .get(format!("{}/hubs/messages", self.client.base_uri()))
-                .query(&[("id", connection_id), ("access_token", jwt)])
+                .query(&[
+                    ("id", connection_id),
+                    ("transport", "LongPolling"),
+                    ("access_token", jwt),
+                ])
                 .send()
                 .await?;
             let status = response.status();
@@ -583,6 +626,33 @@ mod tests {
     #[test]
     fn signalr_ping_payload() {
         assert_eq!("{\"type\":6}\u{1e}", "{\"type\":6}\u{1e}");
+    }
+
+    #[test]
+    fn signalr_handshake_payload() {
+        // 传输建立后的握手帧必须是 json 协议 + record separator 结尾。
+        assert_eq!(HANDSHAKE_MESSAGE, "{\"protocol\":\"json\",\"version\":1}\u{1e}");
+    }
+
+    #[test]
+    fn connection_requests_prefer_connection_token() {
+        // negotiateVersion=1 响应同时含 connectionId/connectionToken，
+        // 连接请求必须用 connectionToken；缺失时回退 connectionId。
+        let with_token = NegotiateResponse {
+            connection_id: "conn-id".into(),
+            connection_token: Some("conn-token".into()),
+            negotiate_version: Some(1),
+            available_transports: None,
+        };
+        assert_eq!(with_token.connection_id_for_requests(), "conn-token");
+
+        let no_token = NegotiateResponse {
+            connection_id: "conn-id".into(),
+            connection_token: None,
+            negotiate_version: None,
+            available_transports: None,
+        };
+        assert_eq!(no_token.connection_id_for_requests(), "conn-id");
     }
 
     /// 事件 → 状态转移：ScanProgress ended 取走卷列表（Kotlin 语义）。

@@ -730,14 +730,14 @@ impl MediaServerClient for KomgaClient {
     ) -> Result<Page<MediaServerSeries>, MediaServerError> {
         // Komga ≥1.19：GET /api/v1/series 已废弃，改用 POST /api/v1/series/list
         // （Kotlin komga-client 同款）。分页在 query，过滤条件在 body
-        // {"condition":{"libraryId":{"operator":"IS","value":<id>}}}。
+        // {"condition":{"libraryId":{"operator":"is","value":<id>}}}。
         // Rust 扩展：固定按 lastModified 倒序（分页稳定，最新修改的系列优先处理）。
         let page_index = (page_number - 1).max(0);
         let page_index_str = page_index.to_string();
         let body = serde_json::json!({
             "condition": {
                 "libraryId": {
-                    "operator": "IS",
+                    "operator": "is",
                     "value": library_id.0
                 }
             }
@@ -812,7 +812,7 @@ impl MediaServerClient for KomgaClient {
     async fn get_books(&self, series_id: &MediaServerSeriesId) -> Result<Vec<MediaServerBook>, MediaServerError> {
         // Komga ≥1.19：GET /api/v1/books 与 GET /api/v1/series/{id}/books 均已废弃，
         // 改用 POST /api/v1/books/list（Kotlin komga-client 同款）。分页在 query，
-        // 过滤条件在 body {"condition":{"seriesId":{"operator":"IS","value":<id>}}}。
+        // 过滤条件在 body {"condition":{"seriesId":{"operator":"is","value":<id>}}}。
         let mut all = Vec::new();
         let mut page_index = 0;
         loop {
@@ -820,7 +820,7 @@ impl MediaServerClient for KomgaClient {
             let body = serde_json::json!({
                 "condition": {
                     "seriesId": {
-                        "operator": "IS",
+                        "operator": "is",
                         "value": series_id.0
                     }
                 }
