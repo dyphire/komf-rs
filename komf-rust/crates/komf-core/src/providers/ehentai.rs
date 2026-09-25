@@ -1791,14 +1791,19 @@ impl EHentaiMetadataMapper {
             reading_direction,
             age_rating,
             language,
-            // 非 non-h（SFW）内容 → hentai genre（non-h 标签格式：`non-h` / `misc:non-h`）
-            genres: if raw_tags
-                .iter()
-                .any(|t| t == "non-h" || t == "misc:non-h")
-            {
-                Vec::new()
+            // 非 non-h（SFW）内容 → hentai genre（non-h 标签格式：`non-h` / `misc:non-h`）；
+            // 受 cfg.genres 控制（与其余 provider 一致）
+            genres: if cfg.genres {
+                if raw_tags
+                    .iter()
+                    .any(|t| t == "non-h" || t == "misc:non-h")
+                {
+                    Vec::new()
+                } else {
+                    vec!["hentai".to_string()]
+                }
             } else {
-                vec!["hentai".to_string()]
+                Vec::new()
             },
             tags,
             total_book_count: None,

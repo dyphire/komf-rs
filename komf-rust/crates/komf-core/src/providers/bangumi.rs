@@ -549,8 +549,12 @@ impl BangumiMetadataMapper {
                 .then_some(map_bangumi_age_rating(subject.age_rating, subject.nsfw, &tags))
                 .flatten(),
             language: None,
-            // platform（漫画/小说）写入 genres
-            genres: subject.platform.clone().into_iter().collect(),
+            // platform（漫画/小说）写入 genres；受 cfg.genres 控制（与其余 provider 一致）
+            genres: if cfg.genres {
+                subject.platform.clone().into_iter().collect()
+            } else {
+                Vec::new()
+            },
             tags,
             total_book_count,
             authors,
