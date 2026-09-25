@@ -196,7 +196,7 @@ pub struct KavitaSeriesDetails {
     pub volumes: Option<Vec<KavitaVolume>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KavitaSeriesMetadata {
     pub id: i32,
@@ -728,6 +728,19 @@ impl KavitaClient {
         Ok(response.json().await?)
     }
 
+    /// 写操作（POST）：Kavita 成功响应体可能为空或非 JSON 文本（实测
+    /// `api/series/metadata` 返回 "更新成功"、`api/series/update` 返回空 body），
+    /// 只检查 HTTP 状态，不解析 body（对齐 Kotlin 只查 status 的行为）
+    async fn send_write(&self, request: reqwest::RequestBuilder) -> Result<(), MediaServerError> {
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(MediaServerError::Status(status, body));
+        }
+        Ok(())
+    }
+
     // -- 读取 ----------------------------------------------------------------
 
     pub async fn get_series(&self, series_id: i32) -> Result<KavitaSeries, MediaServerError> {
@@ -794,15 +807,6 @@ impl KavitaClient {
             self.authed_request(reqwest::Method::GET, "api/series/volumes")
                 .await?
                 .query(&[("seriesId", series_id.to_string())]),
-        )
-        .await
-    }
-
-    pub async fn get_chapters(&self, volume_id: i32) -> Result<Vec<KavitaChapter>, MediaServerError> {
-        self.send_json(
-            self.authed_request(reqwest::Method::GET, "api/series/chapters")
-                .await?
-                .query(&[("volumeId", volume_id.to_string())]),
         )
         .await
     }
@@ -897,7 +901,7 @@ impl KavitaClient {
 
     pub async fn update_series(&self, series_update: &KavitaSeriesUpdateRequest) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/series/update")
                 .await?
                 .json(series_update),
@@ -911,7 +915,7 @@ impl KavitaClient {
         metadata: &KavitaSeriesMetadataUpdateRequest,
     ) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/series/metadata")
                 .await?
                 .json(metadata),
@@ -925,7 +929,7 @@ impl KavitaClient {
         metadata: &KavitaChapterMetadataUpdateRequest,
     ) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/chapter/update")
                 .await?
                 .json(metadata),
@@ -942,7 +946,7 @@ impl KavitaClient {
     ) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
         let base64_image = base64::engine::general_purpose::STANDARD.encode(&cover.bytes);
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/upload/series")
                 .await?
                 .json(&KavitaCoverUploadRequest {
@@ -963,7 +967,7 @@ impl KavitaClient {
     ) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
         let base64_image = base64::engine::general_purpose::STANDARD.encode(&cover.bytes);
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/upload/volume")
                 .await?
                 .json(&KavitaCoverUploadRequest {
@@ -978,7 +982,7 @@ impl KavitaClient {
 
     pub async fn reset_chapter_lock(&self, chapter_id: i32) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/upload/chapter")
                 .await?
                 .json(&KavitaCoverUploadRequest {
@@ -992,7 +996,7 @@ impl KavitaClient {
     }
 
     pub async fn scan_series(&self, library_id: i32, series_id: i32) -> Result<(), MediaServerError> {
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/series/scan")
                 .await?
                 .json(&serde_json::json!({
@@ -1005,7 +1009,7 @@ impl KavitaClient {
     }
 
     pub async fn scan_library(&self, library_id: i32) -> Result<(), MediaServerError> {
-        let _: serde_json::Value = self.send_json(
+        self.send_write(
             self.authed_request(reqwest::Method::POST, "api/library/scan")
                 .await?
                 .query(&[("libraryId", library_id.to_string())]),
@@ -1288,7 +1292,10 @@ fn to_kavita_series_metadata_update(
         SeriesStatus::Hiatus => KavitaPublicationStatus::Hiatus,
         SeriesStatus::Completed => KavitaPublicationStatus::Completed,
     });
-    let publishers = if metadata.publisher.is_none() && metadata.alternative_publishers.is_none() {
+    // 对应字段 locked=true 时保留 current 值，不写入 provider 新值。
+    let publishers = if current.publisher_locked {
+        current.publishers.clone()
+    } else if metadata.publisher.is_none() && metadata.alternative_publishers.is_none() {
         current.publishers.clone()
     } else {
         let mut names = metadata.alternative_publishers.clone().unwrap_or_default();
@@ -1339,48 +1346,108 @@ fn to_kavita_series_metadata_update(
     let kavita_metadata = KavitaSeriesMetadata {
         id: current.id,
         series_id,
-        summary: metadata.summary.clone().or_else(|| current.summary.clone()),
-        genres: metadata
-            .genres
-            .as_ref()
-            .map(|values| {
-                deduplicate(values)
-                    .into_iter()
-                    .map(|title| KavitaGenre { id: 0, title })
-                    .collect()
-            })
-            .unwrap_or_else(|| current.genres.clone()),
-        tags: metadata
-            .tags
-            .as_ref()
-            .map(|values| {
-                deduplicate(values)
-                    .into_iter()
-                    .map(|title| KavitaTag { id: 0, title })
-                    .collect()
-            })
-            .unwrap_or_else(|| current.tags.clone()),
-        writers: authors_for("WRITER", &authors, &current.writers),
-        cover_artists: authors_for("COVER", &authors, &current.cover_artists),
+        summary: if current.summary_locked {
+            current.summary.clone()
+        } else {
+            metadata.summary.clone().or_else(|| current.summary.clone())
+        },
+        genres: if current.genres_locked {
+            current.genres.clone()
+        } else {
+            metadata
+                .genres
+                .as_ref()
+                .map(|values| {
+                    deduplicate(values)
+                        .into_iter()
+                        .map(|title| KavitaGenre { id: 0, title })
+                        .collect()
+                })
+                .unwrap_or_else(|| current.genres.clone())
+        },
+        tags: if current.tags_locked {
+            current.tags.clone()
+        } else {
+            metadata
+                .tags
+                .as_ref()
+                .map(|values| {
+                    deduplicate(values)
+                        .into_iter()
+                        .map(|title| KavitaTag { id: 0, title })
+                        .collect()
+                })
+                .unwrap_or_else(|| current.tags.clone())
+        },
+        writers: if current.writer_locked {
+            current.writers.clone()
+        } else {
+            authors_for("WRITER", &authors, &current.writers)
+        },
+        cover_artists: if current.cover_artist_locked {
+            current.cover_artists.clone()
+        } else {
+            authors_for("COVER", &authors, &current.cover_artists)
+        },
         publishers,
         characters: current.characters.clone(),
-        pencillers: authors_for("PENCILLER", &authors, &current.pencillers),
-        inkers: authors_for("INKER", &authors, &current.inkers),
+        pencillers: if current.penciller_locked {
+            current.pencillers.clone()
+        } else {
+            authors_for("PENCILLER", &authors, &current.pencillers)
+        },
+        inkers: if current.inker_locked {
+            current.inkers.clone()
+        } else {
+            authors_for("INKER", &authors, &current.inkers)
+        },
         imprints: current.imprints.clone(),
-        colorists: authors_for("COLORIST", &authors, &current.colorists),
-        letterers: authors_for("LETTERER", &authors, &current.letterers),
-        editors: authors_for("EDITOR", &authors, &current.editors),
-        translators: authors_for("TRANSLATOR", &authors, &current.translators),
+        colorists: if current.colorist_locked {
+            current.colorists.clone()
+        } else {
+            authors_for("COLORIST", &authors, &current.colorists)
+        },
+        letterers: if current.letterer_locked {
+            current.letterers.clone()
+        } else {
+            authors_for("LETTERER", &authors, &current.letterers)
+        },
+        editors: if current.editor_locked {
+            current.editors.clone()
+        } else {
+            authors_for("EDITOR", &authors, &current.editors)
+        },
+        translators: if current.translator_locked {
+            current.translators.clone()
+        } else {
+            authors_for("TRANSLATOR", &authors, &current.translators)
+        },
         teams: current.teams.clone(),
         locations: current.locations.clone(),
-        age_rating: age_rating.id(),
-        release_year: metadata.release_year.unwrap_or(current.release_year),
-        language: metadata.language.clone().or_else(|| current.language.clone()),
+        age_rating: if current.age_rating_locked {
+            current.age_rating
+        } else {
+            age_rating.id()
+        },
+        release_year: if current.release_year_locked {
+            current.release_year
+        } else {
+            metadata.release_year.unwrap_or(current.release_year)
+        },
+        language: if current.language_locked {
+            current.language.clone()
+        } else {
+            metadata.language.clone().or_else(|| current.language.clone())
+        },
         max_count: current.max_count,
         total_count: current.total_count,
-        publication_status: status
-            .unwrap_or_else(|| KavitaPublicationStatus::from_id(current.publication_status).unwrap_or(KavitaPublicationStatus::Ongoing))
-            .id(),
+        publication_status: if current.publication_status_locked {
+            current.publication_status
+        } else {
+            status
+                .unwrap_or_else(|| KavitaPublicationStatus::from_id(current.publication_status).unwrap_or(KavitaPublicationStatus::Ongoing))
+                .id()
+        },
         web_links: metadata
             .links
             .as_ref()
@@ -1413,53 +1480,138 @@ fn to_kavita_series_metadata_update(
 }
 
 /// 对应 Kotlin `kavitaSeriesResetRequest`。
-fn kavita_series_reset_request(series_id: i32) -> KavitaSeriesMetadataUpdateRequest {
+/// 实测（2026-09-26，Kavita 服务端不拦 locked，客户端须自己尊重）：
+/// 对应字段 locked=true 时保留 current 值 + 保持 lock 状态，未锁定字段正常重置。
+fn kavita_series_reset_request(
+    series_id: i32,
+    current: &KavitaSeriesMetadata,
+) -> KavitaSeriesMetadataUpdateRequest {
     let metadata = KavitaSeriesMetadata {
         id: 0,
         series_id,
-        summary: Some(String::new()),
-        genres: Vec::new(),
-        tags: Vec::new(),
-        writers: Vec::new(),
-        cover_artists: Vec::new(),
-        publishers: Vec::new(),
-        characters: Vec::new(),
-        pencillers: Vec::new(),
-        inkers: Vec::new(),
-        imprints: Vec::new(),
-        colorists: Vec::new(),
-        letterers: Vec::new(),
-        editors: Vec::new(),
-        translators: Vec::new(),
-        teams: Vec::new(),
-        locations: Vec::new(),
-        age_rating: KavitaAgeRating::Unknown.id(),
-        release_year: 0,
-        language: Some(String::new()),
+        summary: if current.summary_locked {
+            current.summary.clone()
+        } else {
+            Some(String::new())
+        },
+        genres: if current.genres_locked {
+            current.genres.clone()
+        } else {
+            Vec::new()
+        },
+        tags: if current.tags_locked {
+            current.tags.clone()
+        } else {
+            Vec::new()
+        },
+        writers: if current.writer_locked {
+            current.writers.clone()
+        } else {
+            Vec::new()
+        },
+        cover_artists: if current.cover_artist_locked {
+            current.cover_artists.clone()
+        } else {
+            Vec::new()
+        },
+        publishers: if current.publisher_locked {
+            current.publishers.clone()
+        } else {
+            Vec::new()
+        },
+        characters: if current.character_locked {
+            current.characters.clone()
+        } else {
+            Vec::new()
+        },
+        pencillers: if current.penciller_locked {
+            current.pencillers.clone()
+        } else {
+            Vec::new()
+        },
+        inkers: if current.inker_locked {
+            current.inkers.clone()
+        } else {
+            Vec::new()
+        },
+        imprints: if current.imprint_locked {
+            current.imprints.clone()
+        } else {
+            Vec::new()
+        },
+        colorists: if current.colorist_locked {
+            current.colorists.clone()
+        } else {
+            Vec::new()
+        },
+        letterers: if current.letterer_locked {
+            current.letterers.clone()
+        } else {
+            Vec::new()
+        },
+        editors: if current.editor_locked {
+            current.editors.clone()
+        } else {
+            Vec::new()
+        },
+        translators: if current.translator_locked {
+            current.translators.clone()
+        } else {
+            Vec::new()
+        },
+        teams: if current.team_locked {
+            current.teams.clone()
+        } else {
+            Vec::new()
+        },
+        locations: if current.location_locked {
+            current.locations.clone()
+        } else {
+            Vec::new()
+        },
+        age_rating: if current.age_rating_locked {
+            current.age_rating
+        } else {
+            KavitaAgeRating::Unknown.id()
+        },
+        release_year: if current.release_year_locked {
+            current.release_year
+        } else {
+            0
+        },
+        language: if current.language_locked {
+            current.language.clone()
+        } else {
+            Some(String::new())
+        },
         max_count: 0,
         total_count: 0,
-        publication_status: KavitaPublicationStatus::Ongoing.id(),
+        publication_status: if current.publication_status_locked {
+            current.publication_status
+        } else {
+            KavitaPublicationStatus::Ongoing.id()
+        },
         web_links: Some(String::new()),
-        language_locked: false,
-        summary_locked: false,
-        age_rating_locked: false,
-        publication_status_locked: false,
-        genres_locked: false,
-        tags_locked: false,
-        writer_locked: false,
-        character_locked: false,
-        colorist_locked: false,
-        editor_locked: false,
-        inker_locked: false,
-        imprint_locked: false,
-        letterer_locked: false,
-        penciller_locked: false,
-        publisher_locked: false,
-        translator_locked: false,
-        team_locked: false,
-        location_locked: false,
-        cover_artist_locked: false,
-        release_year_locked: false,
+        language_locked: current.language_locked,
+        summary_locked: current.summary_locked,
+        age_rating_locked: current.age_rating_locked,
+        publication_status_locked: current.publication_status_locked,
+        genres_locked: current.genres_locked,
+        tags_locked: current.tags_locked,
+        writer_locked: current.writer_locked,
+        character_locked: current.character_locked,
+        colorist_locked: current.colorist_locked,
+        editor_locked: current.editor_locked,
+        inker_locked: current.inker_locked,
+        imprint_locked: current.imprint_locked,
+        letterer_locked: current.letterer_locked,
+        penciller_locked: current.penciller_locked,
+        publisher_locked: current.publisher_locked,
+        translator_locked: current.translator_locked,
+        team_locked: current.team_locked,
+        location_locked: current.location_locked,
+        cover_artist_locked: current.cover_artist_locked,
+        release_year_locked: current.release_year_locked,
     };
     KavitaSeriesMetadataUpdateRequest {
         series_metadata: metadata,
@@ -1665,13 +1817,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         let volumes = self.client.get_volumes(id).await?;
         let mut books = Vec::new();
         for volume in volumes.iter() {
-            let chapters = if volume.chapters.is_empty() {
-                // 防御：部分 Kavita 版本 volume 端点不含嵌套 chapters
-                self.client.get_chapters(volume.id).await?
-            } else {
-                volume.chapters.clone()
-            };
-            for chapter in chapters.iter() {
+            // 对齐 Kotlin：仅消费 volume 端点嵌套的 chapters；空卷直接跳过
+            for chapter in volume.chapters.iter() {
                 books.push(to_media_server_book(chapter, volume));
             }
         }
@@ -1828,7 +1975,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
                 cover_image_locked: false,
             })
             .await?;
-        let request = kavita_series_reset_request(id);
+        let current_metadata = self.client.get_series_metadata(id).await?;
+        let request = kavita_series_reset_request(id, &current_metadata);
         self.client.update_series_metadata(&request).await
     }
 
@@ -1889,6 +2037,80 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 写操作成功响应为非 JSON（Kavita 实测返回 "更新成功" 文本）时，
+    /// send_write 只检查状态、不解析 body（对齐 Kotlin 只查 status）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_write_accepts_non_json_success_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain;charset=UTF-8\r\nContent-Length: 12\r\n\r\n\xe6\x9b\xb4\xe6\x96\xb0\xe6\x88\x90\xe5\x8a\x9f",
+                )
+                .await;
+        });
+
+        let client = KavitaClient::new(
+            reqwest::Client::builder().build().unwrap(),
+            &format!("http://{addr}"),
+            "key",
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.send_write(client.http.post(format!("http://{addr}/write"))),
+        )
+        .await
+        .expect("send_write timed out")
+        .expect("send_write failed on non-json 200 body");
+        assert_eq!(result, ());
+    }
+
+    /// 写操作错误状态（500）必须返回 Status 错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_write_rejects_error_status() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nNo",
+                )
+                .await;
+        });
+
+        let client = KavitaClient::new(
+            reqwest::Client::builder().build().unwrap(),
+            &format!("http://{addr}"),
+            "key",
+        )
+        .unwrap();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.send_write(client.http.post(format!("http://{addr}/write"))),
+        )
+        .await
+        .expect("send_write timed out")
+        .expect_err("send_write should fail on 500");
+        match err {
+            MediaServerError::Status(status, _) => {
+                assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            other => panic!("expected Status error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn age_rating_roundtrip() {
@@ -2041,7 +2263,7 @@ mod tests {
     #[test]
     fn series_metadata_update_request_serializes_kotlin_shape() {
         // Kotlin: KavitaSeriesMetadataUpdateRequest(seriesMetadata) → { "seriesMetadata": {...} }
-        let request = kavita_series_reset_request(7);
+        let request = kavita_series_reset_request(7, &KavitaSeriesMetadata::default());
         let json = serde_json::to_value(&request).unwrap();
         let metadata = json.get("seriesMetadata").expect("wrapped under seriesMetadata");
         assert_eq!(metadata["seriesId"], 7);
@@ -2049,6 +2271,56 @@ mod tests {
         assert_eq!(metadata["ageRating"], 0);
         assert_eq!(metadata["releaseYear"], 0);
         assert!(metadata["writers"].as_array().unwrap().is_empty());
+    }
+
+    /// locked 语义（实测 2026-09-26）：Kavita 服务端不拦 locked，客户端须保留
+    /// locked=true 字段的 current 值（更新与重置一致）。
+    #[test]
+    fn series_metadata_update_respects_locked_fields() {
+        let current = KavitaSeriesMetadata {
+            id: 7,
+            series_id: 7,
+            summary: Some("locked summary".to_string()),
+            genres: vec![KavitaGenre { id: 1, title: "Locked Genre".to_string() }],
+            tags: vec![KavitaTag { id: 1, title: "Locked Tag".to_string() }],
+            age_rating: KavitaAgeRating::Teen.id(),
+            publication_status: KavitaPublicationStatus::Completed.id(),
+            release_year: 2019,
+            language: Some("ja".to_string()),
+            writers: vec![KavitaAuthor { id: 1, name: "Locked Writer".to_string() }],
+            genres_locked: true,
+            summary_locked: true,
+            tags_locked: true,
+            age_rating_locked: true,
+            publication_status_locked: true,
+            release_year_locked: true,
+            language_locked: true,
+            writer_locked: true,
+            ..Default::default()
+        };
+        // 重置：locked 字段保留 current 值
+        let request = kavita_series_reset_request(7, &current);
+        let json = serde_json::to_value(&request).unwrap();
+        let metadata = &json["seriesMetadata"];
+        assert_eq!(metadata["summary"], "locked summary");
+        assert_eq!(metadata["genres"][0]["title"], "Locked Genre");
+        assert_eq!(metadata["tags"][0]["title"], "Locked Tag");
+        assert_eq!(metadata["ageRating"], KavitaAgeRating::Teen.id());
+        assert_eq!(metadata["publicationStatus"], KavitaPublicationStatus::Completed.id());
+        assert_eq!(metadata["releaseYear"], 2019);
+        assert_eq!(metadata["language"], "ja");
+        assert_eq!(metadata["writers"][0]["name"], "Locked Writer");
+        assert!(metadata["genresLocked"].as_bool().unwrap());
+        // 未锁定字段仍重置
+        let unlocked = KavitaSeriesMetadata {
+            id: 7,
+            series_id: 7,
+            genres_locked: false,
+            ..Default::default()
+        };
+        let request = kavita_series_reset_request(7, &unlocked);
+        let metadata = &serde_json::to_value(&request).unwrap()["seriesMetadata"];
+        assert!(metadata["genres"].as_array().unwrap().is_empty());
     }
 
     #[test]

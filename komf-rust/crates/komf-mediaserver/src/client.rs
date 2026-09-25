@@ -20,6 +20,10 @@ pub enum MediaServerError {
     /// mylar series.json 写入/封面保存失败。
     #[error("mylar export error: {0}")]
     Mylar(String),
+    /// SignalR SSE transport 接受握手但在首帧超时内不推送任何数据
+    /// （部分 Kavita 实例/版本行为），触发事件监听降级到 LongPolling。
+    #[error("kavita signalr sse transport silent (no data within timeout)")]
+    SseSilent,
 }
 
 impl MediaServerError {

@@ -729,17 +729,25 @@ impl MediaServerClient for KomgaClient {
         page_number: i32,
     ) -> Result<Page<MediaServerSeries>, MediaServerError> {
         // Komga ≥1.19：GET /api/v1/series 已废弃，改用 POST /api/v1/series/list
-        // （Kotlin komga-client 同款）。分页在 query，过滤条件在 body
-        // {"condition":{"libraryId":{"operator":"is","value":<id>}}}。
+        // （Kotlin komga-client 同款）。分页在 query，过滤条件在 body，wire 对齐
+        // komga-client 的 sealed 序列化（AllOfSeries 包装 + type 判别）：
+        // {"condition":{"type":"AllOfSeries","allOf":[{"type":"LibraryId",
+        //   "libraryId":{"operator":"is","value":<id>}}]}}
         // Rust 扩展：固定按 lastModified 倒序（分页稳定，最新修改的系列优先处理）。
         let page_index = (page_number - 1).max(0);
         let page_index_str = page_index.to_string();
         let body = serde_json::json!({
             "condition": {
-                "libraryId": {
-                    "operator": "is",
-                    "value": library_id.0
-                }
+                "type": "AllOfSeries",
+                "allOf": [
+                    {
+                        "type": "LibraryId",
+                        "libraryId": {
+                            "operator": "is",
+                            "value": library_id.0
+                        }
+                    }
+                ]
             }
         });
         let response = self
@@ -812,17 +820,26 @@ impl MediaServerClient for KomgaClient {
     async fn get_books(&self, series_id: &MediaServerSeriesId) -> Result<Vec<MediaServerBook>, MediaServerError> {
         // Komga ≥1.19：GET /api/v1/books 与 GET /api/v1/series/{id}/books 均已废弃，
         // 改用 POST /api/v1/books/list（Kotlin komga-client 同款）。分页在 query，
-        // 过滤条件在 body {"condition":{"seriesId":{"operator":"is","value":<id>}}}。
+        // 过滤条件在 body，wire 对齐 komga-client 的 sealed 序列化
+        // （AllOfBook 包装 + type 判别）：
+        // {"condition":{"type":"AllOfBook","allOf":[{"type":"SeriesId",
+        //   "seriesId":{"operator":"is","value":<id>}}]}}
         let mut all = Vec::new();
         let mut page_index = 0;
         loop {
             let page_index_str = page_index.to_string();
             let body = serde_json::json!({
                 "condition": {
-                    "seriesId": {
-                        "operator": "is",
-                        "value": series_id.0
-                    }
+                    "type": "AllOfBook",
+                    "allOf": [
+                        {
+                            "type": "SeriesId",
+                            "seriesId": {
+                                "operator": "is",
+                                "value": series_id.0
+                            }
+                        }
+                    ]
                 }
             });
             let response = self

@@ -22,12 +22,16 @@ use crate::event_listener::{BookEvent, MediaServerEventListener, SeriesEvent};
 use crate::kavita::{KavitaChapter, KavitaClient, KavitaVolume};
 use crate::model::{MediaServerBookId, MediaServerLibraryId, MediaServerSeriesId};
 use chrono::{DateTime, NaiveDateTime, Utc};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
 /// SignalR 握手消息（`{"protocol":"json","version":1}\x1e`，record separator 结尾）。
@@ -35,6 +39,15 @@ const HANDSHAKE_MESSAGE: &str = "{\"protocol\":\"json\",\"version\":1}\u{1e}";
 
 /// SignalR 心跳间隔（对应客户端默认 15s 空闲 Ping）。
 const PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// SSE 握手响应等待超时：规范上服务端应在握手后立即在流上推送 `{}`；
+/// 但部分 Kavita 实例的 SSE transport 接受握手却不推送任何数据。
+/// 首帧在此窗口内未到达即判定 SSE 不可用，降级 LongPolling。
+const SSE_HANDSHAKE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// SSE 连续失败达到该次数后自动降级 LongPolling（本实例实测 SSE 长连接约 60s
+/// 被服务端空闲超时关闭；连续两次失败即可确认不稳定，后续周期跳过 SSE）。
+const SSE_FAILURE_THRESHOLD: usize = 2;
 
 /// 与 Kotlin `noopEvents` 一致：注册但不处理，避免“未注册的调用目标”日志。
 const NOOP_EVENTS: &[&str] = &[
@@ -142,17 +155,19 @@ impl KavitaSignalREventHandler {
     /// 主循环：连接 → 事件流 → 断开后 10 秒重连（对应 Kotlin `retry { isActive }`）。
     pub async fn run(&self, token: CancellationToken) {
         tracing::info!(
-            "connecting to Kavita event listener {}/hubs/messages (signalr over sse)",
+            "connecting to Kavita event listener {}/hubs/messages (signalr, websocket preferred)",
             self.client.base_uri()
         );
         // Kotlin `lastScan`/`volumesChanged` 是 handler 实例字段，断线重连不重置；
         // Rust 对齐：状态提升到重连循环外，跨连接周期保留。
         let state = Arc::new(Mutex::new(SignalRState::new()));
+        // SSE 连续失败计数（跨连接周期）：连续失败达到阈值后跳过 SSE 走 LongPolling。
+        let sse_failures = Arc::new(AtomicUsize::new(0));
         loop {
             if token.is_cancelled() {
                 return;
             }
-            match self.connect_and_run(state.clone(), token.clone()).await {
+            match self.connect_and_run(state.clone(), token.clone(), sse_failures.clone()).await {
                 Ok(()) => tracing::debug!("kavita signalr connection closed"),
                 Err(error) => tracing::warn!("kavita signalr error: {error}"),
             }
@@ -166,11 +181,15 @@ impl KavitaSignalREventHandler {
         }
     }
 
-    /// 单次连接周期：negotiate → SSE 打开 → 事件循环。
+    /// 单次连接周期：negotiate → transport 协商 → 事件循环。
+    /// 传输优先级 WS → SSE → LongPolling（对齐 Kotlin 官方客户端默认顺序）；
+    /// SSE 连续失败（SSE_FAILURE_THRESHOLD 次）后自动降级 LongPolling
+    /// （本实例实测 SSE 长连接约 60s 被服务端空闲超时关闭）。
     async fn connect_and_run(
         &self,
         state: Arc<Mutex<SignalRState>>,
         token: CancellationToken,
+        sse_failures: Arc<AtomicUsize>,
     ) -> Result<(), MediaServerError> {
         tracing::debug!("kavita signalr: obtaining token");
         let jwt = self.client.access_token().await?;
@@ -183,29 +202,72 @@ impl KavitaSignalREventHandler {
             connection
         );
 
+        // 1. WebSocket：与 Kotlin 官方客户端一致；有协议级心跳，不受服务端
+        //    60s 空闲连接超时影响。失败继续尝试下一传输。
+        let supports_ws = negotiate.available_transports.as_ref().is_none_or(|transports| {
+            transports.iter().any(|t| t.transport == "WebSockets")
+        });
+        if supports_ws {
+            tracing::debug!("kavita signalr: WebSockets advertised, opening websocket");
+            match self.run_websocket(&jwt, connection, state.clone(), token.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!("Kavita signalr WebSocket failed ({error}); trying SSE");
+                }
+            }
+        }
+        // 2. SSE：官方默认第二选择，实时性优于 LongPolling。本实例实测 SSE 挂起
+        //    连接约 60s 被服务端空闲超时关闭（error decoding response body），
+        //    连续失败达到阈值后跳过 SSE（SseSilent 为连接存活但静默，同周期降级）。
         let supports_sse = negotiate.available_transports.as_ref().is_none_or(|transports| {
             transports.iter().any(|t| t.transport == "ServerSentEvents")
         });
-        if !supports_sse {
-            tracing::warn!(
-                "Kavita signalr negotiate did not advertise ServerSentEvents; \
-                 falling back to LongPolling transport"
-            );
+        if supports_sse && sse_failures.load(Ordering::Relaxed) < SSE_FAILURE_THRESHOLD {
+            let response = self.open_sse(&jwt, connection).await?;
+            let status = response.status();
+            tracing::debug!("kavita signalr: sse opened status={status}");
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(MediaServerError::Status(status, body));
+            }
+            // 传输建立后必须先发握手帧；服务端在 SSE 流上回握手响应。
+            self.send_handshake(&jwt, connection).await?;
+            tracing::debug!("kavita signalr: handshake sent");
+            let sse_result = self
+                .run_sse_loop(&jwt, connection, response, state.clone(), token.clone())
+                .await;
+            return match sse_result {
+                Ok(()) => {
+                    // SSE 恢复稳定：清零失败计数。
+                    sse_failures.store(0, Ordering::Relaxed);
+                    Ok(())
+                }
+                Err(MediaServerError::SseSilent) => {
+                    // 连接仍存活但流静默：同周期直接降级 LongPolling。
+                    tracing::warn!(
+                        "Kavita signalr SSE accepted handshake but stream silent; \
+                         falling back to LongPolling"
+                    );
+                    self.run_long_polling(&jwt, connection, state, token).await
+                }
+                Err(error) => {
+                    // 流中断/错误（连接已死）：计数并返回，外层重连（新 negotiate）；
+                    // 连续失败达到阈值后跳过 SSE 直接 LongPolling。
+                    sse_failures.fetch_add(1, Ordering::Relaxed);
+                    Err(error)
+                }
+            };
+        }
+        // 3. LongPolling：轮询短连接免疫服务端空闲超时，作为最终兜底。
+        let supports_lp = negotiate.available_transports.as_ref().is_none_or(|transports| {
+            transports.iter().any(|t| t.transport == "LongPolling")
+        });
+        if supports_lp {
             return self.run_long_polling(&jwt, connection, state, token).await;
         }
-
-        let response = self.open_sse(&jwt, connection).await?;
-        let status = response.status();
-        tracing::debug!("kavita signalr: sse opened status={status}");
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
-        // 传输建立后必须先发握手帧；服务端在 SSE 流上回握手响应。
-        self.send_handshake(&jwt, connection).await?;
-        tracing::debug!("kavita signalr: handshake sent");
-        self.run_sse_loop(&jwt, connection, response, state, token)
-            .await
+        Err(MediaServerError::message(
+            "Kavita signalr negotiate advertised no usable transport",
+        ))
     }
 
     // -- transport 层 ---------------------------------------------------------
@@ -240,20 +302,24 @@ impl KavitaSignalREventHandler {
                 ("transport", "ServerSentEvents"),
                 ("access_token", jwt),
             ])
+            // SSE 长连接禁用压缩（identity）：reqwest 默认 Accept-Encoding: gzip，
+            // 与 Kavita SSE 流式响应交互时约 60s 后报 "error decoding response body"；
+            // curl（不请求压缩）实测稳定。
             .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .send()
             .await?;
         Ok(response)
     }
 
-    async fn send_client_message(&self, jwt: &str, connection_id: &str, payload: &str) -> Result<(), MediaServerError> {
+    async fn send_client_message(&self, jwt: &str, connection_id: &str, transport: &str, payload: &str) -> Result<(), MediaServerError> {
         let response = self
             .client
             .http_client()
             .post(format!("{}/hubs/messages", self.client.base_uri()))
             .query(&[
                 ("id", connection_id),
-                ("transport", "ServerSentEvents"),
+                ("transport", transport),
                 ("access_token", jwt),
             ])
             .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
@@ -270,12 +336,12 @@ impl KavitaSignalREventHandler {
 
     /// 发送 SignalR 握手帧（传输建立后客户端必须先发握手）。
     async fn send_handshake(&self, jwt: &str, connection_id: &str) -> Result<(), MediaServerError> {
-        self.send_client_message(jwt, connection_id, HANDSHAKE_MESSAGE).await
+        self.send_client_message(jwt, connection_id, "ServerSentEvents", HANDSHAKE_MESSAGE).await
     }
 
     /// 发送 SignalR Ping（`{"type":6}\x1e`）。
     async fn send_ping(&self, jwt: &str, connection_id: &str) -> Result<(), MediaServerError> {
-        self.send_client_message(jwt, connection_id, "{\"type\":6}\u{1e}").await
+        self.send_client_message(jwt, connection_id, "ServerSentEvents", "{\"type\":6}\u{1e}").await
     }
 
     // -- SSE 事件循环 ----------------------------------------------------------
@@ -291,9 +357,16 @@ impl KavitaSignalREventHandler {
         let mut stream = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
         let mut last_activity = tokio::time::Instant::now();
+        // 首帧超时：规范上服务端握手后立即推送 `{}`；若 SSE transport 静默
+        // （如部分 Kavita 实例），超时后返回 SseSilent 由调用方降级 LongPolling。
+        let handshake_deadline = last_activity + SSE_HANDSHAKE_RESPONSE_TIMEOUT;
+        let mut received_any = false;
         loop {
             tokio::select! {
                 _ = token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep_until(handshake_deadline), if !received_any => {
+                    return Err(MediaServerError::SseSilent);
+                }
                 maybe_chunk = stream.next() => {
                     let Some(chunk) = maybe_chunk else {
                         return Err(MediaServerError::message("kavita signalr sse stream ended"));
@@ -302,6 +375,7 @@ impl KavitaSignalREventHandler {
                     if bytes.is_empty() {
                         return Err(MediaServerError::message("kavita signalr sse stream ended (empty chunk)"));
                     }
+                    received_any = true;
                     last_activity = tokio::time::Instant::now();
                     buffer.extend_from_slice(&bytes);
                     while let Some(end) = find_frame_boundary(&buffer) {
@@ -323,6 +397,102 @@ impl KavitaSignalREventHandler {
         }
     }
 
+    // -- WebSocket transport --------------------------------------------------
+
+    /// 构建 SignalR WebSocket 连接 URL（http(s):// → ws(s)://，带 transport 与 JWT）。
+    fn websocket_url(base_uri: &str, connection_id: &str, jwt: &str) -> String {
+        let ws_base = base_uri
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
+        format!(
+            "{ws_base}/hubs/messages?id={connection_id}&transport=WebSockets&access_token={jwt}"
+        )
+    }
+
+    async fn run_websocket(
+        &self,
+        jwt: &str,
+        connection_id: &str,
+        state: Arc<Mutex<SignalRState>>,
+        token: CancellationToken,
+    ) -> Result<(), MediaServerError> {
+        let request = Self::websocket_url(self.client.base_uri(), connection_id, jwt)
+            .into_client_request()
+            .map_err(|e| MediaServerError::message(format!("websocket request build failed: {e}")))?;
+        let (ws_stream, response) = connect_async(request)
+            .await
+            .map_err(|e| MediaServerError::message(format!("websocket connect failed: {e}")))?;
+        tracing::debug!("kavita signalr: websocket opened status={}", response.status());
+        let (mut sink, mut stream) = ws_stream.split();
+
+        // 传输建立后必须先发握手帧；服务端在 WS 帧上回 {} 握手响应。
+        sink.send(WsMessage::Text(HANDSHAKE_MESSAGE.into()))
+            .await
+            .map_err(|e| MediaServerError::message(format!("websocket handshake send failed: {e}")))?;
+        tracing::debug!("kavita signalr: websocket handshake sent");
+
+        let mut last_activity = tokio::time::Instant::now();
+        // 首帧超时：规范上服务端握手后立即回 {}；静默则降级（复用 SseSilent 语义）。
+        let handshake_deadline = last_activity + SSE_HANDSHAKE_RESPONSE_TIMEOUT;
+        let mut received_any = false;
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep_until(handshake_deadline), if !received_any => {
+                    return Err(MediaServerError::SseSilent);
+                }
+                maybe_message = stream.next() => {
+                    let Some(message) = maybe_message else {
+                        return Err(MediaServerError::message(
+                            "kavita signalr websocket stream ended",
+                        ));
+                    };
+                    let message = message.map_err(|e| {
+                        MediaServerError::message(format!("websocket read error: {e}"))
+                    })?;
+                    match message {
+                        WsMessage::Text(text) => {
+                            received_any = true;
+                            last_activity = tokio::time::Instant::now();
+                            // WS 上每条 SignalR 消息是一帧；JSON 协议消息以 \x1e 结尾。
+                            let data = text.trim().strip_suffix('\u{1e}').unwrap_or(text.trim());
+                            match self.handle_message(data, &state).await {
+                                MessageOutcome::Continue => {}
+                                MessageOutcome::Close => return Ok(()),
+                                MessageOutcome::Error(e) => return Err(e),
+                            }
+                        }
+                        WsMessage::Binary(_) => {
+                            // 服务端控制/二进制帧：计数为活跃但不解析。
+                            received_any = true;
+                            last_activity = tokio::time::Instant::now();
+                        }
+                        WsMessage::Ping(payload) => {
+                            // tungstenite 默认自动回 Pong；显式回以防 feature 差异。
+                            sink.send(WsMessage::Pong(payload)).await.map_err(|e| {
+                                MediaServerError::message(format!("websocket pong send failed: {e}"))
+                            })?;
+                        }
+                        WsMessage::Pong(_) => {}
+                        WsMessage::Close(_) => {
+                            return Err(MediaServerError::message(
+                                "kavita signalr websocket closed by server",
+                            ));
+                        }
+                        WsMessage::Frame(_) => {}
+                    }
+                }
+                _ = tokio::time::sleep_until(last_activity + PING_INTERVAL) => {
+                    // SignalR JSON 协议 Ping（type 6）；服务端回同型 Pong。
+                    sink.send(WsMessage::Text("{\"type\":6}\u{1e}".into()))
+                        .await
+                        .map_err(|e| MediaServerError::message(format!("websocket ping send failed: {e}")))?;
+                    last_activity = tokio::time::Instant::now();
+                }
+            }
+        }
+    }
+
     // -- LongPolling 兜底 transport ---------------------------------------------
 
     async fn run_long_polling(
@@ -334,12 +504,21 @@ impl KavitaSignalREventHandler {
     ) -> Result<(), MediaServerError> {
         // LongPolling transport 中轮询请求本身即心跳（服务器挂起等待期间保持连接活跃），
         // 无需客户端主动 Ping。
+        // 必须先 POST 握手帧（transport=LongPolling）建立应用层连接；缺此步时
+        // 服务端默认 15s 握手超时删除连接，挂起中的 GET 轮询返回 404。
+        self.send_client_message(jwt, connection_id, "LongPolling", HANDSHAKE_MESSAGE)
+            .await?;
         loop {
             if token.is_cancelled() {
                 return Ok(());
             }
             // 轮询 GET：挂起直到服务器有消息或超时（transport 参数必需）
-            let response = self
+            // 实测（2026-09-25，localhost:5000）：Kavita 服务端空闲连接超时约 60s
+            //（Kestrel KeepAliveTimeout/PollTimeout），挂起的轮询连接到点被服务端
+            // 关闭 → reqwest send() 报 "error sending request"。绕开：轮询 GET 加
+            // 客户端 30s 超时，无消息即主动结束本轮、立即下一轮，服务端 60s 空闲
+            // 超时永不触发；Connection: close 保证每轮独立连接、无 keep-alive 复用。
+            let response = match self
                 .client
                 .http_client()
                 .get(format!("{}/hubs/messages", self.client.base_uri()))
@@ -348,16 +527,31 @@ impl KavitaSignalREventHandler {
                     ("transport", "LongPolling"),
                     ("access_token", jwt),
                 ])
+                .header(reqwest::header::CONNECTION, "close")
+                .timeout(std::time::Duration::from_secs(30))
                 .send()
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                // 30s 内服务端无消息：本轮轮询超时属正常，继续下一轮。
+                Err(e) if e.is_timeout() => continue,
+                Err(e) => return Err(e.into()),
+            };
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(MediaServerError::Status(status, body));
             }
-            let messages: Vec<String> = response.json().await?;
-            for message in messages {
-                match self.handle_message(&message, &state).await {
+            // LongPolling 响应体是文本帧流（消息以 record separator 0x1e 结尾，
+            // 如 `{}\x1e`），不是 JSON 数组——用 json() 解析必然报
+            // "error decoding response body"。按 0x1e 切分逐条处理。
+            let text = response.text().await?;
+            for message in text.split('\u{1e}') {
+                let message = message.trim();
+                if message.is_empty() {
+                    continue;
+                }
+                match self.handle_message(message, &state).await {
                     MessageOutcome::Continue => {}
                     MessageOutcome::Close => return Ok(()),
                     MessageOutcome::Error(e) => return Err(e),
@@ -653,6 +847,18 @@ mod tests {
             available_transports: None,
         };
         assert_eq!(no_token.connection_id_for_requests(), "conn-id");
+    }
+
+    #[test]
+    fn builds_websocket_url() {
+        assert_eq!(
+            KavitaSignalREventHandler::websocket_url(
+                "https://kavita.example.com:8443",
+                "t",
+                "j"
+            ),
+            "wss://kavita.example.com:8443/hubs/messages?id=t&transport=WebSockets&access_token=j"
+        );
     }
 
     /// 事件 → 状态转移：ScanProgress ended 取走卷列表（Kotlin 语义）。

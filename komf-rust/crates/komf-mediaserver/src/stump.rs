@@ -1351,13 +1351,15 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         &self,
         series_id: &MediaServerSeriesId,
     ) -> Result<Vec<MediaServerSeriesThumbnail>, MediaServerError> {
-        // Stump 单一缩略图模型：有 thumbnailPath 则合成一条记录，否则为空
+        // Stump 单一缩略图模型：有 thumbnailPath 则合成一条记录，否则为空。
+        // type 标记 USER_UPLOADED（Stump 封面即用户/komf 上传的单一图，无
+        // GENERATED 概念），与 metadata_updater 的缩略图类型判定对齐。
         let dto = self.client.get_series_dto(&series_id.0).await?;
         Ok(if dto.thumbnail_path.is_some() {
             vec![MediaServerSeriesThumbnail {
                 id: MediaServerThumbnailId(format!("{}-thumbnail", series_id.0)),
                 series_id: series_id.clone(),
-                r#type: "thumbnail".to_string(),
+                r#type: "USER_UPLOADED".to_string(),
                 selected: true,
             }]
         } else {
@@ -1394,15 +1396,23 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         &self,
         book_id: &MediaServerBookId,
     ) -> Result<Vec<MediaServerBookThumbnail>, MediaServerError> {
-        // 同系列：单缩略图模型，有 thumbnailPath 则合成一条
+        // 单缩略图模型：有 thumbnailPath 则合成一条。type 用 USER_UPLOADED、
+        // file_size 用实际字节数，使 metadata_updater 的"同图跳过"判定
+        // （USER_UPLOADED && file_size == 新封面大小）能命中，避免每次
+        // identify 重复上传封面（此前恒为 "thumbnail"/None，判定永不命中）。
         let dto = self.client.get_media_dto(&book_id.0).await?;
         Ok(if dto.thumbnail_path.is_some() {
+            let file_size = self
+                .client
+                .get_book_thumbnail_image(&book_id.0)
+                .await?
+                .map(|i| i.bytes.len() as i64);
             vec![MediaServerBookThumbnail {
                 id: MediaServerThumbnailId(format!("{}-thumbnail", book_id.0)),
                 book_id: book_id.clone(),
-                r#type: "thumbnail".to_string(),
+                r#type: "USER_UPLOADED".to_string(),
                 selected: true,
-                file_size: None,
+                file_size,
             }]
         } else {
             Vec::new()
