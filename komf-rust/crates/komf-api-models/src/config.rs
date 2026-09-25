@@ -451,6 +451,7 @@ pub struct SeriesMetadataConfigDto {
     pub thumbnail: Option<bool>,
     pub links: Option<bool>,
     pub books: Option<bool>,
+    pub score: Option<bool>,
     pub use_original_publisher: Option<bool>,
     pub original_publisher_tag_name: Option<String>,
     pub english_publisher_tag_name: Option<String>,

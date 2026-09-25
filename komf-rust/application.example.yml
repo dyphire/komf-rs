@@ -71,6 +71,25 @@ komga:
         update:
           enabled: true             #   应用于元数据更新
           fields: [title]           #   应用字段：title / genres / tags / summary
+      seriesMetadata:               # Provider 系列元数据字段开关（默认全 true）
+        status: true
+        title: true
+        titleSort: true
+        summary: true
+        publisher: true
+        readingDirection: true
+        ageRating: true
+        language: true
+        genres: true
+        tags: true
+        totalBookCount: true
+        authors: true
+        releaseDate: true
+        thumbnail: true
+        books: true
+        links: true
+        score: true
+        useOriginalPublisher: false
     library: {}                     # 按库覆盖（komga/kavita 库 id → 同 default 结构）
 
 stump:                                # Stump 媒体服务器（Rust 扩展）
@@ -130,6 +149,25 @@ stump:                                # Stump 媒体服务器（Rust 扩展）
         update:
           enabled: true
           fields: [title]
+      seriesMetadata:               # Provider 系列元数据字段开关（默认全 true，score 默认 false）
+        status: true
+        title: true
+        titleSort: true
+        summary: true
+        publisher: true
+        readingDirection: true
+        ageRating: true
+        language: true
+        genres: true
+        tags: true
+        totalBookCount: true
+        authors: true
+        releaseDate: true
+        thumbnail: true
+        books: true
+        links: true
+        score: false
+        useOriginalPublisher: false
     library: {}
 
 kavita:
@@ -187,6 +225,25 @@ kavita:
         update:
           enabled: true
           fields: [title]
+      seriesMetadata:               # Provider 系列元数据字段开关（默认全 true，score 默认 false）
+        status: true
+        title: true
+        titleSort: true
+        summary: true
+        publisher: true
+        readingDirection: true
+        ageRating: true
+        language: true
+        genres: true
+        tags: true
+        totalBookCount: true
+        authors: true
+        releaseDate: true
+        thumbnail: true
+        books: true
+        links: true
+        score: false
+        useOriginalPublisher: false
     library: {}
 
 database:
@@ -207,7 +264,7 @@ metadataProviders:
     mangaUpdates:
       priority: 10
       enabled: true                 # 默认唯一启用的 provider（公开 API 无需凭据）
-      seriesMetadata:               # 每字段开关（默认全 true；仅列差异时省略）
+      seriesMetadata:               # 每字段开关（默认全 true；仅列差异时省略，score 默认 false）
         status: true
         title: true
         titleSort: true
@@ -224,7 +281,7 @@ metadataProviders:
         thumbnail: true
         books: true
         links: true
-        score: true
+        score: false
         useOriginalPublisher: false
       bookMetadata:                 # 每字段开关（默认全 true）
         title: true

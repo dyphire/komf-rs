@@ -481,6 +481,7 @@ fn default_series_metadata_config_dto() -> SeriesMetadataConfigDto {
         thumbnail: Some(true),
         links: Some(true),
         books: Some(true),
+        score: Some(false),
         use_original_publisher: Some(false),
         original_publisher_tag_name: None,
         english_publisher_tag_name: None,
@@ -570,6 +571,7 @@ fn to_series_metadata_dto(config: &komf_core::config::SeriesMetadataConfig) -> S
         thumbnail: Some(config.thumbnail),
         links: Some(config.links),
         books: Some(config.books),
+        score: Some(config.score),
         use_original_publisher: Some(config.use_original_publisher),
         // 对齐 Kotlin AppConfigMapper：输出空字符串（脚本 UI 空输入框契约），非 null
         original_publisher_tag_name: Some(String::new()),
@@ -1303,7 +1305,7 @@ fn from_series_metadata_dto(
         thumbnail: dto.thumbnail.unwrap_or(base.thumbnail),
         books: dto.books.unwrap_or(base.books),
         links: dto.links.unwrap_or(base.links),
-        score: base.score,
+        score: dto.score.unwrap_or(base.score),
         use_original_publisher: dto.use_original_publisher.unwrap_or(base.use_original_publisher),
     }
 }

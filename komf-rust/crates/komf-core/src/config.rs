@@ -612,7 +612,7 @@ pub struct SeriesMetadataConfig {
     pub books: bool,
     #[serde(default = "default_true")]
     pub links: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub score: bool,
     #[serde(default)]
     pub use_original_publisher: bool,
@@ -641,7 +641,7 @@ impl Default for SeriesMetadataConfig {
             thumbnail: true,
             books: true,
             links: true,
-            score: true,
+            score: false,
             use_original_publisher: false,
         }
     }
