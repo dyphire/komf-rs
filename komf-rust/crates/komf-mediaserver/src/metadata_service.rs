@@ -323,11 +323,15 @@ impl MetadataService {
             });
             match provider.get_series_metadata(&provider_series_id).await {
                 Ok(provider_metadata) => {
+                    let excluded =
+                        excluded_alt_names(provider.as_ref(), &provider_metadata.metadata.titles);
                     let book_metadata = self
                         .get_book_metadata(books, &provider_metadata, provider, None, tx)
                         .await;
-                    let new = SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata)
-                        .with_oneshots(books);
+                    let mut new =
+                        SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata)
+                            .with_oneshots(books);
+                    new.excluded_alt_titles = excluded;
                     match result.take() {
                         Some(base) => {
                             // 多 provider 合并：与 aggregate_metadata_from_providers
@@ -405,6 +409,7 @@ impl MetadataService {
             .get_series_metadata(provider_series_id)
             .await
             .map_err(|e| (Some(provider_name), e.to_string()))?;
+        let excluded = excluded_alt_names(provider.as_ref(), &provider_metadata.metadata.titles);
         let book_metadata = self
             .get_book_metadata(&books, &provider_metadata, provider, edition, &tx)
             .await;
@@ -417,11 +422,14 @@ impl MetadataService {
                 .into_iter()
                 .filter(|p| p.provider_name() != provider_name)
                 .collect();
-            self.aggregate_metadata_from_providers(&series, &books, provider_metadata.metadata, book_metadata, providers, edition, &tx)
+            self.aggregate_metadata_from_providers(&series, &books, provider_metadata.metadata, book_metadata, excluded, providers, edition, &tx)
                 .await
         } else {
             // Kotlin key 为 MediaServerBook（内嵌 oneshot），Rust 以 book_oneshots 等价承载。
-            SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata).with_oneshots(&books)
+            let mut manual =
+                SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata).with_oneshots(&books);
+            manual.excluded_alt_titles = excluded;
+            manual
         };
 
         // Rust 扩展：简繁转换应用于元数据更新（chineseConversion.update.enabled + fields）
@@ -716,9 +724,13 @@ impl MetadataService {
                 .get_series_metadata(&ProviderSeriesId(existing.provider_series_id.clone()))
                 .await
                 .map_err(|e| (Some(existing.provider), e.to_string()))?;
+            let excluded = excluded_alt_names(provider.as_ref(), &provider_metadata.metadata.titles);
             let book_metadata = self.get_book_metadata(&books, &provider_metadata, provider, None, &tx).await;
             matched_provider = Some(existing.provider);
-            Some(SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata).with_oneshots(&books))
+            let mut manual =
+                SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata).with_oneshots(&books);
+            manual.excluded_alt_titles = excluded;
+            Some(manual)
         } else {
             // Rust 扩展（用户需求）：系列 links 已包含任一 provider 识别特征（label/域名）。
             // linksMatchEnabled 优先于 linksSkipEnabled：启用链接直用时不再判断跳过
@@ -806,11 +818,13 @@ impl MetadataService {
                 .filter(|p| Some(p.provider_name()) != matched_provider)
                 .collect();
             // 聚合除首个成功 provider 外的其余 provider
+            // （matched 已携带主 provider 的备选排除名单，聚合内各 provider 名单随 merge 并集）
             self.aggregate_metadata_from_providers(
                 &series,
                 &books,
                 matched.series_metadata.clone(),
                 matched.book_metadata.clone(),
+                matched.excluded_alt_titles.clone(),
                 providers,
                 None,
                 &tx,
@@ -896,8 +910,12 @@ impl MetadataService {
                         provider.provider_name(),
                         result.id.0
                     );
+                    let excluded = excluded_alt_names(provider.as_ref(), &result.metadata.titles);
                     let book_metadata = self.get_book_metadata(books, &result, provider.clone(), edition, tx).await;
-                    return Some(SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books));
+                    let mut matched =
+                        SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books);
+                    matched.excluded_alt_titles = excluded;
+                    return Some(matched);
                 }
             }
             let result = match provider.match_series_metadata(&query).await {
@@ -919,8 +937,12 @@ impl MetadataService {
                     provider.provider_name(),
                     result.id.0
                 );
+                let excluded = excluded_alt_names(provider.as_ref(), &result.metadata.titles);
                 let book_metadata = self.get_book_metadata(books, &result, provider.clone(), edition, tx).await;
-                return Some(SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books));
+                let mut matched =
+                    SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books);
+                matched.excluded_alt_titles = excluded;
+                return Some(matched);
             }
         }
         None
@@ -1059,12 +1081,16 @@ impl MetadataService {
         books: &[MediaServerBook],
         series_metadata: komf_core::model::SeriesMetadata,
         book_metadata: HashMap<MediaServerBookId, Option<BookMetadata>>,
+        excluded_alt_titles: Vec<String>,
         providers: Vec<Arc<dyn MetadataProvider>>,
         edition: Option<&str>,
         tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
     ) -> SeriesAndBookMetadata {
         if providers.is_empty() {
-            return SeriesAndBookMetadata::new(series_metadata, book_metadata).with_oneshots(books);
+            let mut seed =
+                SeriesAndBookMetadata::new(series_metadata, book_metadata).with_oneshots(books);
+            seed.excluded_alt_titles = excluded_alt_titles;
+            return seed;
         }
 
         let search_titles: Vec<String> = series_metadata
@@ -1075,6 +1101,7 @@ impl MetadataService {
             .collect();
 
         let mut current = SeriesAndBookMetadata::new(series_metadata, book_metadata).with_oneshots(books);
+        current.excluded_alt_titles = excluded_alt_titles;
         for provider in providers {
             let matched = self
                 .match_series(series, books, &search_titles, provider.clone(), edition, tx)
@@ -1119,8 +1146,17 @@ impl MetadataService {
             .collect();
 
         // Kotlin mergeMetadata 的 key 为 MediaServerBook（保留 original 的 oneshot 信息）。
-        SeriesAndBookMetadata::new(merged_series, merged_books)
-            .with_book_oneshots(original.book_oneshots)
+        // excluded 备选名单取双方并集（任一来源禁用即最终不写；同名去重）。
+        let mut excluded_alt_titles = original.excluded_alt_titles;
+        for name in new.excluded_alt_titles {
+            if !excluded_alt_titles.iter().any(|n| n == &name) {
+                excluded_alt_titles.push(name);
+            }
+        }
+        let mut merged_meta =
+            SeriesAndBookMetadata::new(merged_series, merged_books).with_book_oneshots(original.book_oneshots);
+        merged_meta.excluded_alt_titles = excluded_alt_titles;
+        merged_meta
     }
 
     /// 对应 `createMatchQuery`。第 4 字段 seriesFolder 对齐 Kotlin：传 series.url。
@@ -1217,6 +1253,21 @@ impl MetadataService {
     }
 }
 
+/// `seriesMetadata.alternativeTitles=false` 的 provider：将其全量标题名记入备选排除名单。
+/// 后处理选出主标题后，再从备选中剔除这些名字——主标题本身不受影响，
+/// 因此匹配（全量标题相似度）与主标题语言选择（全量候选）都不受此开关影响，只影响备选写入。
+/// 允许时返回空名单（保持既有行为）。
+fn excluded_alt_names(
+    provider: &dyn MetadataProvider,
+    titles: &[komf_core::model::SeriesTitle],
+) -> Vec<String> {
+    if provider.alternative_titles_enabled() {
+        Vec::new()
+    } else {
+        titles.iter().map(|t| t.name.clone()).collect()
+    }
+}
+
 /// Rust 扩展：按配置对系列元数据应用简繁转换（update.enabled + update.fields 过滤）。
 /// 纯函数，便于单测。
 fn apply_chinese_conversion_to_metadata(
@@ -1234,6 +1285,7 @@ fn apply_chinese_conversion_to_metadata(
         mut series_metadata,
         book_metadata,
         book_oneshots,
+        mut excluded_alt_titles,
     } = metadata;
     for field in &cfg.update.fields {
         match field {
@@ -1244,6 +1296,11 @@ fn apply_chinese_conversion_to_metadata(
                 for t in &mut series_metadata.titles {
                     t.name = converter.convert(&t.name);
                 }
+                // excluded 名单与 titles 同源，保持同步转换，否则后处理按名剔除时对不上。
+                excluded_alt_titles = excluded_alt_titles
+                    .iter()
+                    .map(|n| converter.convert(n))
+                    .collect();
             }
             ChineseField::Genres => {
                 series_metadata.genres = series_metadata
@@ -1270,6 +1327,7 @@ fn apply_chinese_conversion_to_metadata(
         series_metadata,
         book_metadata,
         book_oneshots,
+        excluded_alt_titles,
     }
 }
 

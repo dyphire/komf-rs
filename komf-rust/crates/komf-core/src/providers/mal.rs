@@ -417,6 +417,10 @@ impl MetadataProvider for MalMetadataProvider {
         CoreProviders::Mal
     }
 
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
+    }
+
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
         let id = self.resolve_link_id(query)?;
         let manga = self.client.get(id.parse().ok()?).await.ok()?;

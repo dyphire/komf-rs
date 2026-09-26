@@ -62,12 +62,18 @@ impl MetadataPostProcessor {
 
     /// 对应 `process`。
     pub fn process(&self, metadata: &SeriesAndBookMetadata) -> SeriesAndBookMetadata {
-        let series_metadata = self.post_process_series(&metadata.series_metadata);
+        let series_metadata =
+            self.post_process_series(&metadata.series_metadata, &metadata.excluded_alt_titles);
         let book_metadata = self.post_process_books(&metadata.book_metadata);
-        self.handle_komga_oneshot(series_metadata, book_metadata, &metadata.book_oneshots)
+        self.handle_komga_oneshot(
+            series_metadata,
+            book_metadata,
+            &metadata.book_oneshots,
+            &metadata.excluded_alt_titles,
+        )
     }
 
-    fn post_process_series(&self, series: &SeriesMetadata) -> SeriesMetadata {
+    fn post_process_series(&self, series: &SeriesMetadata, excluded_alt_titles: &[String]) -> SeriesMetadata {
         let alt_titles: Vec<SeriesTitle> = if self.alternative_series_titles {
             let mut titles: Vec<SeriesTitle> = series
                 .titles
@@ -108,6 +114,23 @@ impl MetadataPostProcessor {
                 .filter(|t| distinct_name(&t.name) != distinct_name(&chosen.name))
                 .collect(),
             None => alt_titles,
+        };
+
+        // `seriesMetadata.alternativeTitles=false` 的 provider 标题：主标题选定后，
+        // 从备选中剔除（按 distinct_name 归一比较，与主标题剔除逻辑一致）。
+        // 主标题（chosen）不受影响——即使它来自禁写备选的 provider 也照常写入，
+        // 因此主标题语言选择（seriesTitleLanguage）仍基于全量候选。
+        let alts_without_series_title: Vec<SeriesTitle> = if excluded_alt_titles.is_empty() {
+            alts_without_series_title
+        } else {
+            let excluded: std::collections::HashSet<String> = excluded_alt_titles
+                .iter()
+                .map(|n| distinct_name(n))
+                .collect();
+            alts_without_series_title
+                .into_iter()
+                .filter(|t| !excluded.contains(&distinct_name(&t.name)))
+                .collect()
         };
 
         let mut tags = series.tags.clone();
@@ -204,6 +227,7 @@ impl MetadataPostProcessor {
         series_metadata: SeriesMetadata,
         book_metadata: HashMap<MediaServerBookId, Option<BookMetadata>>,
         oneshots: &HashMap<MediaServerBookId, bool>,
+        excluded_alt_titles: &[String],
     ) -> SeriesAndBookMetadata {
         // 对齐 Kotlin：size > 1 || key.oneshot == false 时原样返回。
         // Kotlin 的 oneshot 为 Boolean?，null 也继续合并；Rust 的 oneshot 为 bool，
@@ -215,7 +239,9 @@ impl MetadataPostProcessor {
                 .map(|id| oneshots.get(id).copied().unwrap_or(false))
                 .unwrap_or(false);
         if book_metadata.len() > 1 || !single_oneshot {
-            return SeriesAndBookMetadata::new(series_metadata, book_metadata);
+            let mut out = SeriesAndBookMetadata::new(series_metadata, book_metadata);
+            out.excluded_alt_titles = excluded_alt_titles.to_vec();
+            return out;
         }
         // 单本 oneshot 的 series：将系列字段合并到书元数据。
         // 对齐 Kotlin：新 BookMetadata 只构造 title/summary/tags/links/thumbnail 五字段
@@ -260,7 +286,10 @@ impl MetadataPostProcessor {
         new_series_metadata.thumbnail = None; // series thumbnail should be null for oneshots
         let oneshots: HashMap<MediaServerBookId, bool> =
             new_book_metadata.keys().map(|id| (id.clone(), true)).collect();
-        SeriesAndBookMetadata::new(new_series_metadata, new_book_metadata).with_book_oneshots(oneshots)
+        let mut out =
+            SeriesAndBookMetadata::new(new_series_metadata, new_book_metadata).with_book_oneshots(oneshots);
+        out.excluded_alt_titles = excluded_alt_titles.to_vec();
+        out
     }
 }
 
@@ -391,5 +420,31 @@ mod tests {
         // 主标题 = 葬送的芙莉莲（zh），同名备选被 distinctName 剔除；语言排序 nullsLast：
         // 有语言(zh/en)在前、无语言(原名)在后
         assert_eq!(alts, vec!["Frieren", "葬送のフリーレン"]);
+    }
+
+    /// alternativeTitles=false（excluded=全量标题名）：主标题语言选择仍基于全量候选，
+    /// 不因备选被禁写而回退；备选清空（只影响写入）。
+    #[test]
+    fn excluded_alt_titles_respects_series_title_language() {
+        let series = bangumi_series();
+        let excluded: Vec<String> = series.titles.iter().map(|t| t.name.clone()).collect();
+        let mut input = SeriesAndBookMetadata::new(series, HashMap::new());
+        input.excluded_alt_titles = excluded;
+        let out = processor(Some("zh".into())).process(&input);
+        // 主标题仍为 zh（若提前 truncate(1) 则此处会回退为原名或 None）
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        assert!(out.series_metadata.titles.is_empty());
+    }
+
+    /// 部分排除：仅剔除名单中的备选，其余保留；主标题不受影响。
+    #[test]
+    fn excluded_alt_titles_partial_keeps_rest() {
+        let series = bangumi_series();
+        let mut input = SeriesAndBookMetadata::new(series, HashMap::new());
+        input.excluded_alt_titles = vec!["Frieren".to_string()];
+        let out = processor(Some("zh".into())).process(&input);
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["葬送のフリーレン"]);
     }
 }

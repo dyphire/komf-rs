@@ -534,7 +534,6 @@ impl VizMetadataMapper {
                 t.language = None;
             }
         }
-
         let status = if cfg.status {
             if all_books.iter().any(|b| b.final_) {
                 Some(SeriesStatus::Ended)
@@ -785,6 +784,10 @@ impl MetadataProvider for VizMetadataProvider {
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Viz
+    }
+
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {

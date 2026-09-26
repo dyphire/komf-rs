@@ -1761,7 +1761,6 @@ impl EHentaiMetadataMapper {
                 t.language = None;
             }
         }
-
         let release_date = cfg
             .release_date
             .then(|| posted_to_release_date(book.posted))
@@ -2221,6 +2220,10 @@ impl MetadataProvider for EHentaiMetadataProvider {
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::EHentai
+    }
+
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
@@ -3092,8 +3095,11 @@ mod tests {
 
     #[test]
     fn to_series_metadata_maps_fields() {
+        // score 默认关闭，显式开启后断言透出
+        let mut cfg = crate::config::SeriesMetadataConfig::default();
+        cfg.score = true;
         let mapper = EHentaiMetadataMapper::new(
-            crate::config::SeriesMetadataConfig::default(),
+            cfg,
             vec![AuthorRole::Writer],
             vec![AuthorRole::Penciller],
             vec!["en".to_string()],

@@ -414,7 +414,6 @@ impl BangumiMetadataMapper {
                 });
             }
         }
-
         let title = None;
 
         let release_date = cfg
@@ -1819,6 +1818,10 @@ impl MetadataProvider for BangumiMetadataProvider {
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Bangumi
+    }
+
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.series_metadata_config.alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {

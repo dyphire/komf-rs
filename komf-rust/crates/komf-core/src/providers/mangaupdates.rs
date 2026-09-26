@@ -490,7 +490,6 @@ impl MangaUpdatesMetadataMapper {
                 t.language = None;
             }
         }
-
         let metadata = SeriesMetadata {
             status: status_field,
             title: title_field,
@@ -689,6 +688,10 @@ impl MetadataProvider for MangaUpdatesMetadataProvider {
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::MangaUpdates
+    }
+
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
@@ -1068,8 +1071,10 @@ mod tests {
     fn score_comes_from_bayesian_rating() {
         let mut series = MangaUpdatesSeries::default();
         series.bayesian_rating = Some(7.89);
-        let meta = test_mapper(crate::config::SeriesMetadataConfig::default())
-            .to_series_metadata(&series, None);
+        // score 默认关闭，显式开启后透出 bayesian rating
+        let mut cfg = crate::config::SeriesMetadataConfig::default();
+        cfg.score = true;
+        let meta = test_mapper(cfg).to_series_metadata(&series, None);
         assert_eq!(meta.metadata.score, Some(7.89));
         let mut cfg = crate::config::SeriesMetadataConfig::default();
         cfg.score = false;

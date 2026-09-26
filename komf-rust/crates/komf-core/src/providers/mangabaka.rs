@@ -816,6 +816,10 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         CoreProviders::MangaBaka
     }
 
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
+    }
+
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
         let id: i32 = self.resolve_link_id(query)?.parse().ok()?;
         let series = self.data_source.get_series(id).await.ok()?;

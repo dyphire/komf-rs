@@ -144,6 +144,13 @@ pub trait MetadataProvider: Send + Sync {
         None
     }
 
+    /// 本 provider 是否写入 alternativeTitles（`seriesMetadata.alternativeTitles`）。
+    /// false 时最终写入仅保留主标题（备选不写入）；匹配与主标题语言选择仍用全量标题，不受影响。
+    /// 默认 true（保持既有行为）；各 provider 返回自身 `SeriesMetadataConfig.alternative_titles`。
+    fn alternative_titles_enabled(&self) -> bool {
+        true
+    }
+
     /// 链接命中时构造搜索结果（Rust 扩展：搜索框提交 provider 链接时显示用）。
     /// 默认实现：resolve_link_id → get_series_metadata → 通用模板（titles.first，
     /// 无封面 URL / mediaType）。各 provider 可重写复用其搜索结果显示逻辑

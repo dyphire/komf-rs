@@ -438,6 +438,7 @@ pub struct MangaBakaConfigDto {
 pub struct SeriesMetadataConfigDto {
     pub status: Option<bool>,
     pub title: Option<bool>,
+    pub alternative_titles: Option<bool>,
     pub summary: Option<bool>,
     pub publisher: Option<bool>,
     pub reading_direction: Option<bool>,

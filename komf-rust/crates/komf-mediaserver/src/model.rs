@@ -171,6 +171,11 @@ pub struct SeriesAndBookMetadata {
     /// book_id -> oneshot（对齐 Kotlin `SeriesAndBookMetadata.bookMetadata` 的 key
     /// 是 `MediaServerBook` 对象，含 oneshot 字段；Rust 侧单独携带）。
     pub book_oneshots: std::collections::HashMap<MediaServerBookId, bool>,
+    /// 不写入备选标题的标题名集合（Rust 扩展，`seriesMetadata.alternativeTitles=false`
+    /// 的 provider 在匹配/拉取时将其全量标题名记入此处）。
+    /// 后处理选出主标题后，从备选中剔除这些名字（主标题本身不受影响，
+    /// 因此主标题语言选择仍基于全量候选，不受此开关影响）。
+    pub excluded_alt_titles: Vec<String>,
 }
 
 impl SeriesAndBookMetadata {
@@ -182,6 +187,7 @@ impl SeriesAndBookMetadata {
             series_metadata,
             book_metadata,
             book_oneshots: std::collections::HashMap::new(),
+            excluded_alt_titles: Vec::new(),
         }
     }
 

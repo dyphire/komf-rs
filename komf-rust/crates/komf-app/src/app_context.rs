@@ -417,7 +417,6 @@ mod tests {
     /// 过期日志清理：跨天轮转时删除超过 30 天的备份，近期备份与当日文件保留。
     #[test]
     fn prune_removes_old_backups_only() {
-        use chrono::Datelike;
         let dir = std::env::temp_dir().join(format!("komf-log-prune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

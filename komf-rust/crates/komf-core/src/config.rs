@@ -584,6 +584,12 @@ pub struct SeriesMetadataConfig {
     pub status: bool,
     #[serde(default = "default_true")]
     pub title: bool,
+    /// 控制更新元数据时是否写入 provider 提供的 alternativeTitles（主标题选定后的剩余部分）。
+    /// false 时最终写入仅保留主标题（备选不写入）；匹配仍用全量标题，不受影响；
+    /// 主标题语言选择（postProcessing.seriesTitleLanguage）仍基于全量候选，不受影响。
+    /// 各 provider 可独立配置。默认 true（保持既有行为）。
+    #[serde(default = "default_true")]
+    pub alternative_titles: bool,
     #[serde(default = "default_true")]
     pub title_sort: bool,
     #[serde(default = "default_true")]
@@ -627,6 +633,7 @@ impl Default for SeriesMetadataConfig {
         Self {
             status: true,
             title: true,
+            alternative_titles: true,
             title_sort: true,
             summary: true,
             publisher: true,

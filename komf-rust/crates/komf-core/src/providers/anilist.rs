@@ -652,6 +652,10 @@ impl MetadataProvider for AniListMetadataProvider {
         CoreProviders::Anilist
     }
 
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
+    }
+
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
         let id = self.resolve_link_id(query)?;
         let media = self.client.get_series(id.parse().ok()?).await.ok()?;
@@ -817,11 +821,40 @@ mod tests {
         assert_eq!(out.metadata.title.as_ref().unwrap().name, "English Title");
     }
 
+    /// alternativeTitles=false 时 provider 层仍返回全量标题（匹配与主标题语言选择不受影响）；
+    /// 备选过滤延后到后处理（主标题选定后），见 metadata_post_processor::excluded_alt_titles。
+    #[test]
+    fn alternative_titles_disabled_keeps_full_titles() {
+        let json = r#"{"id":1,"title":{"romaji":"ROMAJI","english":"English Title","native":"ネイティブ"}}"#;
+        let media: AniListMedia = serde_json::from_str(json).unwrap();
+        let mut cfg = crate::config::SeriesMetadataConfig::default();
+        cfg.alternative_titles = false;
+        let mapper = AniListMetadataMapper::new(
+            cfg,
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            15,
+            60,
+        );
+        let out = mapper.to_series_metadata(&media, None);
+        assert_eq!(out.metadata.titles.len(), 3);
+    }
+
     #[test]
     fn score_uses_mean_score_divided_by_ten() {
         let json = r#"{"id":1,"title":{"romaji":"x"},"meanScore":75}"#;
         let media: AniListMedia = serde_json::from_str(json).unwrap();
-        let out = mapper().to_series_metadata(&media, None);
+        // score 默认关闭（SeriesMetadataConfig::default().score == false），显式开启后断言
+        let mut cfg = crate::config::SeriesMetadataConfig::default();
+        cfg.score = true;
+        let mapper = AniListMetadataMapper::new(
+            cfg,
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            15,
+            60,
+        );
+        let out = mapper.to_series_metadata(&media, None);
         assert_eq!(out.metadata.score, Some(7.5));
     }
 

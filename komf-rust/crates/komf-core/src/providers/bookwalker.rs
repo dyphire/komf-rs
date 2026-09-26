@@ -1013,6 +1013,10 @@ impl MetadataProvider for BookWalkerMetadataProvider {
         CoreProviders::BookWalker
     }
 
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.series_metadata_config.alternative_titles
+    }
+
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
         let id = self.resolve_link_id(query)?;
         let series = self.repository.get_series(&id).ok()?;

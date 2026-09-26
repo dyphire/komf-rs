@@ -468,6 +468,7 @@ fn default_series_metadata_config_dto() -> SeriesMetadataConfigDto {
     SeriesMetadataConfigDto {
         status: Some(true),
         title: Some(true),
+        alternative_titles: Some(true),
         summary: Some(true),
         publisher: Some(true),
         reading_direction: Some(true),
@@ -558,6 +559,7 @@ fn to_series_metadata_dto(config: &komf_core::config::SeriesMetadataConfig) -> S
     SeriesMetadataConfigDto {
         status: Some(config.status),
         title: Some(config.title),
+        alternative_titles: Some(config.alternative_titles),
         summary: Some(config.summary),
         publisher: Some(config.publisher),
         reading_direction: Some(config.reading_direction),
@@ -1291,6 +1293,7 @@ fn from_series_metadata_dto(
     komf_core::config::SeriesMetadataConfig {
         status: dto.status.unwrap_or(base.status),
         title: dto.title.unwrap_or(base.title),
+        alternative_titles: dto.alternative_titles.unwrap_or(base.alternative_titles),
         title_sort: dto.title.unwrap_or(base.title_sort),
         summary: dto.summary.unwrap_or(base.summary),
         publisher: dto.publisher.unwrap_or(base.publisher),

@@ -825,7 +825,6 @@ impl WebtoonsMetadataMapper {
                 t.language = None;
             }
         }
-
         let status = if cfg.status {
             match series.status {
                 Status::Ongoing => Some(SeriesStatus::Ongoing),
@@ -984,6 +983,10 @@ impl MetadataProvider for WebtoonsMetadataProvider {
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Webtoons
+    }
+
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {

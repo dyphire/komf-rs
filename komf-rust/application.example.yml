@@ -71,7 +71,7 @@ komga:
         update:
           enabled: true             #   应用于元数据更新
           fields: [title]           #   应用字段：title / genres / tags / summary
-      seriesMetadata:               # Provider 系列元数据字段开关（默认全 true）
+      seriesMetadata:               # Provider 系列元数据字段开关（默认全 true，score 默认 false）
         status: true
         title: true
         titleSort: true
@@ -153,6 +153,7 @@ stump:                                # Stump 媒体服务器（Rust 扩展）
         status: true
         title: true
         titleSort: true
+        alternativeTitles: true  # 是否写入 provider 提供的备选标题（主标题选定后的剩余部分）；false=最终仅保留主标题（不影响匹配与主标题语言选择）
         summary: true
         publisher: true
         readingDirection: true
@@ -229,6 +230,7 @@ kavita:
         status: true
         title: true
         titleSort: true
+        alternativeTitles: true  # 是否写入 provider 提供的备选标题（主标题选定后的剩余部分）；false=最终仅保留主标题（不影响匹配与主标题语言选择）
         summary: true
         publisher: true
         readingDirection: true
@@ -260,13 +262,14 @@ metadataProviders:
   defaultProviders:
     # 通用默认（未列出字段省略时）：enabled=false、mediaType=MANGA、
     # authorRoles=[WRITER]、artistRoles=[PENCILLER,INKER,COLORIST,LETTERER,COVER]、
-    # seriesMetadata 全 true（useOriginalPublisher=false）、bookMetadata 全 true、tagWhitelist=[]。
+    # seriesMetadata 全 true（alternativeTitles=true、useOriginalPublisher=false、score=false）、bookMetadata 全 true、tagWhitelist=[]。
     mangaUpdates:
       priority: 10
       enabled: true                 # 默认唯一启用的 provider（公开 API 无需凭据）
       seriesMetadata:               # 每字段开关（默认全 true；仅列差异时省略，score 默认 false）
         status: true
         title: true
+        alternativeTitles: true  # 是否写入 provider 提供的备选标题（主标题选定后的剩余部分）；false=最终仅保留主标题（不影响匹配与主标题语言选择）
         titleSort: true
         summary: true
         publisher: true

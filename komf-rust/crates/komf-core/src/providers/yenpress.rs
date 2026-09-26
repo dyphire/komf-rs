@@ -532,7 +532,6 @@ impl YenPressMetadataMapper {
                 t.language = None;
             }
         }
-
         let authors = if cfg.authors {
             self.authors(&book.authors)
         } else {
@@ -841,6 +840,10 @@ impl MetadataProvider for YenPressMetadataProvider {
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::YenPress
+    }
+
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.metadata_config.alternative_titles
     }
 
     async fn get_series_metadata(

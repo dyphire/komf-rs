@@ -743,6 +743,10 @@ impl MetadataProvider for MangaDexMetadataProvider {
         CoreProviders::Mangadex
     }
 
+    fn alternative_titles_enabled(&self) -> bool {
+        self.metadata_mapper.series_metadata_config.alternative_titles
+    }
+
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
         let id = self.resolve_link_id(query)?;
         let manga = self.client.get_series(&id).await.ok()?;
