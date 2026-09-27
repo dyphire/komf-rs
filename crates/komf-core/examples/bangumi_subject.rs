@@ -92,8 +92,13 @@ async fn main() {
         println!("SKIP (无单行本)");
     }
 
-    // 5) 名称匹配（日文名 + 中文名）
-    for name in ["ペンと手錠と事実婚", "笔、手铐和事实婚", "笔与手铐与事实婚姻"] {
+    // 5) 名称匹配（日文名 + 中文名 + 别名 + 版本名——版本名仅用于匹配）
+    for name in [
+        "ペンと手錠と事実婚",
+        "笔、手铐和事实婚",
+        "笔与手铐与事实婚姻",
+        "筆、手銬和事實婚",
+    ] {
         println!("\n== [5] match_series_metadata ({name}) ==");
         match p
             .match_series_metadata(&MatchQuery::new(name.to_string(), None, None, None))

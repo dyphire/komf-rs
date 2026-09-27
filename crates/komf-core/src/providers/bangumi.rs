@@ -243,6 +243,9 @@ pub struct BangumiMetadataMapper {
     author_roles: Vec<AuthorRole>,
     artist_roles: Vec<AuthorRole>,
     tag_whitelist: Vec<String>,
+    /// 简繁归一化判重（t2s/s2t 双向；none 时退化为精确判重）
+    chinese_t2s: ChineseConverter,
+    chinese_s2t: ChineseConverter,
 }
 
 impl BangumiMetadataMapper {
@@ -259,6 +262,10 @@ impl BangumiMetadataMapper {
             author_roles,
             artist_roles,
             tag_whitelist,
+            chinese_t2s: ChineseConverter::new(ChineseDirection::T2s)
+                .unwrap_or_else(|_| ChineseConverter::none()),
+            chinese_s2t: ChineseConverter::new(ChineseDirection::S2t)
+                .unwrap_or_else(|_| ChineseConverter::none()),
         }
     }
 
@@ -392,14 +399,29 @@ impl BangumiMetadataMapper {
                     item.key.as_deref() == Some("别名") || item.key.as_deref() == Some("別名");
                 if let Some(value) = item.value.as_ref() {
                     if is_alias_key {
-                        collect_alias_entries(value, &mut aliases, &mut alias_seen, true);
+                        collect_alias_entries(
+                            value,
+                            &mut aliases,
+                            &mut alias_seen,
+                            true,
+                            &self.chinese_t2s,
+                            &self.chinese_s2t,
+                        );
                     }
                     if let serde_json::Value::Array(sub_items) = value {
                         for sub in sub_items {
                             let sub_key = sub.get("k").and_then(|k| k.as_str());
-                            if sub_key == Some("别名") || sub_key == Some("別名") || sub_key == Some("版本名") {
+                            // 版本名（版本语言标题）不写入备选标题，仅参与匹配
+                            if sub_key == Some("别名") || sub_key == Some("別名") {
                                 if let Some(v) = sub.get("v") {
-                                    collect_alias_entries(v, &mut aliases, &mut alias_seen, false);
+                                    collect_alias_entries(
+                                        v,
+                                        &mut aliases,
+                                        &mut alias_seen,
+                                        false,
+                                        &self.chinese_t2s,
+                                        &self.chinese_s2t,
+                                    );
                                 }
                             }
                         }
@@ -422,11 +444,7 @@ impl BangumiMetadataMapper {
             .flatten();
 
         let authors = if cfg.authors {
-            if persons.is_empty() {
-                extract_authors(subject, &self.author_roles, &self.artist_roles)
-            } else {
-                offline_person_authors(persons, &self.author_roles, &self.artist_roles)
-            }
+            resolve_authors(subject, persons, &self.author_roles, &self.artist_roles)
         } else {
             Vec::new()
         };
@@ -436,97 +454,7 @@ impl BangumiMetadataMapper {
         // name 采用 name_cn 优先。在线（persons 空）保持 infobox 解析现状。
         let (publisher, alternative_publishers): (Option<Publisher>, Vec<Publisher>) =
             if cfg.publisher {
-                if persons.is_empty() {
-                    let mut publishers: Vec<Publisher> = Vec::new();
-                    let mut other_publishers: Vec<Publisher> = Vec::new();
-                    for (key, kind) in [
-                        ("出版社", PublisherType::Original),
-                        ("其他出版社", PublisherType::Localized),
-                    ] {
-                        let target = if kind == PublisherType::Original {
-                            &mut publishers
-                        } else {
-                            &mut other_publishers
-                        };
-                        if let Some(value) = info_box.get(key).and_then(|v| v.as_str()) {
-                            for name in value.split(['，', '、', ',']) {
-                                let name = name.trim();
-                                if !name.is_empty() {
-                                    target.push(Publisher {
-                                        name: name.to_string(),
-                                        r#type: Some(kind),
-                                        language_tag: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    let publisher = publishers.first().cloned();
-                    // Kotlin: altPublishers = (publishers.drop(1) + otherPublishers).toSet() —— 保序去重
-                    let mut alternative_publishers: Vec<Publisher> = publishers
-                        .iter()
-                        .skip(1)
-                        .cloned()
-                        .chain(other_publishers)
-                        .collect();
-                    let mut seen: Vec<(String, Option<PublisherType>)> = Vec::new();
-                    alternative_publishers.retain(|p| {
-                        let key = (p.name.clone(), p.r#type);
-                        if seen.contains(&key) {
-                            false
-                        } else {
-                            seen.push(key);
-                            true
-                        }
-                    });
-                    (publisher, alternative_publishers)
-                } else {
-                    // 对齐 Kotlin：publisher 来自 infobox「出版社」（ORIGINAL）+「其他出版社」（LOCALIZED）；
-                    // persons 仅提供 name_cn 映射（离线扩展，匹配到时 name_cn 优先）
-                    let mut publishers: Vec<Publisher> = Vec::new();
-                    let mut other_publishers: Vec<Publisher> = Vec::new();
-                    for (key, kind) in [
-                        ("出版社", PublisherType::Original),
-                        ("其他出版社", PublisherType::Localized),
-                    ] {
-                        let target = if kind == PublisherType::Original {
-                            &mut publishers
-                        } else {
-                            &mut other_publishers
-                        };
-                        if let Some(value) = info_box.get(key).and_then(|v| v.as_str()) {
-                            for name in value.split(['，', '、', ',']) {
-                                let name = name.trim();
-                                if !name.is_empty() {
-                                    target.push(Publisher {
-                                        name: publisher_display_name(persons, name),
-                                        r#type: Some(kind),
-                                        language_tag: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    let publisher = publishers.first().cloned();
-                    // Kotlin: altPublishers = (publishers.drop(1) + otherPublishers).toSet() —— 保序去重
-                    let mut alternative_publishers: Vec<Publisher> = publishers
-                        .iter()
-                        .skip(1)
-                        .cloned()
-                        .chain(other_publishers)
-                        .collect();
-                    let mut seen: Vec<(String, Option<PublisherType>)> = Vec::new();
-                    alternative_publishers.retain(|p| {
-                        let key = (p.name.clone(), p.r#type);
-                        if seen.contains(&key) {
-                            false
-                        } else {
-                            seen.push(key);
-                            true
-                        }
-                    });
-                    (publisher, alternative_publishers)
-                }
+                resolve_publishers(subject, persons)
             } else {
                 (None, Vec::new())
             };
@@ -705,11 +633,7 @@ impl BangumiMetadataMapper {
                 .map(|n| n.start),
             release_date: cfg.release_date.then_some(release_date.clone()).flatten(),
             authors: if cfg.authors {
-                if persons.is_empty() {
-                    extract_authors(book, &self.author_roles, &self.artist_roles)
-                } else {
-                    offline_person_authors(persons, &self.author_roles, &self.artist_roles)
-                }
+                resolve_authors(book, persons, &self.author_roles, &self.artist_roles)
             } else {
                 Vec::new()
             },
@@ -759,29 +683,45 @@ fn alias_language(k: &str) -> Option<String> {
     }
 }
 
+/// 别名收集：精确 + 简繁归一化判重。
+/// 判重语义（与用户约定一致）：t2s（繁→简）命中 → 保留已有简体；s2t（简→繁）命中 → 保留已有繁体；
+/// 均未命中才写入。seen 仅存原始形态（先写入者原样保留）。
 fn collect_alias_entries(
     value: &serde_json::Value,
     out: &mut Vec<(String, Option<String>)>,
     seen: &mut std::collections::HashSet<String>,
     with_language: bool,
+    t2s: &ChineseConverter,
+    s2t: &ChineseConverter,
 ) {
     fn push_alias(
         name: &str,
         language: Option<String>,
         out: &mut Vec<(String, Option<String>)>,
         seen: &mut std::collections::HashSet<String>,
+        t2s: &ChineseConverter,
+        s2t: &ChineseConverter,
     ) {
         let name = name.trim();
-        if !name.is_empty() && seen.insert(name.to_string()) {
-            out.push((name.to_string(), language));
+        if name.is_empty() {
+            return;
+        }
+        // 简繁归一化判重：精确相同、t2s（繁→简）、s2t（简→繁）任一命中 → 视为重复。
+        let s = name.to_string();
+        let dup = seen.contains(&s)
+            || seen.contains(&t2s.convert(&s))
+            || seen.contains(&s2t.convert(&s));
+        if !dup {
+            seen.insert(s.clone());
+            out.push((s, language));
         }
     }
     match value {
-        serde_json::Value::String(s) => push_alias(s, None, out, seen),
+        serde_json::Value::String(s) => push_alias(s, None, out, seen, t2s, s2t),
         serde_json::Value::Array(items) => {
             for item in items {
                 match item {
-                    serde_json::Value::String(s) => push_alias(s, None, out, seen),
+                    serde_json::Value::String(s) => push_alias(s, None, out, seen, t2s, s2t),
                     obj => {
                         let name = obj.get("v").and_then(|v| v.as_str()).unwrap_or("");
                         let language = if with_language {
@@ -791,7 +731,7 @@ fn collect_alias_entries(
                         } else {
                             None
                         };
-                        push_alias(name, language, out, seen);
+                        push_alias(name, language, out, seen, t2s, s2t);
                     }
                 }
             }
@@ -805,7 +745,7 @@ fn collect_alias_entries(
             } else {
                 None
             };
-            push_alias(name, language, out, seen);
+            push_alias(name, language, out, seen, t2s, s2t);
         }
     }
 }
@@ -1244,13 +1184,14 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
             .iter()
             .map(|t| (t.name.clone(), t.language.clone()))
             .collect();
-        // Native 原名 + zh 中文名 + 别名（非官方→None、纯值→None、en→en、版本名→None）
+        // Native 原名 + zh 中文名 + 别名（非官方→None、纯值→None、en→en）；
+        // 版本名「鏈鋸人」不写入备选标题（版本名仅用于匹配）
         assert!(titles.contains(&("チェンソーマン".to_string(), None)));
         assert!(titles.contains(&("链锯人".to_string(), Some("zh".to_string()))));
         assert!(titles.contains(&("电锯人".to_string(), None)));
         assert!(titles.contains(&("Chainsaw man".to_string(), None)));
         assert!(titles.contains(&("Chainsaw Man".to_string(), Some("en".to_string()))));
-        assert!(titles.contains(&("鏈鋸人".to_string(), None)));
+        assert!(!titles.contains(&("鏈鋸人".to_string(), None)));
         // 与 name_cn 相同的别名不重复写入
         let j2 = r#"{
             "id": 1,
@@ -1312,11 +1253,12 @@ fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
         .filter(|t| t.r#type == Some(TitleType::Localized))
         .map(|t| t.name.as_str())
         .collect();
-    // 直接别名 1 条 + 嵌套去重后 2 条（三月的狮子 / 三月的獅子）；
-    // 版本名「3月的狮子」与 name_cn 相同 → 被排除（别名与主标题相同不写入）
+    // 直接别名 1 条 + 嵌套去重后 1 条（三月的狮子）；
+    // 版本名「3月的狮子」与 name_cn 相同 → 被排除；「三月的獅子」繁体与已写入的
+    // 简体「三月的狮子」简繁相同 → t2s 判重命中 → 保留简体（先写入者），不重复写入
     assert_eq!(
         localized,
-        vec!["March comes in like a lion", "三月的狮子", "三月的獅子"]
+        vec!["March comes in like a lion", "三月的狮子"]
     );
 }
 
@@ -1421,13 +1363,28 @@ fn offline_person_authors_and_publishers() {
         aliases: Vec::new(),
     };
     assert_eq!(person_display_name(&p_no_cn), "週刊少年ジャンプ");
-    // 连载杂志（2005）不影响 authors；publisher 仍来自 infobox（Kotlin 语义）
+    // 连载杂志（2005）不产生 person 作者；persons 无作者类关联时回退 infobox「作者」解析
     let md2 = mapper.to_series_metadata_persons(&subject, &[], None, &[p_no_cn]);
-    assert!(md2.metadata.authors.is_empty());
+    assert_eq!(
+        md2.metadata.authors,
+        vec![
+            Author { name: "藤本タツキ".to_string(), role: AuthorRole::Writer },
+            Author { name: "藤本タツキ".to_string(), role: AuthorRole::Penciller },
+        ]
+    );
     assert_eq!(
         md2.metadata.publisher.as_ref().map(|p| p.name.as_str()),
         Some("集英社")
     );
+    // infobox 无「出版社」键 → 不做 persons 兜底：publisher / alternative_publishers 均为空
+    // （persons 2004 仅用于 name_cn 映射，不产生出版社实体）
+    let subject3: BangumiSubject = serde_json::from_str(
+        r#"{"id":2,"name":"Y","name_cn":null,"summary":null,"tags":[],"infobox":[]}"#,
+    )
+    .unwrap();
+    let md4 = mapper.to_series_metadata_persons(&subject3, &[], None, &persons);
+    assert!(md4.metadata.publisher.is_none());
+    assert!(md4.metadata.alternative_publishers.is_empty());
 }
 
 /// 评分标签：score 配置开启且评分>0 时追加 "score:N"（Math.round）
@@ -1559,6 +1516,72 @@ fn publisher_display_name(persons: &[PersonInfo], name: &str) -> String {
     name.to_string()
 }
 
+/// 出版社解析（series）：infobox「出版社/其他出版社」优先（Kotlin 语义）；
+/// persons position=2004 出版社实体仅做 name_cn 映射（publisher_display_name），
+/// 不做 persons 兜底——infobox 无「出版社」键时 publisher 为空。
+fn resolve_publishers(
+    subject: &BangumiSubject,
+    persons: &[PersonInfo],
+) -> (Option<Publisher>, Vec<Publisher>) {
+    // infobox 解析：「出版社」→ ORIGINAL +「其他出版社」→ LOCALIZED，
+    // 名称过 publisher_display_name（persons 匹配时 name_cn 优先，未匹配保持原文）
+    let mut publishers: Vec<Publisher> = Vec::new();
+    let mut other_publishers: Vec<Publisher> = Vec::new();
+    for (key, kind) in [
+        ("出版社", PublisherType::Original),
+        ("其他出版社", PublisherType::Localized),
+    ] {
+        let target = if kind == PublisherType::Original {
+            &mut publishers
+        } else {
+            &mut other_publishers
+        };
+        if let Some(value) = info_box_get(subject, key).and_then(|v| v.as_str()) {
+            for name in value.split(['，', '、', ',']) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    target.push(Publisher {
+                        name: publisher_display_name(persons, name),
+                        r#type: Some(kind),
+                        language_tag: None,
+                    });
+                }
+            }
+        }
+    }
+    let publisher = publishers.first().cloned();
+    // Kotlin: altPublishers = (publishers.drop(1) + otherPublishers).toSet() —— 保序去重
+    let mut alternative_publishers: Vec<Publisher> = publishers
+        .iter()
+        .skip(1)
+        .cloned()
+        .chain(other_publishers)
+        .collect();
+    let mut seen: Vec<(String, Option<PublisherType>)> = Vec::new();
+    alternative_publishers.retain(|p| {
+        let key = (p.name.clone(), p.r#type);
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.push(key);
+            true
+        }
+    });
+    (publisher, alternative_publishers)
+}
+
+/// infobox 数组取首个匹配键的值（HashMap 语义等价物，供独立函数使用）。
+fn info_box_get<'a>(
+    subject: &'a BangumiSubject,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    subject
+        .infobox
+        .iter()
+        .find(|i| i.key.as_deref() == Some(key))
+        .and_then(|i| i.value.as_ref())
+}
+
 /// 离线作者（persons 路径）：position 角色映射对齐 infobox 语义，
 /// 2001（作者）→ author_roles + artist_roles；2007（原作）→ author_roles；
 /// 2002（作画/人物原案/人物设定）→ artist_roles；name 用 name_cn 优先。
@@ -1593,6 +1616,26 @@ fn offline_person_authors(
         }
     }
     out
+}
+
+/// 作者解析：persons 为空 → infobox 解析；persons 非空但无作者类关联
+/// （仅出版社/杂志等 producer，position 2001/2002/2003/2007/2009/2010 全缺）→
+/// 回退 infobox「原作/作画/作者/脚本」解析，避免 Archive 数据缺作者关联时 authors 为空。
+fn resolve_authors(
+    subject: &BangumiSubject,
+    persons: &[PersonInfo],
+    author_roles: &[AuthorRole],
+    artist_roles: &[AuthorRole],
+) -> Vec<Author> {
+    if persons.is_empty() {
+        return extract_authors(subject, author_roles, artist_roles);
+    }
+    let out = offline_person_authors(persons, author_roles, artist_roles);
+    if out.is_empty() {
+        extract_authors(subject, author_roles, artist_roles)
+    } else {
+        out
+    }
 }
 
 fn extract_authors(
@@ -2153,21 +2196,35 @@ impl MetadataProvider for BangumiMetadataProvider {
                     if let Some(name_cn) = &subject.name_cn {
                         titles.push(name_cn.clone());
                     }
-                    if let Some(alias) = subject
-                        .infobox
-                        .iter()
-                        .find(|i| i.key.as_deref() == Some("别名"))
-                    {
-                        match &alias.value {
-                            Some(serde_json::Value::String(v)) => titles.push(v.clone()),
-                            Some(serde_json::Value::Array(items)) => {
-                                for item in items {
-                                    if let Some(v) = item.get("v").and_then(|v| v.as_str()) {
-                                        titles.push(v.to_string());
+                    // 别名/版本名参与相似度（顶层别名/別名 + 嵌套别名/別名/版本名，对齐 match_from_archive）
+                    for item in &subject.infobox {
+                        let is_alias_key = item.key.as_deref() == Some("别名")
+                            || item.key.as_deref() == Some("別名");
+                        if let Some(value) = item.value.as_ref() {
+                            if is_alias_key {
+                                match value {
+                                    serde_json::Value::String(v) => titles.push(v.clone()),
+                                    serde_json::Value::Array(items) => {
+                                        for it in items {
+                                            if let Some(v) = it.get("v").and_then(|v| v.as_str()) {
+                                                titles.push(v.to_string());
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let serde_json::Value::Array(items) = value {
+                                for sub in items {
+                                    let k = sub.get("k").and_then(|k| k.as_str());
+                                    if k == Some("别名") || k == Some("別名") || k == Some("版本名")
+                                    {
+                                        if let Some(v) = sub.get("v").and_then(|v| v.as_str()) {
+                                            titles.push(v.to_string());
+                                        }
                                     }
                                 }
                             }
-                            _ => {}
                         }
                     }
                     let titles = self.variant_titles(titles);
