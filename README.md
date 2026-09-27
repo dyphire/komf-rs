@@ -14,6 +14,7 @@ This is the **Rust implementation** of [komf](https://github.com/Snd-R/komf), a 
 - ComicInfo reading/writing, book ordering, score tags, reading direction override
 - Config hot-reload (`PATCH /api/config`), job tracking, metadata search/identify/match/reset endpoints
 - userscript compatible configuration UI
+- Built-in WebUI workbench: 12-provider matrix, per-library overrides, notification template editor, jobs with live SSE progress, search trial with one-click identify, offline DB download, light/dark theme
 
 ## Metadata providers
 
@@ -71,18 +72,22 @@ Environment variables (same as the Kotlin version):
 | `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita base URL + API key                                   |
 | `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump base URL + API key (`stump_` prefix, takes precedence when set) |
 | `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump account password (only used to exchange a JWT when no API key is set) |
-| `KOMF_SERVER_PORT`                             | HTTP port (default 8085)                                    |
+| `KOMF_SERVER_PORT`                             | HTTP port (default 8085, restart required)                  |
+| `KOMF_SERVER_BIND`                             | HTTP bind address (default `0.0.0.0`; use `127.0.0.1` for local-only, restart required) |
 | `KOMF_LOG_LEVEL`                               | Log level (default INFO)                                    |
 | `KOMF_DISCORD_WEBHOOKS`                        | Comma-separated Discord webhook URLs                        |
 | `KOMF_APPRISE_URLS`                            | Comma-separated Apprise URLs                                |
 | `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | Required for MAL provider                                   |
 | `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | Required for ComicVine provider                             |
 | `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token (shows NSFW items)                            |
+| `KOMF_WEBUI_KEY`                               | WebUI access key (optional): when set, requests from outside the local network must present it (local/LAN bypass) |
+| `KOMF_WEB_DIR`                                 | WebUI static directory override (`web/dist` -> `ui` lookup order) |
+| `KOMF_AUTH_FORCE_REMOTE`                       | Debug only: `1` treats every client as remote to force the key path |
 
 ### Docker
 
 ```sh
-vdocker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
+docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
  -p 8085:8085 \
  -v /path/to/config:/config \ # 存放 application.yml 的目录
 ```
@@ -98,6 +103,38 @@ To use it:
 1. Copy the template to `application.yml` (see [Running](#running) for the exact command).
 2. Edit `application.yml`: fill in your Komga/Kavita/Stump credentials and enable the providers you want; each option is explained inline.
 3. Start the service with the config file (path argument or `KOMF_CONFIG_DIR`); without a config file it runs on built-in defaults.
+
+## Security
+
+The service ships with an **optional key-based access gate**: set `KOMF_WEBUI_KEY` and requests from **outside the local network** must present the key — local/loopback and LAN (RFC1918 / link-local / IPv6 ULA) clients are always allowed through without one. Unauthorized `/api/*` requests get `401`; page/asset requests get an inline login page (key input, styled to match the WebUI). A successful `POST /api/auth/login` sets an HttpOnly session cookie (`komf_auth`); `POST /api/auth/logout` clears it. Cookie derivation uses SHA-1 over the key with a fixed salt, compared in constant time. `KOMF_AUTH_FORCE_REMOTE=1` (debug only) forces the key path for every client.
+
+Without the key gate the service has **no built-in authentication**: anyone who can reach the HTTP port can read the (credential-masked) configuration and change it via `PATCH /api/config`, and use the metadata endpoints. Treat it like a database admin panel:
+
+- **Local-only (recommended for home servers):** bind to loopback so only the machine itself can connect:
+  ```yaml
+  server:
+    bind: 127.0.0.1
+    port: 8085
+  ```
+  or `KOMF_SERVER_BIND=127.0.0.1` (restart required). Access the WebUI via SSH tunnel if needed.
+- **LAN/VPS exposure:** put a reverse proxy with authentication in front and firewall the raw port. Examples:
+  ```nginx
+  # nginx: basic auth
+  server {
+    listen 80; server_name komf.example.com;
+    location / {
+      auth_basic "komf"; auth_basic_user_file /etc/nginx/.htpasswd;
+      proxy_pass http://127.0.0.1:8085;
+    }
+  }
+  ```
+  ```caddy
+  # Caddy: basic auth (one line)
+  komf.example.com {
+    basicauth { admin $2a$14$... }
+    reverse_proxy 127.0.0.1:8085
+  }
+  ```
 
 ## Per-library configuration
 
@@ -121,6 +158,16 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 ### Configuration
 
 - `GET /api/config`, `PATCH /api/config` — read / update configuration (hot-reload)
+
+### Authentication (active when `KOMF_WEBUI_KEY` is set)
+
+- `POST /api/auth/login` — `{"key":"..."}`: `204` + `komf_auth` cookie on success, `401` on failure
+- `POST /api/auth/logout` — clears the auth cookie
+- Unauthorized `/api/*` requests return `401`; other paths return the built-in login page; local/LAN clients bypass the gate
+
+### Offline database download
+
+- `POST /api/update-manga-baka-db`, `POST /api/update-book-walker-db` — trigger an offline DB download; streams NDJSON progress events (`ProgressEvent` / `FinishedEvent` / `ErrorEvent`) until the stream closes. Manual trigger only: these DBs have no periodic auto-update (a checksum-identical local DB is skipped)
 
 ### Jobs
 
@@ -161,17 +208,29 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 ### Health check
 
-- `GET /` — returns `200` with body `komf-rs {version}` (e.g. `komf-rs 0.1.0`) when the service is up. Checks matching the exact body `komf-rs` should switch to a prefix match.
+- `GET /` — serves the built-in WebUI (`web/dist`); without a build it returns `404`.
 - `GET /version` — returns `200` JSON `{"name":"komf-rs","version":"..."}` for structured checks.
 - `GET /api/health` — returns `200` JSON `{"status":"ok","name":"komf-rs","version":"..."}` for structured health checks under the API prefix.
 - All responses carry the `X-Komf-Version` header.
-- Docker image `HEALTHCHECK` probes it via `wget -qO- http://127.0.0.1:8085/` (`--interval=30s --timeout=5s --start-period=15s --retries=3`), matching the Dockerfile.
+- Docker image `HEALTHCHECK` probes it via `wget -qO- http://127.0.0.1:8085/api/health` (`--interval=30s --timeout=5s --start-period=15s --retries=3`), matching the Dockerfile.
 
 ## Web UI integration
 
 The userscript let you configure komf and identify series directly from the Komga / Kavita web UI. They talk to the same configuration endpoints exposed by this Rust implementation.
 
 - [Komf userscript](https://github.com/dyphire/komf-userscript)
+
+### Built-in config WebUI (`/`)
+
+This repo also ships a built-in configuration UI (`web/`, Vite + React + TS):
+
+```sh
+cd web && npm install && npm run build # outputs web/dist
+./komf-app                             # serves it at http://localhost:8085/
+npm run dev                            # dev mode (proxies /api to 127.0.0.1:8085)
+```
+
+It is a full workbench: media-server connections and libraries, the 12-provider matrix (enable/priority/per-field toggles, provider-specific options), metadata-update defaults, per-library overrides (library selector with provider gates, long-tail fields such as `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`), notification template editor (edit/render/send), jobs with match/reset triggers and a live SSE event stream, a search trial with one-click identify, offline DB download with progress, and a PATCH preview (incremental semantics: omitted = keep, `null` = clear; empty passwords are not sent). The UI follows the system light/dark theme with a manual override (topbar toggle, persisted in `localStorage`). The backend serves `web/dist` (or `./ui` in Docker, overridable via `KOMF_WEB_DIR`) as the default route with SPA fallback; without a build the service runs API-only. Release Docker images build `web/dist` into `/app/ui` automatically.
 
 ## Differences from the Kotlin version
 

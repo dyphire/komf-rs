@@ -5,6 +5,7 @@ pub mod job_routes;
 pub mod media_server_routes;
 pub mod metadata_routes;
 pub mod notification_routes;
+pub mod web_auth;
 
 use komf_mediaserver::jobs::{KomfJobTracker, KomfJobsRepository};
 use komf_mediaserver::media_server_module::MediaServerModule;

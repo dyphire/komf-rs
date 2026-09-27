@@ -9,6 +9,10 @@ application.yml
 ehentai/
 bangumi-archive/
 
+### webui ###
+web/dist/
+web/node_modules/
+
 ### vs code ###
 .vscode/
 

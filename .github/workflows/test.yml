@@ -7,6 +7,7 @@ on:
       - 'master'
     paths:
       - 'crates/**'
+      - 'web/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Cross.toml'
@@ -17,6 +18,7 @@ on:
       - 'master'
     paths:
       - 'crates/**'
+      - 'web/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Cross.toml'
@@ -24,6 +26,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  webui:
+    runs-on: ubuntu-latest
+    name: WebUI build
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package.json
+      - name: Install dependencies
+        run: npm --prefix web ci
+      - name: Typecheck and build
+        run: npm --prefix web run build
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

@@ -38,11 +38,22 @@ impl Default for AppConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct ServerConfig {
     pub port: u16,
+    /// 监听地址：默认 `0.0.0.0`（所有网卡）。仅本机访问填 `127.0.0.1`；
+    /// 需要公网/局域网暴露时务必配合反向代理鉴权（见 README 安全小节）。
+    #[serde(default = "default_bind")]
+    pub bind: String,
+}
+
+fn default_bind() -> String {
+    "0.0.0.0".to_string()
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { port: 8085 }
+        Self {
+            port: 8085,
+            bind: default_bind(),
+        }
     }
 }
 
@@ -143,6 +154,9 @@ fn override_with_env(mut config: AppConfig, config_dir: Option<&std::path::Path>
     }
     if let Some(port) = env("KOMF_SERVER_PORT").and_then(|p| p.parse::<u16>().ok()) {
         config.server.port = port;
+    }
+    if let Some(bind) = env("KOMF_SERVER_BIND") {
+        config.server.bind = bind;
     }
     if let Some(level) = env("KOMF_LOG_LEVEL") {
         config.log_level = level;
@@ -298,5 +312,18 @@ metadataProviders:
         let config: AppConfig = serde_yaml::from_str(yml).unwrap();
         let bangumi = &config.metadata_providers.default_providers.bangumi.provider;
         assert_eq!(bangumi.tag_whitelist, vec!["热血", "搞笑"]);
+    }
+
+    /// server.bind 缺省 0.0.0.0；显式值正常解析（camelCase 无需处理，单字字段）。
+    #[test]
+    fn server_bind_defaults_and_parses() {
+        let config: AppConfig = serde_yaml::from_str("server:\n  port: 8085\n").unwrap();
+        assert_eq!(config.server.bind, "0.0.0.0");
+        let config: AppConfig =
+            serde_yaml::from_str("server:\n  port: 8085\n  bind: 127.0.0.1\n").unwrap();
+        assert_eq!(config.server.bind, "127.0.0.1");
+        // 旧配置无 bind 字段仍可解析（serde 缺省）
+        let config: AppConfig = serde_yaml::from_str("{}\n").unwrap();
+        assert_eq!(config.server.bind, "0.0.0.0");
     }
 }

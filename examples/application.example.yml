@@ -385,7 +385,9 @@ notifications:
     seriesCover: false              # 通知附带系列封面
 
 server:
-  port: 8085                        # HTTP 监听端口
+  port: 8085                        # HTTP 监听端口（修改需重启）
+  bind: 0.0.0.0                     # HTTP 监听地址：0.0.0.0=所有网卡；仅本机访问填 127.0.0.1（修改需重启）。
+                                    # 服务本身无鉴权，对外暴露时务必用反向代理加鉴权（见 README 安全小节）
 
 logLevel: INFO                      # 日志级别：TRACE / DEBUG / INFO / WARN / ERROR
 httpLogLevel: BASIC                 # HTTP 请求日志级别：NONE / BASIC / HEADERS / BODY

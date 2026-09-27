@@ -32,14 +32,17 @@ fn main() -> anyhow::Result<()> {
         let context = Arc::new(AppContext::new(config_path));
         let _ = APP_CONTEXT.set(context.clone());
 
-        let port = context.state.read().unwrap().config.server.port;
+        let (bind, port) = {
+            let state = context.state.read().unwrap();
+            (state.config.server.bind.clone(), state.config.server.port)
+        };
         let router = server::build_router(context.state.clone());
 
-        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        let listener = tokio::net::TcpListener::bind((bind.as_str(), port))
             .await
             .expect("failed to bind port");
-        tracing::info!("komf-rs listening on http://0.0.0.0:{port}");
-        axum::serve(listener, router).await.expect("server error");
+        tracing::info!("komf-rs listening on http://{bind}:{port}");
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("server error");
     });
     Ok(())
 }

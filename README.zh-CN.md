@@ -14,6 +14,7 @@
 - ComicInfo 读写、书籍排序、评分标签、阅读方向覆盖
 - 配置热更新（`PATCH /api/config`）、任务跟踪、元数据搜索/识别/匹配/重置端点
 - 用户脚本兼容的配置界面
+- 内置 WebUI 工作台：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、离线 DB 下载、明暗主题
 
 ## 元数据 provider
 
@@ -71,13 +72,17 @@ copy examples/application.example.yml application.yml # Windows
 | `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita 地址 + API key                        |
 | `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump 地址 + API key（`stump_` 前缀，设置后优先于账号密码） |
 | `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump 账号密码（仅当未配置 API key 时用于换取 JWT）        |
-| `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085）                           |
+| `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085，需重启）                     |
+| `KOMF_SERVER_BIND`                             | HTTP 监听地址（默认 `0.0.0.0`；仅本机用 `127.0.0.1`，需重启） |
 | `KOMF_LOG_LEVEL`                               | 日志级别（默认 INFO）                              |
 | `KOMF_DISCORD_WEBHOOKS`                        | 逗号分隔的 Discord webhook URL                  |
 | `KOMF_APPRISE_URLS`                            | 逗号分隔的 Apprise URL                          |
 | `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | MAL provider 必需                            |
 | `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | ComicVine provider 必需                      |
 | `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token（显示 NSFW 条目）                  |
+| `KOMF_WEBUI_KEY`                               | WebUI 访问密钥（可选）：设置后，非本地/局域网访问必须输入（本地/局域网免密钥） |
+| `KOMF_WEB_DIR`                                 | WebUI 静态目录覆盖（查找顺序 `web/dist` -> `ui`） |
+| `KOMF_AUTH_FORCE_REMOTE`                       | 仅调试：`1` 时把所有来源按远程处理，强制走密钥校验 |
 
 ### Docker
 
@@ -98,6 +103,38 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
 1. 将模板复制为 `application.yml`（具体命令见 [运行](#运行)）。
 2. 编辑 `application.yml`：填写 Komga/Kavita/Stump 凭据并启用需要的 provider；每个选项都有行内说明。
 3. 用配置文件启动服务（路径参数或 `KOMF_CONFIG_DIR`）；无配置文件时以内置默认运行。
+
+## 安全
+
+服务内置**可选密钥认证门**：设置 `KOMF_WEBUI_KEY` 后，**非本地/局域网**来源的请求必须输入密钥——本地/回环与局域网（RFC1918 / link-local / IPv6 ULA）来源始终免密钥放行。未授权的 `/api/*` 请求返回 `401`；页面/静态资源请求返回内置登录页（输入框样式与 WebUI 一致）。登录成功 `POST /api/auth/login` 会种下 HttpOnly 会话 cookie（`komf_auth`）；`POST /api/auth/logout` 清除之。cookie 由 SHA-1（密钥 + 固定盐）派生并以恒定时间比较。`KOMF_AUTH_FORCE_REMOTE=1`（仅调试）把所有来源强制按远程处理以走密钥分支。
+
+未启用密钥门时服务**没有内置鉴权**：任何能连上 HTTP 端口的人都可以读取（脱敏后的）配置、通过 `PATCH /api/config` 修改配置并调用元数据接口。请把它当数据库管理后台对待：
+
+- **仅本机（家用推荐）：** 绑定回环地址，只有本机能连：
+  ```yaml
+  server:
+    bind: 127.0.0.1
+    port: 8085
+  ```
+  或 `KOMF_SERVER_BIND=127.0.0.1`（需重启）。需要远程访问时走 SSH 隧道。
+- **局域网/VPS 暴露：** 在前面架带鉴权的反向代理，并用防火墙封掉原始端口。示例：
+  ```nginx
+  # nginx：basic auth
+  server {
+    listen 80; server_name komf.example.com;
+    location / {
+      auth_basic "komf"; auth_basic_user_file /etc/nginx/.htpasswd;
+      proxy_pass http://127.0.0.1:8085;
+    }
+  }
+  ```
+  ```caddy
+  # Caddy：basic auth（一行）
+  komf.example.com {
+    basicauth { admin $2a$14$... }
+    reverse_proxy 127.0.0.1:8085
+  }
+  ```
 
 ## 按库配置
 
@@ -121,6 +158,16 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 ### 配置
 
 - `GET /api/config`、`PATCH /api/config` —— 读取 / 更新配置（热更新）
+
+### 认证（设置 `KOMF_WEBUI_KEY` 后启用）
+
+- `POST /api/auth/login` —— `{"key":"..."}`：成功返回 `204` + `komf_auth` cookie，失败 `401`
+- `POST /api/auth/logout` —— 清除认证 cookie
+- 未授权 `/api/*` 请求返回 `401`；其他路径返回内置登录页；本地/局域网来源绕过认证门
+
+### 离线数据库下载
+
+- `POST /api/update-manga-baka-db`、`POST /api/update-book-walker-db` —— 触发离线 DB 下载；以 NDJSON 流输出进度事件（`ProgressEvent` / `FinishedEvent` / `ErrorEvent`）直到断流。仅手动触发：这两个 DB 没有周期自动更新（本地库 checksum 一致时跳过）
 
 ### 任务
 
@@ -161,17 +208,29 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ### 健康检查
 
-- `GET /` —— 服务正常时返回 `200`，响应体为 `komf-rs {版本号}`（如 `komf-rs 0.1.0`）。原来精确匹配 `komf-rs` 的检查请改为前缀匹配。
+- `GET /` —— 内置 WebUI（`web/dist`）；未构建时返回 `404`。
 - `GET /version` —— 返回 `200` JSON `{"name":"komf-rs","version":"..."}`，供结构化检查。
 - `GET /api/health` —— 返回 `200` JSON `{"status":"ok","name":"komf-rs","version":"..."}`，`/api` 前缀下的结构化健康检查。
 - 所有响应均携带 `X-Komf-Version` 响应头。
-- Docker 镜像 `HEALTHCHECK` 通过 `wget -qO- http://127.0.0.1:8085/` 探测（`--interval=30s --timeout=5s --start-period=15s --retries=3`），与 Dockerfile 一致。
+- Docker 镜像 `HEALTHCHECK` 通过 `wget -qO- http://127.0.0.1:8085/api/health` 探测（`--interval=30s --timeout=5s --start-period=15s --retries=3`），与 Dockerfile 一致。
 
 ## Web UI 集成
 
 用户脚本可直接在 Komga / Kavita Web UI 中配置 komf 并识别系列。它们与本 Rust 实现暴露的配置端点通信。
 
 - [Komf 用户脚本](https://github.com/dyphire/komf-userscript)
+
+### 内置配置 WebUI（`/`）
+
+本仓库自带配置前端（`web/`，Vite + React + TS）：
+
+```sh
+cd web && npm install && npm run build # 生成 web/dist
+./komf-app                             # 浏览器打开 http://localhost:8085/
+npm run dev                            # 开发模式（/api 代理到 127.0.0.1:8085）
+```
+
+它是完整工作台：媒体服务器连接与库列表、12 个 Provider 矩阵（启用/优先级/字段开关、Provider 专属选项）、元数据更新默认策略、按库覆盖（库选择 + Provider 门控、长尾字段如 `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`）、通知模板编辑器（编辑/渲染/发送）、任务（match/reset 触发 + 实时 SSE 事件流）、搜索试跑一键设元数据、离线 DB 下载进度，以及 PATCH 预览（增量语义：缺省=保持、`null`=清空；密码留空=不发送）。UI 跟随系统明暗主题，并支持顶栏手动切换（持久化在 `localStorage`）。后端把 `web/dist`（Docker 内为 `./ui`，可用 `KOMF_WEB_DIR` 覆盖）作为默认路由并 SPA fallback；未构建时纯 API 模式。Release 镜像会自动把 `web/dist` 打进 `/app/ui`。
 
 ## 与 Kotlin 版的差异
 

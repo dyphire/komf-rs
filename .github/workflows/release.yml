@@ -151,6 +151,20 @@ jobs:
         run: |
           cargo build --manifest-path Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
 
+      - name: Setup Node for WebUI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package.json
+
+      - name: Build WebUI
+        run: |
+          set -euo pipefail
+          npm --prefix web ci
+          npm --prefix web run build
+          test -f web/dist/index.html
+
       - name: Package release artifacts
         run: |
           set -euo pipefail
@@ -165,6 +179,9 @@ jobs:
           if [[ "${{ matrix.platform }}" != 'windows' ]]; then
             chmod +x "$release_dir/${{ matrix.binary_name }}"
           fi
+          # 内置 WebUI：后端按 KOMF_WEB_DIR > web/dist > ui 解析，
+          # tarball 内放 ui/，解压后进目录直接运行即默认路由可用。
+          cp -r web/dist "$release_dir/ui"
           tar -czf "$release_artifact" -C dist "$(basename "$release_dir")"
           if [[ "${{ matrix.docker_runtime }}" == 'true' ]]; then
             docker_artifact_dir="docker-artifacts/linux-musl/${{ matrix.arch }}"
@@ -178,6 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f "dist/komf-${VERSION}-${{ matrix.artifact_suffix }}.tar.gz"
+          tar -tzf "dist/komf-${VERSION}-${{ matrix.artifact_suffix }}.tar.gz" | grep -q '/ui/index.html'
           if [[ "${{ matrix.docker_runtime }}" == 'true' ]]; then
             test -f "docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app"
           fi
@@ -314,6 +332,20 @@ jobs:
           set -euo pipefail
           test -f docker-artifacts/linux-musl/amd64/komf-app
           test -f docker-artifacts/linux-musl/arm64/komf-app
+
+      - name: Setup Node for WebUI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package.json
+
+      - name: Build WebUI (web/dist -> docker ui)
+        run: |
+          set -euo pipefail
+          npm --prefix web ci
+          npm --prefix web run build
+          test -f web/dist/index.html
 
       - name: Strip Docker runtime artifacts
         run: |
