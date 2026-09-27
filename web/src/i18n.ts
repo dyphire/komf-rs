@@ -115,8 +115,8 @@ const dict: Record<string, { zh: string; en: string }> = {
   'f.apiKey': { zh: 'apiKey(留空=保持)', en: 'apiKey (blank = keep)' },
   'f.password': { zh: 'password(留空=保持)', en: 'password (blank = keep)' },
   'notConfigured': { zh: '未配置', en: 'not set' },
-  'f.metadataLibraryFilter': { zh: 'metadataLibraryFilter(逗号分隔)', en: 'metadataLibraryFilter (comma-separated)' },
-  'f.metadataSeriesExcludeFilter': { zh: 'metadataSeriesExcludeFilter(逗号分隔)', en: 'metadataSeriesExcludeFilter (comma-separated)' },
+  'f.metadataLibraryFilter': { zh: 'metadataLibraryFilter', en: 'metadataLibraryFilter' },
+  'f.metadataSeriesExcludeFilter': { zh: 'metadataSeriesExcludeFilter', en: 'metadataSeriesExcludeFilter' },
   'ph.emptyAll': { zh: '空=全部', en: 'empty = all' },
 
   // ---- Providers ----
@@ -137,7 +137,7 @@ const dict: Record<string, { zh: string; en: string }> = {
   // ---- 元数据 ----
   'md.defaultTitle': { zh: '{s} · 默认更新策略', en: '{s} · Default update strategy' },
   'md.desc': { zh: '对应 {s}.metadataUpdate.default。', en: 'Maps to {s}.metadataUpdate.default.' },
-  'f.updateModes': { zh: 'updateModes(逗号:API,COMIC_INFO,MYLAR_SERIES_JSON)', en: 'updateModes (comma: API,COMIC_INFO,MYLAR_SERIES_JSON)' },
+  'f.updateModes': { zh: 'updateModes', en: 'updateModes' },
   'md.advanced': { zh: '高级字段（Rust 扩展 & 长尾）', en: 'Advanced fields (Rust extensions & long tail)' },
   'f.mylarOutputDir': { zh: 'mylarOutputDir(留空=清空)', en: 'mylarOutputDir (blank = clear)' },
   'ph.mylarOutputDir': { zh: 'mylar series.json 导出目录', en: 'mylar series.json export dir' },

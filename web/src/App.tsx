@@ -274,13 +274,17 @@ function CommaField(props: { value: any; onChange: (v: string[]) => void; placeh
 
 /** 后端枚举的固定取值（SCREAMING_SNAKE_CASE，见 komf-api-models common.rs） */
 const MANGA_DEX_LINKS = ['MANGADEX', 'ANILIST', 'ANIME_PLANET', 'BOOKWALKER_JP', 'MANGA_UPDATES', 'NOVEL_UPDATES', 'KITSU', 'AMAZON', 'EBOOK_JAPAN', 'MY_ANIME_LIST', 'CD_JAPAN', 'RAW', 'ENGLISH_TL'];
+const UPDATE_MODES = ['API', 'COMIC_INFO', 'MYLAR_SERIES_JSON'];
 
 /** 下拉多选：固定取值集合（后端枚举），替代逗号输入框。已选项显示 chips，点开勾选。 */
-function MultiSelect(props: { value: any; options: string[]; onChange: (v: string[]) => void }) {
+type MultiOption = string | { label: string; value: string };
+function MultiSelect(props: { value: any; options: MultiOption[]; onChange: (v: string[]) => void }) {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
   const vals: string[] = props.value ?? [];
+  const labelOf = (o: MultiOption) => (typeof o === 'string' ? o : o.label);
+  const valOf = (o: MultiOption) => (typeof o === 'string' ? o : o.value);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
@@ -293,20 +297,24 @@ function MultiSelect(props: { value: any; options: string[]; onChange: (v: strin
     const next = vals.includes(v) ? vals.filter((x: string) => x !== v) : [...vals, v];
     props.onChange(next);
   };
+  const chipLabel = (v: string) => {
+    const o = props.options.find((x) => valOf(x) === v);
+    return o ? labelOf(o) : v;
+  };
   return (
     <div className="multi" ref={boxRef}>
       <button type="button" className={`multi-btn${open ? ' open' : ''}`} onClick={() => setOpen(!open)}>
         {vals.length === 0 ? <span className="muted">{t('none')}</span> : (
-          <span className="chips">{vals.map((v) => <span key={v} className="chip">{v}</span>)}</span>
+          <span className="chips">{vals.map((v) => <span key={v} className="chip">{chipLabel(v)}</span>)}</span>
         )}
         <span className="caret">▾</span>
       </button>
       {open && (
         <div className="multi-menu">
           {props.options.map((o) => (
-            <label key={o} className={vals.includes(o) ? 'sel' : ''}>
-              <input type="checkbox" checked={vals.includes(o)} onChange={() => toggle(o)} />
-              {o}
+            <label key={valOf(o)} className={vals.includes(valOf(o)) ? 'sel' : ''}>
+              <input type="checkbox" checked={vals.includes(valOf(o))} onChange={() => toggle(valOf(o))} />
+              {labelOf(o)}
             </label>
           ))}
         </div>
@@ -947,8 +955,8 @@ export default function App() {
             </div>
             <div className="grid">
               <SwitchField label="eventListener.enabled" value={getPath(draft, [s, 'eventListener', 'enabled'])} onChange={(v) => upd([s, 'eventListener', 'enabled'], v)} />
-              <Field label={t('f.metadataLibraryFilter')}><Text value={(getPath(draft, [s, 'eventListener', 'metadataLibraryFilter']) ?? []).join(',')} onChange={(v) => upd([s, 'eventListener', 'metadataLibraryFilter'], v.split(',').map((x) => x.trim()).filter(Boolean))} placeholder={t('ph.emptyAll')} /></Field>
-              <Field label={t('f.metadataSeriesExcludeFilter')}><Text value={(getPath(draft, [s, 'eventListener', 'metadataSeriesExcludeFilter']) ?? []).join(',')} onChange={(v) => upd([s, 'eventListener', 'metadataSeriesExcludeFilter'], v.split(',').map((x) => x.trim()).filter(Boolean))} /></Field>
+              <Field label={t('f.metadataLibraryFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataLibraryFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name} (${l.id})`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataLibraryFilter'], v)} /></Field>
+              <Field label={t('f.metadataSeriesExcludeFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataSeriesExcludeFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name} (${l.id})`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataSeriesExcludeFilter'], v)} /></Field>
             </div>
           </div>
         ))}
@@ -1006,7 +1014,7 @@ export default function App() {
                 <SwitchField label="bookCovers" value={mu.bookCovers} onChange={(v) => upd([s, ...b, 'bookCovers'], v)} />
                 <SwitchField label="overrideExistingCovers" value={mu.overrideExistingCovers ?? true} onChange={(v) => upd([s, ...b, 'overrideExistingCovers'], v)} />
                 <SwitchField label="lockCovers" value={mu.lockCovers ?? true} onChange={(v) => upd([s, ...b, 'lockCovers'], v)} />
-                <Field label={t('f.updateModes')}><CommaField value={mu.updateModes} onChange={(v) => upd([s, ...b, 'updateModes'], v)} /></Field>
+                <Field label={t('f.updateModes')}><MultiSelect value={mu.updateModes} options={UPDATE_MODES} onChange={(v) => upd([s, ...b, 'updateModes'], v)} /></Field>
                 <SwitchField label="postProcessing.seriesTitle" value={mu.postProcessing?.seriesTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitle'], v)} />
                 <Field label="seriesTitleLanguage"><Text value={mu.postProcessing?.seriesTitleLanguage ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitleLanguage'], v || null)} placeholder="en/zh/null" /></Field>
                 <SwitchField label="orderBooks" value={mu.postProcessing?.orderBooks} onChange={(v) => upd([s, ...b, 'postProcessing', 'orderBooks'], v)} />
