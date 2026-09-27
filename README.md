@@ -167,7 +167,10 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 ### Health check
 
-- `GET /` — returns `200` with body `komf-rs` when the service is up.
+- `GET /` — returns `200` with body `komf-rs {version}` (e.g. `komf-rs 0.1.0`) when the service is up. Checks matching the exact body `komf-rs` should switch to a prefix match.
+- `GET /version` — returns `200` JSON `{"name":"komf-rs","version":"..."}` for structured checks.
+- `GET /api/health` — returns `200` JSON `{"status":"ok","name":"komf-rs","version":"..."}` for structured health checks under the API prefix.
+- All responses carry the `X-Komf-Version` header.
 - Docker image `HEALTHCHECK` probes it via `wget -qO- http://127.0.0.1:8085/` (`--interval=30s --timeout=5s --start-period=15s --retries=3`), matching the Dockerfile.
 
 ## Web UI integration

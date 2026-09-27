@@ -113,6 +113,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version_next }}
       VERSION_NEXT: ${{ needs.version.outputs.version_next }}
+      KOMF_VERSION: ${{ needs.version.outputs.version_next }}
     defaults:
       run:
         shell: bash

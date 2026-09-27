@@ -167,7 +167,10 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ### 健康检查
 
-- `GET /` —— 服务正常时返回 `200`，响应体为 `komf-rs`。
+- `GET /` —— 服务正常时返回 `200`，响应体为 `komf-rs {版本号}`（如 `komf-rs 0.1.0`）。原来精确匹配 `komf-rs` 的检查请改为前缀匹配。
+- `GET /version` —— 返回 `200` JSON `{"name":"komf-rs","version":"..."}`，供结构化检查。
+- `GET /api/health` —— 返回 `200` JSON `{"status":"ok","name":"komf-rs","version":"..."}`，`/api` 前缀下的结构化健康检查。
+- 所有响应均携带 `X-Komf-Version` 响应头。
 - Docker 镜像 `HEALTHCHECK` 通过 `wget -qO- http://127.0.0.1:8085/` 探测（`--interval=30s --timeout=5s --start-period=15s --retries=3`），与 Dockerfile 一致。
 
 ## Web UI 集成
