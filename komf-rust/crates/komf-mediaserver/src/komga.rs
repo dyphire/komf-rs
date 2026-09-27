@@ -1,14 +1,24 @@
 //! Komga REST 客户端 —— 对应 Kotlin 中由 `io.github.sndr:komga-client` 库提供、
 //! 经 `KomgaMediaServerClientAdapter` 适配的能力。
 //!
-//! 本移植直接基于 Komga REST API v1 实现，使用 Basic Auth。
+//! 本移植直接基于 Komga REST API v1 实现。认证只在建立会话时使用静态凭证
+//! （`X-API-Key` 优先，否则 Basic）；会话建立后复用服务端会话（`X-Auth-Token`
+//! 响应头优先，回退 `Set-Cookie`），不再每请求携带凭证——对应 Kotlin 的
+//! `AcceptAllCookiesStorage`，避免每个请求都在服务端记一条认证活动。
+//! 每次响应回来都会刷新存储的会话（服务端轮换即跟随），会话失效（401）则
+//! 清掉并用静态凭证重试一次。
 use crate::client::{MediaServerClient, MediaServerError};
 use crate::config::AlternateTitleLabelsConfig;
 use crate::model::*;
 use komf_core::model::{Image, ReadingDirection, SeriesStatus, TitleType, WebLink};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 const API_PREFIX: &str = "/api/v1";
+/// Komga 会话头（Spring Session header 策略）：请求带此头即按会话认证，
+/// 认证成功时服务端经同一响应头返回会话 ID。
+const X_AUTH_TOKEN: &str = "x-auth-token";
 
 // ---------------------------------------------------------------------------
 // Komga DTO（响应）
@@ -291,8 +301,70 @@ pub struct KomgaBookMetadataUpdateRequest {
 pub struct KomgaClient {
     http: reqwest::Client,
     base_uri: String,
+    username: String,
+    password: String,
+    api_key: Option<String>,
+    /// 已建立的服务端会话（`X-Auth-Token` 优先，回退 cookie）。
+    session: Arc<tokio::sync::Mutex<KomgaSession>>,
     thumbnail_size_limit: u64,
     alternate_title_labels: AlternateTitleLabelsConfig,
+}
+
+/// Komga 服务端会话：每次响应回来刷新（`store_from_headers`），后续请求复用。
+#[derive(Debug, Default)]
+struct KomgaSession {
+    /// 服务端经 `X-Auth-Token` 响应头下发的会话 ID。
+    auth_token: Option<String>,
+    /// `Set-Cookie` 回退：cookie 名 -> 值（如 `KOMGA-SESSION`）。
+    cookies: BTreeMap<String, String>,
+}
+
+impl KomgaSession {
+    fn is_empty(&self) -> bool {
+        self.auth_token.is_none() && self.cookies.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.auth_token = None;
+        self.cookies.clear();
+    }
+
+    /// 从响应头刷新会话：`X-Auth-Token`（空值表示服务端使会话失效，即清掉），
+    /// 以及 `Set-Cookie`（取值 `name=value`，删除语义即移除）。
+    fn store_from_headers(&mut self, headers: &reqwest::header::HeaderMap) {
+        if let Some(value) = headers.get(X_AUTH_TOKEN).and_then(|v| v.to_str().ok()) {
+            if value.is_empty() {
+                self.auth_token = None;
+            } else {
+                self.auth_token = Some(value.to_string());
+            }
+        }
+        for raw in headers
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+        {
+            let pair = raw.split(';').next().unwrap_or("").trim();
+            let mut kv = pair.splitn(2, '=');
+            match (kv.next(), kv.next()) {
+                (Some(name), Some(value)) => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let value = value.trim().trim_matches('"').to_string();
+                    let deleted =
+                        value.is_empty() || raw.to_ascii_lowercase().contains("max-age=0");
+                    if deleted {
+                        self.cookies.remove(name);
+                    } else {
+                        self.cookies.insert(name.to_string(), value);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl KomgaClient {
@@ -306,20 +378,6 @@ impl KomgaClient {
     ) -> Result<Self, MediaServerError> {
         let base_uri = base_uri.trim_end_matches('/').to_string();
         let mut headers = reqwest::header::HeaderMap::new();
-        if !api_key.is_empty() {
-            // Komga API key：`X-API-Key` 请求头，优先于 Basic Auth。
-            if let Ok(value) = reqwest::header::HeaderValue::from_str(api_key) {
-                headers.insert("X-API-Key", value);
-            }
-        } else {
-            let credentials = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                format!("{username}:{password}"),
-            );
-            if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Basic {credentials}")) {
-                headers.insert(reqwest::header::AUTHORIZATION, value);
-            }
-        }
         if let Ok(value) = reqwest::header::HeaderValue::from_str("dyphire/komf-rs") {
             headers.insert(reqwest::header::USER_AGENT, value);
         }
@@ -331,6 +389,10 @@ impl KomgaClient {
         Ok(Self {
             http,
             base_uri,
+            username: username.to_string(),
+            password: password.to_string(),
+            api_key: (!api_key.is_empty()).then(|| api_key.to_string()),
+            session: Arc::new(tokio::sync::Mutex::new(KomgaSession::default())),
             thumbnail_size_limit,
             alternate_title_labels,
         })
@@ -340,21 +402,102 @@ impl KomgaClient {
         format!("{}{}", self.base_uri, path)
     }
 
+    async fn has_session(&self) -> bool {
+        !self.session.lock().await.is_empty()
+    }
+
+    async fn clear_session(&self) {
+        self.session.lock().await.clear();
+    }
+
+    async fn store_session(&self, headers: &reqwest::header::HeaderMap) {
+        self.session.lock().await.store_from_headers(headers);
+    }
+
+    /// 静态凭证头（仅建立会话时用）：`X-API-Key` 优先，否则 Basic。
+    /// 同时带空 `X-Auth-Token` 请求头，请服务端经同一响应头返回会话 ID。
+    fn attach_credentials(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let builder = builder.header(X_AUTH_TOKEN, "");
+        if let Some(api_key) = &self.api_key {
+            builder.header("X-API-Key", api_key.clone())
+        } else {
+            let credentials = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                format!("{}:{}", self.username, self.password),
+            );
+            builder.header(
+                reqwest::header::AUTHORIZATION,
+                format!("Basic {credentials}"),
+            )
+        }
+    }
+
+    /// 按优先级附认证头：已存 `X-Auth-Token` 会话 > 已存 cookie > 静态凭证。
+    /// 有会话时不再携带静态凭证，避免服务端记新的认证活动。
+    async fn attach_auth(
+        &self,
+        builder: reqwest::RequestBuilder,
+        force_credentials: bool,
+    ) -> reqwest::RequestBuilder {
+        if !force_credentials {
+            let session = self.session.lock().await;
+            if let Some(token) = session.auth_token.clone() {
+                return builder.header(X_AUTH_TOKEN, token);
+            }
+            if !session.cookies.is_empty() {
+                let cookie = session
+                    .cookies
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return builder.header(reqwest::header::COOKIE, cookie);
+            }
+        }
+        self.attach_credentials(builder)
+    }
+
+    /// 会话感知的发送：附认证头 → 发送 → 存会话；用会话拿到 401 则清会话
+    /// 并用静态凭证重试一次（`try_clone` 不可用如 multipart 时返回 401 响应，
+    /// 由调用方按需重建 body 重试）。
+    async fn send(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, MediaServerError> {
+        let retry = builder.try_clone();
+        let used_session = self.has_session().await;
+        let response = self
+            .attach_auth(builder, !used_session)
+            .await
+            .send()
+            .await?;
+        self.store_session(response.headers()).await;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && used_session {
+            self.clear_session().await;
+            if let Some(retry) = retry {
+                let response = self.attach_auth(retry, true).await.send().await?;
+                self.store_session(response.headers()).await;
+                return Ok(response);
+            }
+        }
+        Ok(response)
+    }
+
     /// 打开 Komga 事件流（SSE，`/sse/v1/events`）。
     pub async fn events_stream(&self) -> Result<reqwest::Response, MediaServerError> {
-        self.http
-            .get(self.url("/sse/v1/events"))
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .send()
-            .await
-            .map_err(MediaServerError::Http)
+        self.send(
+            self.http
+                .get(self.url("/sse/v1/events"))
+                .header(reqwest::header::ACCEPT, "text/event-stream"),
+        )
+        .await
     }
 
     async fn send_json<T: for<'de> Deserialize<'de>>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, MediaServerError> {
-        let response = request.send().await?;
+        let response = self.send(request).await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -751,15 +894,16 @@ impl MediaServerClient for KomgaClient {
             }
         });
         let response = self
-            .http
-            .post(self.url(&format!("{API_PREFIX}/series/list")))
-            .query(&[
-                ("page", page_index_str.as_str()),
-                ("size", "500"),
-                ("sort", "lastModified,desc"),
-            ])
-            .json(&body)
-            .send()
+            .send(
+                self.http
+                    .post(self.url(&format!("{API_PREFIX}/series/list")))
+                    .query(&[
+                        ("page", page_index_str.as_str()),
+                        ("size", "500"),
+                        ("sort", "lastModified,desc"),
+                    ])
+                    .json(&body),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -778,9 +922,10 @@ impl MediaServerClient for KomgaClient {
     async fn get_series_thumbnail(&self, series_id: &MediaServerSeriesId) -> Result<Option<Image>, MediaServerError> {
         // Kotlin `runCatching { getDefaultThumbnail() }.getOrNull()`：任何失败都返回 null。
         match self
-            .http
-            .get(self.url(&format!("{API_PREFIX}/series/{}/thumbnail", series_id.0)))
-            .send()
+            .send(
+                self.http
+                    .get(self.url(&format!("{API_PREFIX}/series/{}/thumbnail", series_id.0))),
+            )
             .await
         {
             Ok(response) if response.status().is_success() => {
@@ -843,11 +988,12 @@ impl MediaServerClient for KomgaClient {
                 }
             });
             let response = self
-                .http
-                .post(self.url(&format!("{API_PREFIX}/books/list")))
-                .query(&[("page", page_index_str.as_str()), ("size", "500")])
-                .json(&body)
-                .send()
+                .send(
+                    self.http
+                        .post(self.url(&format!("{API_PREFIX}/books/list")))
+                        .query(&[("page", page_index_str.as_str()), ("size", "500")])
+                        .json(&body),
+                )
                 .await?;
             let status = response.status();
             if !status.is_success() {
@@ -889,9 +1035,10 @@ impl MediaServerClient for KomgaClient {
     async fn get_book_thumbnail(&self, book_id: &MediaServerBookId) -> Result<Option<Image>, MediaServerError> {
         // Kotlin `runCatching { getDefaultThumbnail() }.getOrNull()`：任何失败都返回 null。
         match self
-            .http
-            .get(self.url(&format!("{API_PREFIX}/books/{}/thumbnail", book_id.0)))
-            .send()
+            .send(
+                self.http
+                    .get(self.url(&format!("{API_PREFIX}/books/{}/thumbnail", book_id.0))),
+            )
             .await
         {
             Ok(response) if response.status().is_success() => {
@@ -973,10 +1120,11 @@ impl MediaServerClient for KomgaClient {
     ) -> Result<(), MediaServerError> {
         let body = serde_json::json!({ "seriesIds": series_ids });
         let response = self
-            .http
-            .patch(self.url(&format!("{API_PREFIX}/collections/{collection_id}")))
-            .json(&body)
-            .send()
+            .send(
+                self.http
+                    .patch(self.url(&format!("{API_PREFIX}/collections/{collection_id}")))
+                    .json(&body),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -993,10 +1141,11 @@ impl MediaServerClient for KomgaClient {
     ) -> Result<(), MediaServerError> {
         let request = to_series_update_request(metadata, &self.alternate_title_labels);
         let response = self
-            .http
-            .patch(self.url(&format!("{API_PREFIX}/series/{}/metadata", series_id.0)))
-            .json(&request)
-            .send()
+            .send(
+                self.http
+                    .patch(self.url(&format!("{API_PREFIX}/series/{}/metadata", series_id.0)))
+                    .json(&request),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1012,12 +1161,10 @@ impl MediaServerClient for KomgaClient {
         thumbnail_id: &MediaServerThumbnailId,
     ) -> Result<(), MediaServerError> {
         let response = self
-            .http
-            .delete(self.url(&format!(
+            .send(self.http.delete(self.url(&format!(
                 "{API_PREFIX}/series/{}/thumbnails/{}",
                 series_id.0, thumbnail_id.0
-            )))
-            .send()
+            ))))
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1034,10 +1181,11 @@ impl MediaServerClient for KomgaClient {
     ) -> Result<(), MediaServerError> {
         let request = to_book_update_request(metadata);
         let response = self
-            .http
-            .patch(self.url(&format!("{API_PREFIX}/books/{}/metadata", book_id.0)))
-            .json(&request)
-            .send()
+            .send(
+                self.http
+                    .patch(self.url(&format!("{API_PREFIX}/books/{}/metadata", book_id.0)))
+                    .json(&request),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1053,12 +1201,10 @@ impl MediaServerClient for KomgaClient {
         thumbnail_id: &MediaServerThumbnailId,
     ) -> Result<(), MediaServerError> {
         let response = self
-            .http
-            .delete(self.url(&format!(
+            .send(self.http.delete(self.url(&format!(
                 "{API_PREFIX}/books/{}/thumbnails/{}",
                 book_id.0, thumbnail_id.0
-            )))
-            .send()
+            ))))
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1075,10 +1221,11 @@ impl MediaServerClient for KomgaClient {
     ) -> Result<(), MediaServerError> {
         let request = book_metadata_reset_request(&book.name, book_number, &book.metadata);
         let response = self
-            .http
-            .patch(self.url(&format!("{API_PREFIX}/books/{}/metadata", book.id.0)))
-            .json(&request)
-            .send()
+            .send(
+                self.http
+                    .patch(self.url(&format!("{API_PREFIX}/books/{}/metadata", book.id.0)))
+                    .json(&request),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1094,10 +1241,11 @@ impl MediaServerClient for KomgaClient {
     ) -> Result<(), MediaServerError> {
         let request = series_metadata_reset_request(&series.name, &series.metadata);
         let response = self
-            .http
-            .patch(self.url(&format!("{API_PREFIX}/series/{}/metadata", series.id.0)))
-            .json(&request)
-            .send()
+            .send(
+                self.http
+                    .patch(self.url(&format!("{API_PREFIX}/series/{}/metadata", series.id.0)))
+                    .json(&request),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1123,24 +1271,35 @@ impl MediaServerClient for KomgaClient {
             return Ok(None);
         }
         let mime = thumbnail.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-        let part = reqwest::multipart::Part::bytes(thumbnail.bytes.clone())
-            .file_name("thumbnail")
-            .mime_str(&mime)
-            .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
-        let form = reqwest::multipart::Form::new().part("file", part);
-        let response = self
-            .http
-            .post(self.url(&format!("{API_PREFIX}/series/{}/thumbnails", series_id.0)))
-            .query(&[("selected", selected.to_string())])
-            .multipart(form)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
-        let dto: KomgaThumbnailDto = response.json().await?;
+        // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
+        let had_session = self.has_session().await;
+        let mut retried = false;
+        let dto: KomgaThumbnailDto = loop {
+            let part = reqwest::multipart::Part::bytes(thumbnail.bytes.clone())
+                .file_name("thumbnail")
+                .mime_str(&mime)
+                .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
+            let form = reqwest::multipart::Form::new().part("file", part);
+            let response = self
+                .send(
+                    self.http
+                        .post(self.url(&format!("{API_PREFIX}/series/{}/thumbnails", series_id.0)))
+                        .query(&[("selected", selected.to_string())])
+                        .multipart(form),
+                )
+                .await?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && had_session && !retried
+            {
+                retried = true;
+                continue;
+            }
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(MediaServerError::Status(status, body));
+            }
+            break response.json().await?;
+        };
         Ok(Some(MediaServerSeriesThumbnail {
             id: MediaServerThumbnailId(dto.id),
             series_id: MediaServerSeriesId(dto.series_id.unwrap_or_else(|| series_id.0.clone())),
@@ -1165,24 +1324,35 @@ impl MediaServerClient for KomgaClient {
             return Ok(None);
         }
         let mime = thumbnail.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-        let part = reqwest::multipart::Part::bytes(thumbnail.bytes.clone())
-            .file_name("thumbnail")
-            .mime_str(&mime)
-            .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
-        let form = reqwest::multipart::Form::new().part("file", part);
-        let response = self
-            .http
-            .post(self.url(&format!("{API_PREFIX}/books/{}/thumbnails", book_id.0)))
-            .query(&[("selected", selected.to_string())])
-            .multipart(form)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
-        let dto: KomgaThumbnailDto = response.json().await?;
+        // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
+        let had_session = self.has_session().await;
+        let mut retried = false;
+        let dto: KomgaThumbnailDto = loop {
+            let part = reqwest::multipart::Part::bytes(thumbnail.bytes.clone())
+                .file_name("thumbnail")
+                .mime_str(&mime)
+                .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
+            let form = reqwest::multipart::Form::new().part("file", part);
+            let response = self
+                .send(
+                    self.http
+                        .post(self.url(&format!("{API_PREFIX}/books/{}/thumbnails", book_id.0)))
+                        .query(&[("selected", selected.to_string())])
+                        .multipart(form),
+                )
+                .await?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && had_session && !retried
+            {
+                retried = true;
+                continue;
+            }
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(MediaServerError::Status(status, body));
+            }
+            break response.json().await?;
+        };
         Ok(Some(MediaServerBookThumbnail {
             id: MediaServerThumbnailId(dto.id),
             book_id: MediaServerBookId(dto.book_id.unwrap_or_else(|| book_id.0.clone())),
@@ -1198,9 +1368,10 @@ impl MediaServerClient for KomgaClient {
         series_id: &MediaServerSeriesId,
     ) -> Result<(), MediaServerError> {
         let response = self
-            .http
-            .post(self.url(&format!("{API_PREFIX}/series/{}/analyze", series_id.0)))
-            .send()
+            .send(
+                self.http
+                    .post(self.url(&format!("{API_PREFIX}/series/{}/analyze", series_id.0))),
+            )
             .await?;
         let status = response.status();
         if !status.is_success() {
@@ -1661,5 +1832,106 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    fn session_test_client(api_key: &str) -> KomgaClient {
+        KomgaClient::new(
+            "http://localhost:25600",
+            "admin@example.org",
+            "admin",
+            api_key,
+            1024,
+            AlternateTitleLabelsConfig::default(),
+        )
+        .expect("test client")
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (k, v) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn session_stores_x_auth_token_and_set_cookie() {
+        let mut session = KomgaSession::default();
+        session.store_from_headers(&headers(&[
+            ("x-auth-token", "session-id-1"),
+            ("set-cookie", "KOMGA-SESSION=abc123; Path=/; HttpOnly"),
+        ]));
+        assert_eq!(session.auth_token.as_deref(), Some("session-id-1"));
+        assert_eq!(session.cookies.get("KOMGA-SESSION").map(String::as_str), Some("abc123"));
+
+        // 服务端轮换即跟随：新 token 覆盖旧值。
+        session.store_from_headers(&headers(&[("x-auth-token", "session-id-2")]));
+        assert_eq!(session.auth_token.as_deref(), Some("session-id-2"));
+        // cookie 不受影响（本次响应没带 Set-Cookie）。
+        assert_eq!(session.cookies.get("KOMGA-SESSION").map(String::as_str), Some("abc123"));
+    }
+
+    #[test]
+    fn session_blank_token_and_deleted_cookie_clear() {
+        let mut session = KomgaSession::default();
+        session.store_from_headers(&headers(&[
+            ("x-auth-token", "session-id-1"),
+            ("set-cookie", "KOMGA-SESSION=abc123; Path=/; HttpOnly"),
+        ]));
+        // 空 X-Auth-Token = 服务端使会话失效；Max-Age=0 = cookie 删除。
+        session.store_from_headers(&headers(&[
+            ("x-auth-token", ""),
+            ("set-cookie", "KOMGA-SESSION=; Max-Age=0; Path=/"),
+        ]));
+        assert!(session.auth_token.is_none());
+        assert!(session.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_prefers_session_over_credentials() {
+        let client = session_test_client("");
+        // 无会话：Basic + 空 X-Auth-Token（请服务端返回会话）。
+        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = req.build().unwrap();
+        let auth = req.headers().get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap();
+        assert!(auth.starts_with("Basic "), "unexpected auth: {auth}");
+        assert!(req.headers().contains_key(X_AUTH_TOKEN));
+
+        // 存下会话后：只带 X-Auth-Token，不再带 Authorization。
+        client.store_session(&headers(&[("x-auth-token", "session-id-1")])).await;
+        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = req.build().unwrap();
+        assert_eq!(req.headers().get(X_AUTH_TOKEN).unwrap(), "session-id-1");
+        assert!(!req.headers().contains_key(reqwest::header::AUTHORIZATION));
+        assert!(!req.headers().contains_key("x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn auth_cookie_fallback_without_credentials() {
+        let client = session_test_client("");
+        client
+            .store_session(&headers(&[("set-cookie", "KOMGA-SESSION=abc123; Path=/; HttpOnly")]))
+            .await;
+        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = req.build().unwrap();
+        assert_eq!(req.headers().get(reqwest::header::COOKIE).unwrap(), "KOMGA-SESSION=abc123");
+        assert!(!req.headers().contains_key(reqwest::header::AUTHORIZATION));
+    }
+
+    #[tokio::test]
+    async fn auth_api_key_mode_uses_session_after_login() {
+        let client = session_test_client("test-api-key");
+        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = req.build().unwrap();
+        assert_eq!(req.headers().get("x-api-key").unwrap(), "test-api-key");
+
+        client.store_session(&headers(&[("x-auth-token", "session-id-9")])).await;
+        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = req.build().unwrap();
+        assert_eq!(req.headers().get(X_AUTH_TOKEN).unwrap(), "session-id-9");
+        assert!(!req.headers().contains_key("x-api-key"));
     }
 }
