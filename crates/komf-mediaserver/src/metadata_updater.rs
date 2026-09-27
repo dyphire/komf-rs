@@ -213,7 +213,7 @@ impl MetadataUpdater {
         series: &MediaServerSeries,
         metadata: &SeriesMetadata,
     ) -> Result<(), MediaServerError> {
-        let json = mylar_series_json_from_metadata(metadata, series.books_count);
+        let json = mylar_series_json_from_metadata(metadata);
         // 导出目录：mylarOutputDir 可重定向（对齐 py --output）；库根目录由内部从
         // 媒体服务器 API 获取（get_library().roots），用于还原相对目录结构，无需配置。
         // oneshot 的 series.url 指向 zip 文件 → 目录为 zip 父目录、文件名取 zip stem。

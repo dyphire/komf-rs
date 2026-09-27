@@ -75,8 +75,8 @@ pub struct MylarAlternateTitle {
 }
 
 /// 由 post-processing 后的系列元数据构造 mylar series.json。
-/// `books_count` 为系列当前书籍数（totalBookCount 缺失时的回退，对齐 py `totalBookCount or booksCount`）。
-pub fn mylar_series_json_from_metadata(series: &SeriesMetadata, books_count: i32) -> MylarSeriesJson {
+/// total_issues：元数据未提供总卷数/章数（totalBookCount）时设为 0。
+pub fn mylar_series_json_from_metadata(series: &SeriesMetadata) -> MylarSeriesJson {
     // 对齐 py：name = metadata.title or series.name；Rust 侧 title 为处理后主标题。
     let name = series.title_name().unwrap_or_default();
     // 对齐 py：year 初始占位 2001，releaseDate 前 4 位为数字时覆盖。
@@ -169,7 +169,7 @@ pub fn mylar_series_json_from_metadata(series: &SeriesMetadata, books_count: i32
             age_rating: normalize_age_rating(series.age_rating),
             collects: None,
             comic_image: String::new(),
-            total_issues: series.total_book_count.unwrap_or(books_count).max(0),
+            total_issues: series.total_book_count.unwrap_or(0).max(0),
             publication_run: String::new(),
             status: mylar_status(series.status),
             language: series.language.clone(),
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn mylar_json_structure_matches_py() {
-        let json = mylar_series_json_from_metadata(&sample_series(), 2);
+        let json = mylar_series_json_from_metadata(&sample_series());
         assert_eq!(json.version, "1.0.2");
         let m = &json.metadata;
         assert_eq!(m.r#type, "comicSeries");
@@ -433,9 +433,10 @@ mod tests {
         let mut s = sample_series();
         s.release_date = None;
         s.total_book_count = None;
-        let json = mylar_series_json_from_metadata(&s, 2);
+        let json = mylar_series_json_from_metadata(&s);
         assert_eq!(json.metadata.year, 2001); // 占位
-        assert_eq!(json.metadata.total_issues, 2); // booksCount 回退
+        // 元数据未提供总卷数/章数 → total_issues 设为 0（不回退 booksCount）
+        assert_eq!(json.metadata.total_issues, 0);
     }
 
     #[test]
@@ -529,7 +530,7 @@ mod tests {
     fn write_series_json_names() {
         let dir = std::env::temp_dir().join(format!("komf-mylar-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let json = mylar_series_json_from_metadata(&sample_series(), 0);
+        let json = mylar_series_json_from_metadata(&sample_series());
         let p1 = write_series_json(&dir, "Series A", false, &json).unwrap();
         assert_eq!(p1.file_name().unwrap().to_str().unwrap(), "series.json");
         let p2 = write_series_json(&dir, "Series B", true, &json).unwrap();
