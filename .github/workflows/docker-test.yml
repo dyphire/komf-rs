@@ -21,9 +21,6 @@ jobs:
           - arch: arm64
             target: aarch64-unknown-linux-musl
             cross: true
-    defaults:
-      run:
-        working-directory: komf-rust
     steps:
       - uses: actions/checkout@v7
 
@@ -38,7 +35,7 @@ jobs:
       - name: Cache cargo
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: komf-rust
+          workspaces: .
 
       - name: Install cross
         if: matrix.cross
@@ -67,7 +64,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: docker-artifacts-${{ matrix.arch }}
-          path: komf-rust/docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
+          path: docker-artifacts/linux-musl/${{ matrix.arch }}/komf-app
           if-no-files-found: error
 
   docker-test:
@@ -84,27 +81,27 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-amd64
-          path: komf-rust/docker-artifacts/linux-musl/amd64
+          path: docker-artifacts/linux-musl/amd64
 
       - name: Download arm64 Docker runtime artifacts
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-arm64
-          path: komf-rust/docker-artifacts/linux-musl/arm64
+          path: docker-artifacts/linux-musl/arm64
 
       - name: Verify Docker runtime artifacts
         run: |
           set -euo pipefail
-          test -f komf-rust/docker-artifacts/linux-musl/amd64/komf-app
-          test -f komf-rust/docker-artifacts/linux-musl/arm64/komf-app
+          test -f docker-artifacts/linux-musl/amd64/komf-app
+          test -f docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Strip Docker runtime artifacts
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
-          strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/amd64/komf-app
-          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/arm64/komf-app
+          strip --strip-unneeded docker-artifacts/linux-musl/amd64/komf-app
+          aarch64-linux-gnu-strip --strip-unneeded docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -128,8 +125,8 @@ jobs:
       - name: Build and push test image
         uses: docker/build-push-action@v7
         with:
-          context: komf-rust
-          file: ./komf-rust/docker/Dockerfile
+          context: .
+          file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

@@ -144,12 +144,12 @@ jobs:
       - name: Build Rust release binary with cross
         if: matrix.cross
         run: |
-          cross build --manifest-path komf-rust/Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
+          cross build --manifest-path Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
 
       - name: Build Rust release binary
         if: ${{ !matrix.cross }}
         run: |
-          cargo build --manifest-path komf-rust/Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
+          cargo build --manifest-path Cargo.toml --locked --release --bin komf-app --target ${{ matrix.target }}
 
       - name: Package release artifacts
         run: |
@@ -159,7 +159,7 @@ jobs:
           release_artifact="${release_dir}.tar.gz"
           rm -rf "$release_dir"
           mkdir -p "$release_dir"
-          binary_path="komf-rust/target/${{ matrix.target }}/release/${{ matrix.binary_source }}"
+          binary_path="target/${{ matrix.target }}/release/${{ matrix.binary_source }}"
           test -f "$binary_path"
           cp "$binary_path" "$release_dir/${{ matrix.binary_name }}"
           if [[ "${{ matrix.platform }}" != 'windows' ]]; then
@@ -301,27 +301,27 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-amd64
-          path: komf-rust/docker-artifacts/linux-musl/amd64
+          path: docker-artifacts/linux-musl/amd64
 
       - name: Download arm64 Docker runtime artifacts
         uses: actions/download-artifact@v8
         with:
           name: docker-artifacts-arm64
-          path: komf-rust/docker-artifacts/linux-musl/arm64
+          path: docker-artifacts/linux-musl/arm64
 
       - name: Verify Docker runtime artifacts
         run: |
           set -euo pipefail
-          test -f komf-rust/docker-artifacts/linux-musl/amd64/komf-app
-          test -f komf-rust/docker-artifacts/linux-musl/arm64/komf-app
+          test -f docker-artifacts/linux-musl/amd64/komf-app
+          test -f docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Strip Docker runtime artifacts
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
-          strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/amd64/komf-app
-          aarch64-linux-gnu-strip --strip-unneeded komf-rust/docker-artifacts/linux-musl/arm64/komf-app
+          strip --strip-unneeded docker-artifacts/linux-musl/amd64/komf-app
+          aarch64-linux-gnu-strip --strip-unneeded docker-artifacts/linux-musl/arm64/komf-app
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -362,8 +362,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
-          context: komf-rust
-          file: ./komf-rust/docker/Dockerfile
+          context: .
+          file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.image.outputs.tags }}

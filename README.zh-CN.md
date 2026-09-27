@@ -2,9 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-这是 [komf](https://github.com/Snd-R/komf) 的 **Rust 重写版**，用于为你的数字漫画库获取元数据与缩略图。它能自动捕获 **Komga**、**Kavita** 和 **Stump** 中新添加的系列并更新元数据、缩略图和书籍级数据；也支持手动按系列、按库或全库进行搜索、识别与匹配。
-
-Rust 实现位于 [`komf-rust/`](komf-rust/README.md)，是独立隔离的 Cargo workspace：独立依赖、独立构建、独立二进制（`komf-app`）。它不读取也不修改 Kotlin 实现。
+这是 [komf](https://github.com/Snd-R/komf) 的 **Rust 实现**，用于为你的数字漫画库获取元数据与缩略图。它能自动捕获 **Komga**、**Kavita** 和 **Stump** 中新添加的系列并更新元数据、缩略图和书籍级数据；也支持手动按系列、按库或全库进行搜索、识别与匹配。
 
 ## 状态
 
@@ -44,19 +42,17 @@ Provider 可在全局（`metadataProviders.defaultProviders`）或按库（`meta
 依赖：[Rust](https://rustup.rs/)（stable 工具链）。
 
 ```sh
-cd komf-rust
 cargo build --release # 构建 release 二进制到 target/release/komf-app
 cargo test --workspace # 运行单元测试
 ```
 
 ## 运行
 
-仓库不提供 `application.yml`（避免提交真实凭据）；请使用模板：
+仓库不提供 `application.yml`；请使用模板：
 
 ```sh
-cd komf-rust
-cp application.example.yml application.yml # Linux/macOS
-copy application.example.yml application.yml # Windows
+cp examples/application.example.yml application.yml # Linux/macOS
+copy examples/application.example.yml application.yml # Windows
 # 编辑 application.yml：Komga/Kavita/Stump 凭据、providers、元数据更新等
 ./komf-app [path to config] # application.yml 的路径或其所在目录
 ```
@@ -67,21 +63,21 @@ copy application.example.yml application.yml # Windows
 
 环境变量（与 Kotlin 版一致）：
 
-| 变量                                             | 说明                                       |
-| ---------------------------------------------- | ---------------------------------------- |
-| `KOMF_KOMGA_BASE_URI`                          | Komga 服务地址                               |
-| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                         |
-| `KOMF_KOMGA_API_KEY`                           | Komga API key（`X-API-Key` 认证，设置后优先于账号密码） |
-| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita 地址 + API key                      |
+| 变量                                             | 说明                                         |
+| ---------------------------------------------- | ------------------------------------------ |
+| `KOMF_KOMGA_BASE_URI`                          | Komga 服务地址                                 |
+| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                           |
+| `KOMF_KOMGA_API_KEY`                           | Komga API key（`X-API-Key` 认证，设置后优先于账号密码）   |
+| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita 地址 + API key                        |
 | `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump 地址 + API key（`stump_` 前缀，设置后优先于账号密码） |
-| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump 账号密码（仅当未配置 API key 时用于换取 JWT）       |
-| `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085）                         |
-| `KOMF_LOG_LEVEL`                               | 日志级别（默认 INFO）                            |
-| `KOMF_DISCORD_WEBHOOKS`                        | 逗号分隔的 Discord webhook URL                |
-| `KOMF_APPRISE_URLS`                            | 逗号分隔的 Apprise URL                        |
-| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | MAL provider 必需                          |
-| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | ComicVine provider 必需                    |
-| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token（显示 NSFW 条目）                |
+| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump 账号密码（仅当未配置 API key 时用于换取 JWT）        |
+| `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085）                           |
+| `KOMF_LOG_LEVEL`                               | 日志级别（默认 INFO）                              |
+| `KOMF_DISCORD_WEBHOOKS`                        | 逗号分隔的 Discord webhook URL                  |
+| `KOMF_APPRISE_URLS`                            | 逗号分隔的 Apprise URL                          |
+| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | MAL provider 必需                            |
+| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | ComicVine provider 必需                      |
+| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token（显示 NSFW 条目）                  |
 
 ### Docker
 
@@ -91,19 +87,17 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
  -v /path/to/config:/config \ # 存放 application.yml 的目录
 ```
 
-镜像发布在 `ghcr.io/dyphire/komf-rs`（`latest` + 版本 tag），将 `/config` 暴露为卷（`KOMF_CONFIG_DIR=/config`），把你的 `application.yml` 放到那里即可。如需本地构建，执行 `docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust` 并把镜像名换成 `komf-rust`。
+镜像发布在 `ghcr.io/dyphire/komf-rs`（`latest` + 版本 tag），将 `/config` 暴露为卷（`KOMF_CONFIG_DIR=/config`），把你的 `application.yml` 放到那里即可。如需本地构建，执行 `docker build -f docker/Dockerfile . -t komf-rs`。
 
 ## 配置
 
-仓库不包含 `application.yml`；所有配置项都在模板 [`komf-rust/application.example.yml`](komf-rust/application.example.yml) 中说明（每个字段带内联注释与代码默认值；敏感字段——Komga 账号/密码/API key、e-hentai/exhentai cookie——为空占位）。
+仓库不包含 `application.yml`；所有配置项都在模板 [`application.example.yml`](examples/application.example.yml) 中说明（每个字段带内联注释与代码默认值；敏感字段——Komga 账号/密码/API key、e-hentai/exhentai cookie——为空占位）。
 
 使用方法：
 
 1. 将模板复制为 `application.yml`（具体命令见 [运行](#运行)）。
 2. 编辑 `application.yml`：填写 Komga/Kavita/Stump 凭据并启用需要的 provider；每个选项都有行内说明。
 3. 用配置文件启动服务（路径参数或 `KOMF_CONFIG_DIR`）；无配置文件时以内置默认运行。
-
-e-hentai / bangumi 的 provider 参考见 [`komf-rust/README.md`](komf-rust/README.md)。
 
 ## 按库配置
 
@@ -181,7 +175,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ## 与 Kotlin 版的差异
 
-- **Stump 媒体服务器**（仅 Rust 扩展）：完整的 Stump 支持——GraphQL 客户端（API Key 认证，或账号密码 → JWT 换取）、GraphQL WebSocket 事件监听（`readEvents` 订阅 + 基于任务状态的批量窗口，一次扫描只产生一批匹配任务）、系列/书籍元数据更新（`SeriesMetadataInput` / `MediaMetadataInput`）、封面上传（`uploadSeriesThumbnailBase64` / `uploadMediaThumbnailBase64`）、系列标签（`setSeriesTags`）、书籍列表翻页、系列重置（系列元数据 + 系列标签 + 书级重置）。已知限制：Stump 的 `Series.tags` 是 Tag 对象（读取侧返回空标签）、`CreatedManySeries` 事件不带系列 id（记日志后忽略）、书级重置以 `updateMediaMetadata` 置空变通。实施与测试记录见 [`komf-rust/STUMP-SUPPORT.md`](komf-rust/STUMP-SUPPORT.md)。
+- **Stump 媒体服务器**（仅 Rust 扩展）：完整的 Stump 支持——GraphQL 客户端（API Key 认证，或账号密码 → JWT 换取）、GraphQL WebSocket 事件监听（`readEvents` 订阅 + 基于任务状态的批量窗口，一次扫描只产生一批匹配任务）、系列/书籍元数据更新（`SeriesMetadataInput` / `MediaMetadataInput`）、封面上传（`uploadSeriesThumbnailBase64` / `uploadMediaThumbnailBase64`）、系列标签（`setSeriesTags`）、书籍列表翻页、系列重置（系列元数据 + 系列标签 + 书级重置）。已知限制：Stump 的 `Series.tags` 是 Tag 对象（读取侧返回空标签）、`CreatedManySeries` 事件不带系列 id（记日志后忽略）、书级重置以 `updateMediaMetadata` 置空变通。
 - **中文库工作流**（bangumi + `seriesTitleLanguage`）：bangumi provider 用 `name` + `name_cn` + 别名匹配，中文系列名可自动命中；配置 `postProcessing.seriesTitle: true` + `seriesTitleLanguage: zh` 后，系列主标题按语言从 provider 的 `titles` 数组选择（bangumi 的 `name_cn` 成为系列标题，如「无能的奈奈」）。
 - **eHentai provider**（来自 [PR #284](https://github.com/Snd-R/komf/pull/284)）在 Rust 版可用；画廊搜索需要能访问 e-hentai.org（通常需代理）。PR 之上的扩展：可配置 `searchDomain`（`e-hentai` / `exhentai`，仅搜索请求域名）+ exhentai cookie 自动预热与 403 自动刷新（`ipbMemberId`/`ipbPassHash`）、`titlePriority`、`translatorKeywords`、`maleOnlyTagsFile`、参考实现 hentai-assistant 风格的系列标题 `titleTemplate`，以及 `gidOnlyMatch`（自动匹配仅做 gid 精准搜索：无 gid 或 gid 无结果都跳过，不回落普通标题相似度；links 匹配不受影响）。
 - **Bangumi provider** 增强了内置 154 项标签白名单（源自 KomgaBangumi.user.js）、通过 `tagWhitelist`/`tagWhitelistFile` 配置额外白名单、动态标签计数阈值（3~35）+ 前 10 增强、搜索显示与匹配双向的 mediaType 过滤（库级覆盖优先）、`score:N` 标签解析为数值评分，以及尊重 `seriesTitleLanguage` 的 name_cn 处理。

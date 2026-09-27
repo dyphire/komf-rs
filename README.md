@@ -2,9 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-This is the **Rust rewrite** of [komf](https://github.com/Snd-R/komf), a tool that fetches metadata and thumbnails for your digital comic book library. It automatically picks up added series in **Komga**, **Kavita** and **Stump** and updates their metadata, thumbnails and book-level data. You can also manually search, identify and match series — per series, per library, or for the whole library.
-
-The Rust implementation lives in [`komf-rust/`](komf-rust/README.md) as a fully isolated Cargo workspace: separate dependencies, separate build, separate binary (`komf-app`). It does not read or modify the Kotlin implementation.
+This is the **Rust implementation** of [komf](https://github.com/Snd-R/komf), a tool that fetches metadata and thumbnails for your digital comic book library. It automatically picks up added series in **Komga**, **Kavita** and **Stump** and updates their metadata, thumbnails and book-level data. You can also manually search, identify and match series — per series, per library, or for the whole library.
 
 ## Status
 
@@ -44,7 +42,6 @@ Providers can be configured globally (`metadataProviders.defaultProviders`) or p
 Requirements: [Rust](https://rustup.rs/) (stable toolchain).
 
 ```sh
-cd komf-rust
 cargo build --release # builds the release binary at target/release/komf-app
 cargo test --workspace # run unit tests
 ```
@@ -54,9 +51,8 @@ cargo test --workspace # run unit tests
 The repository does not ship `application.yml` (to avoid committing real credentials); use the template instead:
 
 ```sh
-cd komf-rust
-cp application.example.yml application.yml # Linux/macOS
-copy application.example.yml application.yml # Windows
+cp examples/application.example.yml application.yml # Linux/macOS
+copy examples/application.example.yml application.yml # Windows
 # edit application.yml: Komga/Kavita/Stump credentials, providers, metadata update, ...
 ./komf-app [path to config] # path to application.yml or its directory
 ```
@@ -91,19 +87,17 @@ vdocker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
  -v /path/to/config:/config \ # 存放 application.yml 的目录
 ```
 
-The image exposes `/config` as a volume (`KOMF_CONFIG_DIR=/config`), so place your `application.yml` there. The image is published to `ghcr.io/dyphire/komf-rs` (`latest` + version tags); to build locally instead, run `docker build -f komf-rust/docker/Dockerfile komf-rust -t komf-rust` and replace the image name with `komf-rust`.
+The image exposes `/config` as a volume (`KOMF_CONFIG_DIR=/config`), so place your `application.yml` there. The image is published to `ghcr.io/dyphire/komf-rs` (`latest` + version tags); to build locally instead, run `docker build -f docker/Dockerfile . -t komf-rs`.
 
 ## Configuration
 
-The repository does not include an `application.yml`; all options are documented in the template [`komf-rust/application.example.yml`](komf-rust/application.example.yml) (every field with an inline comment and its code default value; sensitive fields — Komga user/password/API key, e-hentai/exhentai cookies — are empty placeholders).
+The repository does not include an `application.yml`; all options are documented in the template [`application.example.yml`](examples/application.example.yml) (every field with an inline comment and its code default value; sensitive fields — Komga user/password/API key, e-hentai/exhentai cookies — are empty placeholders).
 
 To use it:
 
 1. Copy the template to `application.yml` (see [Running](#running) for the exact command).
 2. Edit `application.yml`: fill in your Komga/Kavita/Stump credentials and enable the providers you want; each option is explained inline.
 3. Start the service with the config file (path argument or `KOMF_CONFIG_DIR`); without a config file it runs on built-in defaults.
-
-Per-provider reference (e-hentai / bangumi) is kept in [`komf-rust/README.md`](komf-rust/README.md).
 
 ## Per-library configuration
 
@@ -181,7 +175,7 @@ The userscript let you configure komf and identify series directly from the Komg
 
 ## Differences from the Kotlin version
 
-- **Stump media server** (Rust-only extension): full Stump support — GraphQL client with API-key auth (or password → JWT exchange), GraphQL WebSocket event listener (`readEvents` subscription with job-based batch window so one scan produces one batch of match jobs), series/book metadata updates (`SeriesMetadataInput` / `MediaMetadataInput`), cover upload (`uploadSeriesThumbnailBase64` / `uploadMediaThumbnailBase64`), series tags (`setSeriesTags`), paginated book listing, series reset (series metadata + series tags + book-level reset). Known limits: Stump's `Series.tags` are Tag objects (the read side returns empty tags), `CreatedManySeries` events carry no series ids (ignored with a log line), and book-level reset is emulated via `updateMediaMetadata` with empty fields. Implementation and test record: [`komf-rust/STUMP-SUPPORT.md`](komf-rust/STUMP-SUPPORT.md).
+- **Stump media server** (Rust-only extension): full Stump support — GraphQL client with API-key auth (or password → JWT exchange), GraphQL WebSocket event listener (`readEvents` subscription with job-based batch window so one scan produces one batch of match jobs), series/book metadata updates (`SeriesMetadataInput` / `MediaMetadataInput`), cover upload (`uploadSeriesThumbnailBase64` / `uploadMediaThumbnailBase64`), series tags (`setSeriesTags`), paginated book listing, series reset (series metadata + series tags + book-level reset). Known limits: Stump's `Series.tags` are Tag objects (the read side returns empty tags), `CreatedManySeries` events carry no series ids (ignored with a log line), and book-level reset is emulated via `updateMediaMetadata` with empty fields.
 - **Chinese-library workflow** (bangumi + `seriesTitleLanguage`): the bangumi provider matches against `name` + `name_cn` + aliases, so Chinese series names match automatically; with `postProcessing.seriesTitle: true` + `seriesTitleLanguage: zh` the main series title is picked from the provider's `titles` array by language (bangumi's `name_cn` becomes the series title, e.g. 「无能的奈奈」).
 - **eHentai provider** (from [PR #284](https://github.com/Snd-R/komf/pull/284)) is available in the Rust version; gallery search requires network access to e-hentai.org (often via proxy). Extensions over the PR: configurable `searchDomain` (`e-hentai` / `exhentai`, search-only) with automatic exhentai cookie warm-up and 403 auto-refresh (`ipbMemberId`/`ipbPassHash`), `titlePriority`, `translatorKeywords`, `maleOnlyTagsFile`, a style `titleTemplate` for the series title, and `gidOnlyMatch` (match does gid-precise search only: no gid or no gid result skips, without falling back to title similarity; links matching stays unaffected).
 - **Bangumi provider** is enhanced with a built-in 154-entry tag whitelist (from KomgaBangumi.user.js), configurable extras via `tagWhitelist` / `tagWhitelistFile`, dynamic tag count threshold (3~35) + top-10 boost, mediaType filtering for both search display and matching (library-level override wins), `score:N` tag parsing into a numeric score, and name_cn handling that respects `seriesTitleLanguage`.

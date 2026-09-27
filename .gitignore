@@ -1,64 +1,22 @@
-.gradle
-!gradle/wrapper/gradle-wrapper.jar
-build/
-**/build/
-!src/**/build/
-.smoke
 target/
-bangumi-archive/
+.smoke/
+.smoke-komga/
 application.yml
 *.log
-*.json
 *.sqlite
 *.db
 
-### intellij idea ###
-.idea/*
-!/.idea/codeStyles/
-!/.idea/runConfigurations/
-.idea/modules.xml
-.idea/jarrepositories.xml
-.idea/compiler.xml
-.idea/libraries/
-*.iws
-*.iml
-*.ipr
-out/
-!**/src/main/**/out/
-!**/src/test/**/out/
-
-### eclipse ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springbeans
-.sts4-cache
-bin/
-!**/src/main/**/bin/
-!**/src/test/**/bin/
-
-### netbeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
+ehentai/
+bangumi-archive/
 
 ### vs code ###
 .vscode/
 
+### intellij idea ###
+.idea/
+
 ### mac os ###
 .ds_store
 
-database.sqlite
-
-### kotlin ###
-kls_database.db
-kls-classpath*
-
 ### neovim ###
 .nvim.lua
-# e-hentai-db 离线数据（用户自备/自动下载）+ FTS 索引 + meta（komf-rust）
-komf-rust/ehentai/
