@@ -2,7 +2,7 @@
 use crate::config::{ConfigLoader, ConfigWriter};
 use crate::routes::{AppState, SharedState};
 use komf_core::providers::bookwalker::BookWalkerDbDownloader;
-use komf_core::providers::mangabaka::MangaBakaDbDownloader;
+use komf_core::providers::mangabaka::{MangaBakaDbDownloader, MangaBakaDbRepository};
 use komf_core::providers::ProvidersModule;
 use komf_mediaserver::MediaServerModule;
 use komf_notifications::NotificationsModule;
@@ -91,9 +91,18 @@ fn build_state(
         Some(work_dir.clone()),
     );
     let manga_baka_db_downloader = Arc::new(MangaBakaDbDownloader::new(
-        db_work_dir,
+        db_work_dir.clone(),
         http_client.clone(),
     ));
+    // MangaBaka 管理 API 仓储：数据库文件存在时启用（link/unlink/tags/系列详情）。
+    let manga_baka_repository = {
+        let database_file = db_work_dir.join("mangabaka.sqlite");
+        if database_file.exists() {
+            Some(Arc::new(MangaBakaDbRepository::new(database_file)))
+        } else {
+            None
+        }
+    };
     let book_walker_db_downloader = Arc::new(BookWalkerDbDownloader::new(
         work_dir.join("bookwalker"),
         http_client.clone(),
@@ -103,6 +112,7 @@ fn build_state(
         media_server_module,
         notifications_module,
         manga_baka_db_downloader,
+        manga_baka_repository,
         book_walker_db_downloader,
     )
 }

@@ -6,6 +6,7 @@
 pub mod common;
 pub mod config;
 pub mod job;
+pub mod mangabaka;
 pub mod mediaserver;
 pub mod metadata;
 pub mod notifications;

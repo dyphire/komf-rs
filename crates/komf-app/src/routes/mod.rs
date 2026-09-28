@@ -2,6 +2,7 @@
 pub mod config_routes;
 pub mod deprecated;
 pub mod job_routes;
+pub mod mangabaka_routes;
 pub mod media_server_routes;
 pub mod metadata_routes;
 pub mod notification_routes;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub apprise_renderer: AppriseVelocityTemplates,
     /// 数据库下载器（`/update-*-db` jsonl 流与 `/config` 时间戳）。
     pub manga_baka_db_downloader: Arc<komf_core::providers::mangabaka::MangaBakaDbDownloader>,
+    /// MangaBaka 管理 API 仓储（link/unlink/tags/系列详情；数据库文件存在时启用）。
+    pub manga_baka_repository: Option<Arc<komf_core::providers::mangabaka::MangaBakaDbRepository>>,
     pub book_walker_db_downloader: Arc<komf_core::providers::bookwalker::BookWalkerDbDownloader>,
     /// 持有媒体服务器模块（含事件监听器生命周期管理）。
     _module: Arc<komf_mediaserver::MediaServerModule>,
@@ -63,6 +66,7 @@ impl AppState {
         module: MediaServerModule,
         notifications: komf_notifications::NotificationsModule,
         manga_baka_db_downloader: Arc<komf_core::providers::mangabaka::MangaBakaDbDownloader>,
+        manga_baka_repository: Option<Arc<komf_core::providers::mangabaka::MangaBakaDbRepository>>,
         book_walker_db_downloader: Arc<komf_core::providers::bookwalker::BookWalkerDbDownloader>,
     ) -> Self {
         // 持有模块以保持事件监听器存活（Drop 会取消监听器 token）；
@@ -83,6 +87,7 @@ impl AppState {
             apprise_service: notifications.apprise_service,
             apprise_renderer: notifications.apprise_velocity_renderer,
             manga_baka_db_downloader,
+            manga_baka_repository,
             book_walker_db_downloader,
             _module: module,
         }

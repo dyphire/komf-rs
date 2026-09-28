@@ -4,10 +4,11 @@
 //! - `GET /v1/series/search?q=...&type=...&type_not=...`
 //! - `GET /v1/series/{id}`
 //!
-//! 对应 Kotlin 文件：`MangaBakaSeries.kt`、`MangaBakaMetadataProvider.kt`、
-//! `MangaBakaMetadataMapper.kt`、`api/MangaBakaApiClient.kt`、
-//! `api/MangaBakaResponse.kt`、`api/MangaBakaSearchResponse.kt`、
-//! `db/MangaBakaDbDataSource.kt`、`db/MangaBakaDbDownloader.kt`。
+//! 对应 Kotlin 文件：`providers/mangabaka/MangaBakaMetadataProvider.kt`、
+//! `MangaBakaMetadataMapper.kt`、`MangaBakaDataSource.kt`、`MangaBakaDbDataSource.kt`，
+//! 及 `snd.komf.mangabaka` 包：`model/MangaBakaSeries.kt`（DTO 与枚举）、
+//! `external/MangaBakaApiClient.kt`、`external/MangaBakaDbDownloader.kt`、
+//! `repository/MangaBakaRepository.kt`。
 //! 两种模式均实现：`mode: API`（默认，在线 API）与 `mode: DATABASE`（本地 SQLite，
 //! 经 `update-mangabaka-db` 下载并建立 FTS5 索引）。
 use crate::config::{MangaBakaConfig, SeriesMetadataConfig};
@@ -19,6 +20,7 @@ use crate::model::{
 use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
 use crate::util::NameSimilarityMatcher;
 use komf_api_models::config::DownloadProgress;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -30,107 +32,225 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
-struct MangaBakaSearchResponse {
-    data: Vec<MangaBakaSeriesDto>,
+pub struct MangaBakaSearchResponse {
+    pub data: Vec<MangaBakaSeriesDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct MangaBakaSeriesResponse {
-    data: MangaBakaSeriesDto,
+pub struct MangaBakaSeriesResponse {
+    pub data: MangaBakaSeriesDto,
+}
+
+/// `GET /v1/tags` 响应：`{ "data": [ ... ] }`（上游 `MangaBakaResponse<List<MangaBakaSeriesTag>>`）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MangaBakaTagsResponse {
+    pub data: Vec<MangaBakaSeriesTagDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
-struct MangaBakaSeriesDto {
-    id: i32,
-    artists: Option<Vec<String>>,
-    authors: Option<Vec<String>>,
-    canonical_url: String,
-    cover: MangaBakaCoverDto,
-    description: Option<String>,
-    final_volume: Option<String>,
-    publishers: Option<Vec<MangaBakaPublisherDto>>,
-    rating: Option<f64>,
-    status: MangaBakaStatusDto,
+pub struct MangaBakaSeriesDto {
+    pub id: i64,
+    #[serde(default)]
+    pub artists: Option<Vec<String>>,
+    #[serde(default)]
+    pub authors: Option<Vec<String>>,
+    #[serde(default)]
+    pub canonical_url: String,
+    #[serde(default)]
+    pub cover: MangaBakaCoverDto,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub final_volume: Option<String>,
+    #[serde(default)]
+    pub publishers: Option<Vec<MangaBakaPublisherDto>>,
+    #[serde(default)]
+    pub rating: Option<f64>,
+    pub status: MangaBakaStatusDto,
     #[allow(dead_code)]
     r#type: MangaBakaTypeDto,
-    links_v2: Option<Vec<MangaBakaLinkDto>>,
-    published: Option<MangaBakaPublishedDateDto>,
-    tags_v2: Option<Vec<MangaBakaTagDto>>,
-    titles: Option<Vec<MangaBakaTitleDto>>,
-    source: MangaBakaSourceDto,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct MangaBakaCoverDto {
-    #[allow(dead_code)]
-    x150: Option<MangaBakaCoverDpiDto>,
-    #[allow(dead_code)]
-    x250: Option<MangaBakaCoverDpiDto>,
-    x350: Option<MangaBakaCoverDpiDto>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct MangaBakaCoverDpiDto {
-    x1: Option<String>,
-    #[allow(dead_code)]
-    x2: Option<String>,
-    #[allow(dead_code)]
-    x3: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct MangaBakaPublisherDto {
-    name: Option<String>,
-    #[serde(rename = "type")]
-    type_: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct MangaBakaLinkDto {
-    name_display: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct MangaBakaPublishedDateDto {
-    start_date: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct MangaBakaTagDto {
-    name: String,
     #[serde(default)]
-    is_genre: bool,
+    pub links_v2: Option<Vec<MangaBakaLinkDto>>,
+    #[serde(default)]
+    pub published: Option<MangaBakaPublishedDateDto>,
+    #[serde(default)]
+    pub tags_v2: Option<Vec<MangaBakaSeriesTagDto>>,
+    #[serde(default)]
+    pub titles: Option<Vec<MangaBakaTitleDto>>,
+    #[serde(default)]
+    pub source: MangaBakaSourceDto,
+    // ---- 管理 API 全字段（对应 Kotlin 领域模型；映射链路不消费的保持默认）----
+    #[serde(default)]
+    pub has_anime: bool,
+    #[serde(default)]
+    pub anime: Option<MangaBakaAnimeInfoDto>,
+    #[serde(default)]
+    pub content_rating: Option<MangaBakaContentRatingDto>,
+    #[serde(default)]
+    pub is_licensed: bool,
+    #[serde(default)]
+    pub last_updated_at: Option<String>,
+    #[serde(default)]
+    pub merged_with: Option<i64>,
+    #[serde(default)]
+    pub original_language: Option<String>,
+    #[serde(default)]
+    pub state: Option<MangaBakaSeriesStateDto>,
+    #[serde(default)]
+    pub total_chapters: Option<String>,
+    #[serde(default)]
+    pub relationships_v2: Option<Vec<MangaBakaRelationshipDto>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaCoverDto {
+    #[serde(default)]
+    pub raw: Option<MangaBakaCoverRawDto>,
+    #[serde(default)]
+    pub x150: Option<MangaBakaCoverDpiDto>,
+    #[serde(default)]
+    pub x250: Option<MangaBakaCoverDpiDto>,
+    #[serde(default)]
+    pub x350: Option<MangaBakaCoverDpiDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MangaBakaCoverDpiDto {
+    pub x1: Option<String>,
+    #[allow(dead_code)]
+    pub x2: Option<String>,
+    #[allow(dead_code)]
+    pub x3: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MangaBakaPublisherDto {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MangaBakaLinkDto {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub name_display: String,
+    #[serde(default, rename = "type")]
+    pub type_: Option<MangaBakaLinkTypeDto>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaPublishedDateDto {
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub end_date_is_estimated: Option<bool>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub start_date_is_estimated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaSeriesTagDto {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub name_path: String,
+    #[serde(default)]
+    pub content_rating: Option<MangaBakaContentRatingDto>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_spoiler: Option<bool>,
+    #[serde(default)]
+    pub is_explicit: bool,
+    #[serde(default)]
+    pub implied_by_tag_ids: Vec<i64>,
+    #[serde(default)]
+    pub weight: Option<MangaBakaTagWeightDto>,
+    #[serde(default)]
+    pub level: i32,
+    #[serde(default)]
+    pub series_count: i32,
+    #[serde(default)]
+    pub is_genre: bool,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+    #[serde(default)]
+    pub merged_with: Option<i64>,
+}
+
+/// tags 表行 / `GET /v1/tags` 响应元素（管理 API 标签目录）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaTagDto {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+    #[serde(default)]
+    pub merged_with: Option<i64>,
+    pub name: String,
+    #[serde(default)]
+    pub name_path: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_spoiler: Option<bool>,
+    #[serde(default)]
+    pub is_genre: bool,
+    pub content_rating: MangaBakaContentRatingDto,
+    #[serde(default)]
+    pub series_count: i32,
+    #[serde(default)]
+    pub level: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct MangaBakaTitleDto {
-    language: String,
-    title: String,
-    traits: Vec<String>,
+pub struct MangaBakaTitleDto {
+    pub language: String,
+    pub title: String,
+    pub traits: Vec<String>,
     #[serde(default)]
-    is_primary: Option<bool>,
+    pub is_primary: Option<bool>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MangaBakaSourceDto {
+    pub anilist: Option<MangaBakaSourceEntryDto>,
+    pub anime_news_network: Option<MangaBakaSourceEntryDto>,
+    pub anime_planet: Option<MangaBakaSourceEntryDto>,
+    pub kitsu: Option<MangaBakaSourceEntryDto>,
+    pub manga_updates: Option<MangaBakaSourceEntryDto>,
+    pub my_anime_list: Option<MangaBakaSourceEntryDto>,
+    pub shikimori: Option<MangaBakaSourceEntryDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct MangaBakaSourceDto {
-    anilist: Option<MangaBakaSourceEntryDto>,
-    anime_news_network: Option<MangaBakaSourceEntryDto>,
-    anime_planet: Option<MangaBakaSourceEntryDto>,
-    kitsu: Option<MangaBakaSourceEntryDto>,
-    manga_updates: Option<MangaBakaSourceEntryDto>,
-    #[allow(dead_code)]
-    my_anime_list: Option<MangaBakaSourceEntryDto>,
-    shikimori: Option<MangaBakaSourceEntryDto>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct MangaBakaSourceEntryDto {
-    id: Option<serde_json::Value>,
+pub struct MangaBakaSourceEntryDto {
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub rating: Option<f64>,
+    #[serde(default)]
+    pub rating_normalized: Option<i32>,
 }
 
 impl MangaBakaSourceEntryDto {
@@ -145,7 +265,7 @@ impl MangaBakaSourceEntryDto {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum MangaBakaStatusDto {
+pub enum MangaBakaStatusDto {
     Cancelled,
     Completed,
     Hiatus,
@@ -156,7 +276,7 @@ enum MangaBakaStatusDto {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum MangaBakaTypeDto {
+pub enum MangaBakaTypeDto {
     Manga,
     Novel,
     Manhwa,
@@ -178,14 +298,173 @@ impl MangaBakaTypeDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaContentRatingDto {
+    Safe,
+    Suggestive,
+    Erotica,
+    Pornographic,
+}
+
+impl Default for MangaBakaContentRatingDto {
+    fn default() -> Self {
+        MangaBakaContentRatingDto::Safe
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaSeriesStateDto {
+    Active,
+    Merged,
+    Deleted,
+}
+
+impl Default for MangaBakaSeriesStateDto {
+    fn default() -> Self {
+        MangaBakaSeriesStateDto::Active
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaTitleTraitDto {
+    Official,
+    Native,
+    Alternative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaLinkTypeDto {
+    Publisher,
+    Retailer,
+    Webplatform,
+    Info,
+    Social,
+    News,
+    Piracy,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaRelationTypeDto {
+    Adaptation,
+    Alternative,
+    Cameo,
+    CharacterFocus,
+    Compilation,
+    Contains,
+    Crossover,
+    Expansion,
+    Main,
+    Other,
+    Parent,
+    Parody,
+    Prequel,
+    Reboot,
+    Remake,
+    Sequel,
+    Series,
+    SideStory,
+    Source,
+    SpinOff,
+    Summary,
+    Uncollected,
+}
+
+impl Default for MangaBakaRelationTypeDto {
+    fn default() -> Self {
+        MangaBakaRelationTypeDto::Other
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaRelationshipChronologyDto {
+    Narrative,
+    Release,
+    Unknown,
+}
+
+impl Default for MangaBakaRelationshipChronologyDto {
+    fn default() -> Self {
+        MangaBakaRelationshipChronologyDto::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaBakaTagWeightDto {
+    Core,
+    Defining,
+    Recurrent,
+    Incidental,
+    Unweighted,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaAnimeInfoDto {
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaCoverRawDto {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub size: Option<i64>,
+    #[serde(default)]
+    pub height: Option<i32>,
+    #[serde(default)]
+    pub width: Option<i32>,
+    #[serde(default)]
+    pub blurhash: Option<String>,
+    #[serde(default)]
+    pub thumbhash: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaRelationshipDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub chronology: MangaBakaRelationshipChronologyDto,
+    #[serde(default)]
+    pub is_manual: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub relation_type: MangaBakaRelationTypeDto,
+    #[serde(default)]
+    pub to_series_id: i64,
+}
+
+/// Komga 系列与其匹配的 MangaBaka 系列（`find` / `findAllLinked` 返回）。
+#[derive(Debug, Clone)]
+pub struct MangaBakaLinkedSeriesDto {
+    pub komga_id: String,
+    pub series: MangaBakaSeriesDto,
+}
+
 // ---------------------------------------------------------------------------
 // API 客户端 —— 对应 `MangaBakaApiClient.kt`
 // ---------------------------------------------------------------------------
 
 const BASE_URL: &str = "https://api.mangabaka.org";
 
-struct MangaBakaApiClient {
-    http: reqwest::Client,
+pub struct MangaBakaApiClient {
+    pub http: reqwest::Client,
 }
 
 impl MangaBakaApiClient {
@@ -223,7 +502,7 @@ impl MangaBakaApiClient {
         Ok(parsed.data)
     }
 
-    async fn get_series(&self, id: i32) -> Result<MangaBakaSeriesDto, ProviderError> {
+    async fn get_series(&self, id: i64) -> Result<MangaBakaSeriesDto, ProviderError> {
         let response = self
             .http
             .get(format!("{BASE_URL}/v1/series/{id}"))
@@ -248,9 +527,9 @@ impl MangaBakaApiClient {
 // ---------------------------------------------------------------------------
 
 pub struct MangaBakaMetadataMapper {
-    metadata_config: SeriesMetadataConfig,
-    author_roles: Vec<crate::model::AuthorRole>,
-    artist_roles: Vec<crate::model::AuthorRole>,
+    pub metadata_config: SeriesMetadataConfig,
+    pub author_roles: Vec<crate::model::AuthorRole>,
+    pub artist_roles: Vec<crate::model::AuthorRole>,
 }
 
 impl MangaBakaMetadataMapper {
@@ -405,9 +684,11 @@ impl MangaBakaMetadataMapper {
                 .links_v2
                 .iter()
                 .flatten()
-                .map(|link| WebLink {
-                    label: link.name_display.clone(),
-                    url: link.url.clone(),
+                .filter_map(|link| {
+                    official_link_url(&link.url).map(|url| WebLink {
+                        label: link.name_display.clone(),
+                        url,
+                    })
                 })
                 .collect();
             links.sort_by(|a, b| a.label.cmp(&b.label));
@@ -462,13 +743,19 @@ impl MangaBakaMetadataMapper {
                     url: format!("https://shikimori.one/mangas/{id}"),
                 });
             }
+            if let Some(id) = source.my_anime_list.as_ref().and_then(|s| s.id_string()) {
+                links.push(WebLink {
+                    label: "MyAnimeList".to_string(),
+                    url: format!("https://myanimelist.net/manga/{id}"),
+                });
+            }
             links
         } else {
             Vec::new()
         };
 
         // 类型 / 标签
-        let all_tags: Vec<&MangaBakaTagDto> = series.tags_v2.iter().flatten().collect();
+        let all_tags: Vec<&MangaBakaSeriesTagDto> = series.tags_v2.iter().flatten().collect();
         let genres = if cfg.genres {
             all_tags
                 .iter()
@@ -652,6 +939,114 @@ fn decode_entity(entity: &str) -> String {
     }
 }
 
+/// 对应 Kotlin `parseUrl(link.url)?.toStingEncoded()`：校验 URL 可解析，重建并
+/// 百分号编码 path/query/fragment（已有 %XX 保留，不双重编码）。
+fn official_link_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let mut out = String::new();
+    out.push_str(parsed.scheme());
+    out.push_str("://");
+    out.push_str(parsed.host_str()?);
+    if let Some(port) = parsed.port() {
+        out.push_str(&format!(":{port}"));
+    }
+    let path = parsed.path();
+    // url crate 会把无 path 的 URL 规范化为 "/"，需用原始字符串区分是否有 path 分隔符
+    let mut authority = String::new();
+    authority.push_str(parsed.host_str()?);
+    if let Some(port) = parsed.port() {
+        authority.push_str(&format!(":{port}"));
+    }
+    let prefix_len = parsed.scheme().len() + 3 + authority.len();
+    let has_path_slash = url
+        .as_bytes()
+        .get(prefix_len)
+        .map(|b| *b == b'/')
+        .unwrap_or(false);
+    if path == "/" && has_path_slash {
+        out.push('/');
+    } else if path != "/" && !path.is_empty() {
+        let encoded = path
+            .trim_start_matches('/')
+            .split('/')
+            .map(|seg| encode_url_component(seg, is_path_segment_keep))
+            .collect::<Vec<_>>()
+            .join("/");
+        out.push('/');
+        out.push_str(&encoded);
+    }
+    if let Some(query) = parsed.query() {
+        if !query.is_empty() {
+            out.push('?');
+            for (i, pair) in query.split('&').enumerate() {
+                if i > 0 {
+                    out.push('&');
+                }
+                match pair.split_once('=') {
+                    Some((k, v)) => {
+                        out.push_str(&encode_url_component(k, is_query_keep));
+                        out.push('=');
+                        out.push_str(&encode_url_component(v, is_query_keep));
+                    }
+                    None => out.push_str(&encode_url_component(pair, is_query_keep)),
+                }
+            }
+        }
+    }
+    if let Some(fragment) = parsed.fragment() {
+        if !fragment.is_empty() {
+            out.push('#');
+            out.push_str(&encode_url_component(fragment, is_fragment_keep));
+        }
+    }
+    Some(out)
+}
+
+/// 百分号编码单个组件：保留字符与已有 %XX 原样保留，其余按 UTF-8 编码。
+fn encode_url_component(s: &str, keep: fn(char) -> bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            out.push_str(&s[i..i + 3]);
+            i += 3;
+            continue;
+        }
+        let ch = s[i..].chars().next().unwrap();
+        if keep(ch) {
+            out.push(ch);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in ch.encode_utf8(&mut buf).as_bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// path 段保留集：unreserved + 子分隔符 + `:` `@`（对应 Kotlin encodeURLPath 默认）。
+fn is_path_segment_keep(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || "-._~!$&'()*+,;=:@".contains(ch)
+}
+
+/// query key/value 保留集：unreserved + `!$'()*+,;=:@`（对应 Kotlin encodeURLQueryComponent；
+/// `&` 为分隔符、`=` 为 key/value 分隔符，二者由调用方处理）。
+fn is_query_keep(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || "-._~!$'()*+,;=:@".contains(ch)
+}
+
+/// fragment 保留集：unreserved + `!$&'()*+,;=:@`（对应 Kotlin encodeURLParameter）。
+fn is_fragment_keep(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || "-._~!$&'()*+,;=:@".contains(ch)
+}
+
 // ---------------------------------------------------------------------------
 // Provider —— 对应 `MangaBakaMetadataProvider.kt`
 // ---------------------------------------------------------------------------
@@ -659,7 +1054,7 @@ fn decode_entity(entity: &str) -> String {
 // Kotlin 未配置 maximumSize（cache4k 默认无条目上限），此处保持一致。
 // ---------------------------------------------------------------------------
 
-struct TtlCache<K, V> {
+pub struct TtlCache<K, V> {
     inner: tokio::sync::Mutex<HashMap<K, (V, Instant)>>,
     ttl: Duration,
 }
@@ -705,14 +1100,14 @@ where
 // ---------------------------------------------------------------------------
 
 pub struct MangaBakaMetadataProvider {
-    data_source: MangaBakaDataSource,
-    metadata_mapper: MangaBakaMetadataMapper,
-    name_matcher: NameSimilarityMatcher,
-    cover_fetch_client: Option<reqwest::Client>,
-    type_includes: Vec<MangaBakaTypeDto>,
-    type_excludes: Vec<MangaBakaTypeDto>,
+    pub data_source: MangaBakaDataSource,
+    pub metadata_mapper: MangaBakaMetadataMapper,
+    pub name_matcher: NameSimilarityMatcher,
+    pub cover_fetch_client: Option<reqwest::Client>,
+    pub type_includes: Vec<MangaBakaTypeDto>,
+    pub type_excludes: Vec<MangaBakaTypeDto>,
     /// 对应 Kotlin cache4k expireAfterWrite(30.minutes)（无 maximumSize）
-    cache: TtlCache<i32, MangaBakaSeriesDto>,
+    pub cache: TtlCache<i64, MangaBakaSeriesDto>,
 }
 
 pub fn create_provider(
@@ -821,7 +1216,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
-        let id: i32 = self.resolve_link_id(query)?.parse().ok()?;
+        let id: i64 = self.resolve_link_id(query)?.parse().ok()?;
         let series = self.data_source.get_series(id).await.ok()?;
         self.cache.put(id, series.clone()).await;
         Some(self.metadata_mapper.to_series_search_result(&series))
@@ -831,7 +1226,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         &self,
         series_id: &ProviderSeriesId,
     ) -> Result<ProviderSeriesMetadata, ProviderError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
+        let id: i64 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
         })?;
         let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
@@ -843,7 +1238,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         &self,
         series_id: &ProviderSeriesId,
     ) -> Result<Option<Image>, ProviderError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
+        let id: i64 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
         })?;
         let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
@@ -921,7 +1316,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
 // ---------------------------------------------------------------------------
 
 /// 数据源：API（在线）或本地 SQLite 数据库（`MangaBakaMode.DATABASE`）。
-enum MangaBakaDataSource {
+pub enum MangaBakaDataSource {
     Api(MangaBakaApiClient),
     Db(MangaBakaDbRepository),
 }
@@ -939,7 +1334,7 @@ impl MangaBakaDataSource {
         }
     }
 
-    async fn get_series(&self, id: i32) -> Result<MangaBakaSeriesDto, ProviderError> {
+    async fn get_series(&self, id: i64) -> Result<MangaBakaSeriesDto, ProviderError> {
         match self {
             MangaBakaDataSource::Api(client) => client.get_series(id).await,
             MangaBakaDataSource::Db(repo) => repo.get_series(id),
@@ -948,12 +1343,12 @@ impl MangaBakaDataSource {
 }
 
 // ---------------------------------------------------------------------------
-// DATABASE 数据访问 —— 对应 `MangaBakaDbDataSource.kt` / `MangaBakaSeriesTable.kt`
+// DATABASE 数据访问 —— 对应 `MangaBakaDbDataSource.kt` / `repository/MangaBakaRepository.kt`
 // ---------------------------------------------------------------------------
 
 /// 本地 SQLite 只读仓储。连接按查询打开（保证 `Sync`，行为与 Kotlin 每次 transaction 等价）。
 pub struct MangaBakaDbRepository {
-    database_file: PathBuf,
+    pub database_file: PathBuf,
 }
 
 const MANGA_BAKA_DB_URL: &str = "https://api.mangabaka.org/v1/database/series.sqlite.tar.gz";
@@ -968,12 +1363,46 @@ impl MangaBakaDbRepository {
     }
 
     fn open(&self) -> Result<rusqlite::Connection, ProviderError> {
-        rusqlite::Connection::open(&self.database_file)
-            .map_err(|e| ProviderError::message(format!("failed to open MangaBaka database: {e}")))
+        let conn = rusqlite::Connection::open(&self.database_file)
+            .map_err(|e| ProviderError::message(format!("failed to open MangaBaka database: {e}")))?;
+        // 自建表（下载器保留 komga_series；tags/series_tags 在下载重建时由下载器重建，
+        // 这里 ensure 是为了手工放置的库也能用管理 API）。
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS komga_series (
+                komga_id TEXT NOT NULL,
+                mangabaka_id INTEGER NOT NULL,
+                PRIMARY KEY (komga_id, mangabaka_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_komga_series_mangabaka ON komga_series(mangabaka_id);
+             CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER,
+                merged_with INTEGER,
+                name TEXT NOT NULL,
+                name_path TEXT NOT NULL DEFAULT '',
+                description TEXT,
+                is_spoiler INTEGER NOT NULL DEFAULT 0,
+                is_genre INTEGER NOT NULL DEFAULT 0,
+                content_rating TEXT NOT NULL,
+                series_count INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS series_tags (
+                series_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                is_spoiler INTEGER NOT NULL DEFAULT 0,
+                is_explicit INTEGER NOT NULL DEFAULT 0,
+                implied_by_tag_ids TEXT NOT NULL DEFAULT '[]',
+                weight TEXT NOT NULL DEFAULT 'unweighted',
+                PRIMARY KEY (tag_id, series_id)
+             );",
+        )
+        .map_err(|e| ProviderError::message(format!("failed to init MangaBaka db tables: {e}")))?;
+        Ok(conn)
     }
 
     /// 对应 `MangaBakaDbDataSource.search`：FTS5 titles MATCH + type IN/NOT IN + rank 排序。
-    fn search(
+    pub fn search(
         &self,
         title: &str,
         types: &[MangaBakaTypeDto],
@@ -981,7 +1410,8 @@ impl MangaBakaDbRepository {
     ) -> Result<Vec<MangaBakaSeriesDto>, ProviderError> {
         let conn = self.open()?;
         let quoted = format!("\"{title}\"");
-        let mut sql = String::from("SELECT id FROM series_fts WHERE titles MATCH ?");
+        // 对应上游 `MangaBakaRepository.search`：titles_fts 每标题一行，标题级 rank 排序。
+        let mut sql = String::from("SELECT id FROM titles_fts WHERE title MATCH ?");
         let mut params: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(quoted)];
         if !types.is_empty() {
             let list = types.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -1001,16 +1431,16 @@ impl MangaBakaDbRepository {
                     .map(|t| rusqlite::types::Value::Text(t.as_str().to_string())),
             );
         }
-        sql.push_str(" ORDER BY rank LIMIT 10");
+        sql.push_str(" ORDER BY rank LIMIT 24");
 
-        let ids: Vec<i32> = {
+        let ids: Vec<i64> = {
             let mut stmt = conn
                 .prepare(&sql)
                 .map_err(|e| ProviderError::message(format!("MangaBaka db search prepare: {e}")))?;
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))
                 .map_err(|e| ProviderError::message(format!("MangaBaka db search: {e}")))?;
-            let ids: Vec<i32> = rows
+            let ids: Vec<i64> = rows
                 .collect::<Result<_, _>>()
                 .map_err(|e| ProviderError::message(format!("MangaBaka db search rows: {e}")))?;
             drop(stmt);
@@ -1024,7 +1454,7 @@ impl MangaBakaDbRepository {
     }
 
     /// 对应 `MangaBakaDbDataSource.getSeries`：按 id 查询，无结果抛错。
-    fn get_series(&self, id: i32) -> Result<MangaBakaSeriesDto, ProviderError> {
+    pub fn get_series(&self, id: i64) -> Result<MangaBakaSeriesDto, ProviderError> {
         let conn = self.open()?;
         self.fetch_series_by_ids(&conn, &[id])?
             .into_iter()
@@ -1035,14 +1465,14 @@ impl MangaBakaDbRepository {
     fn fetch_series_by_ids(
         &self,
         conn: &rusqlite::Connection,
-        ids: &[i32],
+        ids: &[i64],
     ) -> Result<Vec<MangaBakaSeriesDto>, ProviderError> {
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT * FROM series WHERE id IN ({placeholders})");
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| ProviderError::message(format!("MangaBaka db prepare: {e}")))?;
-        let rows = {
+        let mut rows = {
             let mut rows = stmt
                 .query(rusqlite::params_from_iter(ids.iter().map(|i| *i)))
                 .map_err(|e| ProviderError::message(format!("MangaBaka db query: {e}")))?;
@@ -1056,7 +1486,225 @@ impl MangaBakaDbRepository {
             out
         };
         drop(stmt);
+
+        // 用 series_tags join tags 补全系列标签全字段（下载库存在时；映射链路只消费 name/is_genre）。
+        if let Ok(tags_map) = self.select_full_tags(conn, ids) {
+            for series in rows.iter_mut() {
+                if let Some(full) = tags_map.get(&series.id) {
+                    if !full.is_empty() {
+                        series.tags_v2 = Some(full.clone());
+                    }
+                }
+            }
+        }
         Ok(rows)
+    }
+
+    /// `link`：校验系列存在后写入（先删除该 Komga 系列的旧关联再插入）。
+    pub fn link(&self, komga_id: &str, mangabaka_id: i64) -> Result<(), ProviderError> {
+        let conn = self.open()?;
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM series WHERE id = ?1",
+                [mangabaka_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| ProviderError::message(format!("MangaBaka link check: {e}")))?;
+        if exists == 0 {
+            return Err(ProviderError::message(format!(
+                "Series with id {mangabaka_id} does not exist"
+            )));
+        }
+        conn.execute("DELETE FROM komga_series WHERE komga_id = ?1", [komga_id])
+            .map_err(|e| ProviderError::message(format!("MangaBaka link delete: {e}")))?;
+        conn.execute(
+            "INSERT INTO komga_series (komga_id, mangabaka_id) VALUES (?1, ?2)",
+            rusqlite::params![komga_id, mangabaka_id],
+        )
+        .map_err(|e| ProviderError::message(format!("MangaBaka link insert: {e}")))?;
+        Ok(())
+    }
+
+    /// `unlink`：删除该 Komga 系列的关联。
+    pub fn unlink(&self, komga_id: &str) -> Result<(), ProviderError> {
+        let conn = self.open()?;
+        conn.execute("DELETE FROM komga_series WHERE komga_id = ?1", [komga_id])
+            .map_err(|e| ProviderError::message(format!("MangaBaka unlink: {e}")))?;
+        Ok(())
+    }
+
+    /// `find`：按 Komga 系列 id 查关联。
+    pub fn find(&self, komga_id: &str) -> Result<Option<MangaBakaLinkedSeriesDto>, ProviderError> {
+        let conn = self.open()?;
+        let mangabaka_id: Option<i64> = conn
+            .query_row(
+                "SELECT mangabaka_id FROM komga_series WHERE komga_id = ?1",
+                [komga_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| ProviderError::message(format!("MangaBaka find: {e}")))?;
+        let Some(mangabaka_id) = mangabaka_id else {
+            return Ok(None);
+        };
+        let series = self.fetch_series_by_ids(&conn, &[mangabaka_id])?;
+        Ok(series.into_iter().next().map(|series| MangaBakaLinkedSeriesDto {
+            komga_id: komga_id.to_string(),
+            series,
+        }))
+    }
+
+    /// `findAllLinked`：批量查询 Komga 系列关联（保持输入顺序）。
+    pub fn find_all_linked(&self, komga_ids: &[String]) -> Result<Vec<MangaBakaLinkedSeriesDto>, ProviderError> {
+        if komga_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.open()?;
+        let placeholders = komga_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT komga_id, mangabaka_id FROM komga_series WHERE komga_id IN ({placeholders})"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| ProviderError::message(format!("MangaBaka findAllLinked prepare: {e}")))?;
+        let pairs: Vec<(String, i64)> = {
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(komga_ids.iter()))
+                .map_err(|e| ProviderError::message(format!("MangaBaka findAllLinked: {e}")))?;
+            let mut out = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| ProviderError::message(format!("MangaBaka findAllLinked rows: {e}")))?
+            {
+                out.push((row.get(0)?, row.get(1)?));
+            }
+            out
+        };
+        drop(stmt);
+
+        let mangabaka_ids: Vec<i64> = pairs.iter().map(|(_, id)| *id).collect();
+        let series = self.fetch_series_by_ids(&conn, &mangabaka_ids)?;
+        let by_id: std::collections::HashMap<i64, &MangaBakaSeriesDto> =
+            series.iter().map(|s| (s.id, s)).collect();
+        let mut out = Vec::new();
+        for (komga_id, mangabaka_id) in pairs {
+            if let Some(series) = by_id.get(&mangabaka_id) {
+                out.push(MangaBakaLinkedSeriesDto {
+                    komga_id,
+                    series: (*series).clone(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// `getAllTags`：返回标签目录（tags 表；未下载/无 tags 表时返回空）。
+    pub fn get_all_tags(&self) -> Result<Vec<MangaBakaTagDto>, ProviderError> {
+        let conn = self.open()?;
+        let mut stmt = conn
+            .prepare("SELECT id, parent_id, merged_with, name, name_path, description, is_spoiler, is_genre, content_rating, series_count, level FROM tags")
+            .map_err(|e| ProviderError::message(format!("MangaBaka getTags prepare: {e}")))?;
+        let tags = stmt
+            .query_map([], |row| {
+                Ok(MangaBakaTagDto {
+                    id: row.get(0)?,
+                    parent_id: row.get(1)?,
+                    merged_with: row.get(2)?,
+                    name: row.get(3)?,
+                    name_path: row.get(4)?,
+                    description: row.get(5)?,
+                    is_spoiler: row.get::<_, Option<i64>>(6)?.map(|v| v != 0),
+                    is_genre: row.get::<_, i64>(7)? != 0,
+                    content_rating: parse_content_rating_db(&row.get::<_, Option<String>>(8)?),
+                    series_count: row.get(9)?,
+                    level: row.get(10)?,
+                })
+            })
+            .map_err(|e| ProviderError::message(format!("MangaBaka getTags query: {e}")))?;
+        tags.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ProviderError::message(format!("MangaBaka getTags rows: {e}")))
+    }
+
+    /// series_tags join tags：按 series_id 组装完整系列标签（含 name/content_rating 等目录字段）。
+    fn select_full_tags(
+        &self,
+        conn: &rusqlite::Connection,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<MangaBakaSeriesTagDto>>, ProviderError> {
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT st.series_id, st.tag_id, st.is_spoiler, st.is_explicit, st.implied_by_tag_ids, st.weight,              t.parent_id, t.merged_with, t.name, t.name_path, t.description, t.is_genre, t.content_rating,              t.series_count, t.level              FROM series_tags st LEFT JOIN tags t ON t.id = st.tag_id              WHERE st.series_id IN ({placeholders})"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| ProviderError::message(format!("MangaBaka tags join prepare: {e}")))?;
+        let mut out: std::collections::HashMap<i64, Vec<MangaBakaSeriesTagDto>> =
+            std::collections::HashMap::new();
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(ids.iter().map(|i| *i)))
+            .map_err(|e| ProviderError::message(format!("MangaBaka tags join query: {e}")))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| ProviderError::message(format!("MangaBaka tags join rows: {e}")))?
+        {
+            let series_id: i64 = row.get(0)?;
+            let implied: Vec<i64> = row
+                .get::<_, Option<String>>(4)?
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_default();
+            let weight: Option<MangaBakaTagWeightDto> = row
+                .get::<_, Option<String>>(5)?
+                .and_then(|v| parse_tag_weight(&v));
+            let content_rating = parse_content_rating_db(&row.get::<_, Option<String>>(12)?);
+            out.entry(series_id).or_default().push(MangaBakaSeriesTagDto {
+                id: row.get(1)?,
+                is_spoiler: row.get::<_, Option<i64>>(2)?.map(|v| v != 0),
+                is_explicit: row.get::<_, i64>(3)? != 0,
+                implied_by_tag_ids: implied,
+                weight,
+                parent_id: row.get(6)?,
+                merged_with: row.get(7)?,
+                name: row.get(8)?,
+                name_path: row.get(9)?,
+                description: row.get(10)?,
+                is_genre: row.get::<_, i64>(11)? != 0,
+                content_rating: Some(content_rating),
+                series_count: row.get(13)?,
+                level: row.get(14)?,
+            });
+        }
+        Ok(out)
+    }
+}
+
+fn parse_content_rating_db(value: &Option<String>) -> MangaBakaContentRatingDto {
+    match value.as_deref().unwrap_or_default().to_lowercase().as_str() {
+        "suggestive" => MangaBakaContentRatingDto::Suggestive,
+        "erotica" => MangaBakaContentRatingDto::Erotica,
+        "pornographic" => MangaBakaContentRatingDto::Pornographic,
+        _ => MangaBakaContentRatingDto::Safe,
+    }
+}
+
+fn parse_tag_weight(value: &str) -> Option<MangaBakaTagWeightDto> {
+    match value.to_lowercase().as_str() {
+        "core" => Some(MangaBakaTagWeightDto::Core),
+        "defining" => Some(MangaBakaTagWeightDto::Defining),
+        "recurrent" => Some(MangaBakaTagWeightDto::Recurrent),
+        "incidental" => Some(MangaBakaTagWeightDto::Incidental),
+        "unweighted" => Some(MangaBakaTagWeightDto::Unweighted),
+        _ => None,
+    }
+}
+
+impl MangaBakaContentRatingDto {
+    fn as_db_str(&self) -> &'static str {
+        match self {
+            MangaBakaContentRatingDto::Safe => "safe",
+            MangaBakaContentRatingDto::Suggestive => "suggestive",
+            MangaBakaContentRatingDto::Erotica => "erotica",
+            MangaBakaContentRatingDto::Pornographic => "pornographic",
+        }
     }
 }
 
@@ -1103,9 +1751,51 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
         "OEL" => MangaBakaTypeDto::Oel,
         _ => MangaBakaTypeDto::Other,
     };
+    let content_rating = match text(row, "content_rating")?
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "safe" => MangaBakaContentRatingDto::Safe,
+        "suggestive" => MangaBakaContentRatingDto::Suggestive,
+        "erotica" => MangaBakaContentRatingDto::Erotica,
+        "pornographic" => MangaBakaContentRatingDto::Pornographic,
+        _ => MangaBakaContentRatingDto::Safe,
+    };
+    let state = match text(row, "state")?
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "active" => MangaBakaSeriesStateDto::Active,
+        "merged" => MangaBakaSeriesStateDto::Merged,
+        "deleted" => MangaBakaSeriesStateDto::Deleted,
+        _ => MangaBakaSeriesStateDto::Active,
+    };
 
     let cover_x350 = text(row, "cover_x350_x1")?;
+    let raw_cover = text(row, "cover_raw_url")?.map(|url| {
+        MangaBakaCoverRawDto {
+            url: Some(url),
+            size: text(row, "cover_raw_size")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok()),
+            height: text(row, "cover_raw_height")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok()),
+            width: text(row, "cover_raw_width")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok()),
+            blurhash: text(row, "cover_raw_blurhash").ok().flatten(),
+            thumbhash: text(row, "cover_raw_thumbhash").ok().flatten(),
+            format: text(row, "cover_raw_format").ok().flatten(),
+        }
+    });
     let cover = MangaBakaCoverDto {
+        raw: raw_cover,
         x150: None,
         x250: None,
         x350: cover_x350.map(|url| MangaBakaCoverDpiDto {
@@ -1115,43 +1805,110 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
         }),
     };
 
+    let rating_col = |row: &rusqlite::Row<'_>, base: &str| -> Result<(Option<f64>, Option<i32>), ProviderError> {
+        let rating = text(row, &format!("{base}_rating"))?.and_then(|v| v.parse().ok());
+        let normalized = text(row, &format!("{base}_rating_normalized"))?.and_then(|v| v.parse().ok());
+        Ok((rating, normalized))
+    };
+
     let source = MangaBakaSourceDto {
-        anilist: text(row, "source_anilist_id")?.map(|v| MangaBakaSourceEntryDto {
-            id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
-        }),
-        anime_news_network: text(row, "source_anime_news_network_id")?.map(|v| {
+        anilist: text(row, "source_anilist_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_anilist").unwrap_or((None, None));
             MangaBakaSourceEntryDto {
                 id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+                rating,
+                rating_normalized: normalized,
             }
         }),
-        anime_planet: text(row, "source_anime_planet_id")?.map(|v| MangaBakaSourceEntryDto {
-            id: Some(serde_json::Value::String(v)),
+        anime_news_network: text(row, "source_anime_news_network_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_anime_news_network").unwrap_or((None, None));
+            MangaBakaSourceEntryDto {
+                id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+                rating,
+                rating_normalized: normalized,
+            }
         }),
-        kitsu: text(row, "source_kitsu_id")?.map(|v| MangaBakaSourceEntryDto {
-            id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+        anime_planet: text(row, "source_anime_planet_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_anime_planet").unwrap_or((None, None));
+            MangaBakaSourceEntryDto {
+                id: Some(serde_json::Value::String(v)),
+                rating,
+                rating_normalized: normalized,
+            }
         }),
-        manga_updates: text(row, "source_manga_updates_id")?.map(|v| MangaBakaSourceEntryDto {
-            id: Some(serde_json::Value::String(v)),
+        kitsu: text(row, "source_kitsu_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_kitsu").unwrap_or((None, None));
+            MangaBakaSourceEntryDto {
+                id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+                rating,
+                rating_normalized: normalized,
+            }
         }),
-        my_anime_list: text(row, "source_my_anime_list_id")?.map(|v| MangaBakaSourceEntryDto {
-            id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+        manga_updates: text(row, "source_manga_updates_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_manga_updates").unwrap_or((None, None));
+            MangaBakaSourceEntryDto {
+                id: Some(serde_json::Value::String(v)),
+                rating,
+                rating_normalized: normalized,
+            }
         }),
-        shikimori: text(row, "source_shikimori_id")?.map(|v| MangaBakaSourceEntryDto {
-            id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+        my_anime_list: text(row, "source_my_anime_list_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_my_anime_list").unwrap_or((None, None));
+            MangaBakaSourceEntryDto {
+                id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+                rating,
+                rating_normalized: normalized,
+            }
+        }),
+        shikimori: text(row, "source_shikimori_id")?.map(|v| {
+            let (rating, normalized) = rating_col(row, "source_shikimori").unwrap_or((None, None));
+            MangaBakaSourceEntryDto {
+                id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
+                rating,
+                rating_normalized: normalized,
+            }
         }),
     };
 
     let published = match text(row, "published_start_date")? {
         Some(date) => Some(MangaBakaPublishedDateDto {
             start_date: Some(date),
+            start_date_is_estimated: text(row, "published_start_date_is_estimated")?
+                .and_then(|v| v.parse().ok()),
+            end_date: text(row, "published_end_date")?,
+            end_date_is_estimated: text(row, "published_end_date_is_estimated")?
+                .and_then(|v| v.parse().ok()),
         }),
         None => None,
+    };
+
+    let anime = match (text(row, "anime_start")?, text(row, "anime_end")?) {
+        (Some(_), _) | (_, Some(_)) => Some(MangaBakaAnimeInfoDto {
+            start: text(row, "anime_start")?,
+            end: text(row, "anime_end")?,
+        }),
+        _ => None,
     };
 
     Ok(MangaBakaSeriesDto {
         id: row
             .get("id")
             .map_err(|e| ProviderError::message(format!("MangaBaka db id: {e}")))?,
+        has_anime: text(row, "has_anime")?.map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+        anime,
+        content_rating: Some(content_rating),
+        is_licensed: text(row, "is_licensed")?.map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+        last_updated_at: text(row, "last_updated_at")?,
+        merged_with: text(row, "merged_with")?.and_then(|v| v.parse().ok()),
+        original_language: text(row, "original_language")?,
+        state: Some(state),
+        total_chapters: text(row, "total_chapters")?,
+        relationships_v2: json_vec(row, "relationships_v2")?
+            .map(|v| {
+                serde_json::from_value(v)
+                    .map_err(|e| ProviderError::message(format!("MangaBaka db relationships: {e}")))
+            })
+            .transpose()?,
         artists: json_vec(row, "artists")?
             .map(|v| {
                 serde_json::from_value(v)
@@ -1211,12 +1968,12 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
 /// 元数据（timestamp / checksum）存于 `mangabaka/` 目录下，对应 Kotlin
 /// `MangaBakaDbMetadata`（timestamp、checksum.sha1 文件）。
 pub struct MangaBakaDbDownloader {
-    work_dir: PathBuf,
-    database_archive: PathBuf,
-    database_file: PathBuf,
-    http: reqwest::Client,
-    download_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    progress: Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
+    pub work_dir: PathBuf,
+    pub database_archive: PathBuf,
+    pub database_file: PathBuf,
+    pub http: reqwest::Client,
+    pub download_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    pub progress: Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
 }
 
 impl MangaBakaDbDownloader {
@@ -1420,7 +2177,137 @@ impl MangaBakaDbDownloader {
                 .map_err(|e| format!("FileSystemException: {e}"))?;
         }
 
-        // 4. FTS5 索引
+        // 4. 重建自建表（对应上游 `prepareTables`）：数据表 tags/series_tags 每次重建，
+        //    komga_series 关联数据保留；顺带清理旧版 series_fts（GROUP_CONCAT 结构）。
+        emit(
+            sender,
+            DownloadProgress::ProgressEvent {
+                total: 0,
+                completed: 0,
+                info: Some("preparing tables".to_string()),
+            },
+        );
+        {
+            let conn = rusqlite::Connection::open(&self.database_file)
+                .map_err(|e| format!("SQLiteException: {e}"))?;
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS titles_fts;
+                 DROP TABLE IF EXISTS series_fts;
+                 DROP TABLE IF EXISTS tags;
+                 DROP TABLE IF EXISTS series_tags;",
+            )
+            .map_err(|e| format!("SQLiteException: {e}"))?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY,
+                    parent_id INTEGER,
+                    merged_with INTEGER,
+                    name TEXT NOT NULL,
+                    name_path TEXT NOT NULL DEFAULT '',
+                    description TEXT,
+                    is_spoiler INTEGER NOT NULL DEFAULT 0,
+                    is_genre INTEGER NOT NULL DEFAULT 0,
+                    content_rating TEXT NOT NULL,
+                    series_count INTEGER NOT NULL DEFAULT 0,
+                    level INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS series_tags (
+                    series_id INTEGER NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    is_spoiler INTEGER NOT NULL DEFAULT 0,
+                    is_explicit INTEGER NOT NULL DEFAULT 0,
+                    implied_by_tag_ids TEXT NOT NULL DEFAULT '[]',
+                    weight TEXT NOT NULL DEFAULT 'unweighted',
+                    PRIMARY KEY (tag_id, series_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS komga_series (
+                    komga_id TEXT NOT NULL,
+                    mangabaka_id INTEGER NOT NULL,
+                    PRIMARY KEY (komga_id, mangabaka_id)
+                 );",
+            )
+            .map_err(|e| format!("SQLiteException: {e}"))?;
+            conn.execute_batch("VACUUM;")
+                .map_err(|e| format!("SQLiteException: {e}"))?;
+        }
+
+        // 5. 导入标签目录（对应上游 `importTags`：GET /v1/tags 全量拉取）。
+        emit(
+            sender,
+            DownloadProgress::ProgressEvent {
+                total: 0,
+                completed: 0,
+                info: Some("importing tags".to_string()),
+            },
+        );
+        {
+            let response = self
+                .http
+                .get("https://api.mangabaka.org/v1/tags")
+                .send()
+                .await
+                .map_err(|e| format!("HttpRequestException: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!("ResponseException: {}", response.status()));
+            }
+            let response: MangaBakaTagsResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("SerializationException: {e}"))?;
+            let conn = rusqlite::Connection::open(&self.database_file)
+                .map_err(|e| format!("SQLiteException: {e}"))?;
+            for tag in response.data {
+                conn.execute(
+                    "INSERT OR REPLACE INTO tags
+                     (id, parent_id, merged_with, name, name_path, description, is_spoiler, is_genre, content_rating, series_count, level)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        tag.id,
+                        tag.parent_id,
+                        tag.merged_with,
+                        tag.name,
+                        tag.name_path,
+                        tag.description,
+                        tag.is_spoiler.map(|v| if v { 1 } else { 0 }),
+                        if tag.is_genre { 1 } else { 0 },
+                        tag.content_rating
+                            .map(|v| v.as_db_str())
+                            .unwrap_or("safe"),
+                        tag.series_count,
+                        tag.level,
+                    ],
+                )
+                .map_err(|e| format!("SQLiteException: {e}"))?;
+            }
+        }
+
+        // 6. 导入系列-标签关联（对应上游 `importData` 的 series_tags INSERT）。
+        emit(
+            sender,
+            DownloadProgress::ProgressEvent {
+                total: 0,
+                completed: 0,
+                info: Some("importing series tags".to_string()),
+            },
+        );
+        {
+            let conn = rusqlite::Connection::open(&self.database_file)
+                .map_err(|e| format!("SQLiteException: {e}"))?;
+            conn.execute_batch(
+                "INSERT INTO series_tags
+                 SELECT s.id,
+                        json_each.value ->> '$.id',
+                        json_each.value ->> '$.is_spoiler',
+                        json_each.value ->> '$.is_explicit',
+                        json_each.value ->> '$.implied_by_tag_ids',
+                        UPPER(json_each.value ->> '$.weight')
+                 FROM series s, json_each(s.tags_v2)
+                 WHERE s.state = 'active';",
+            )
+            .map_err(|e| format!("SQLiteException: {e}"))?;
+        }
+
+        // 7. FTS5 索引（对应上游 `createSearchIndex`：titles_fts 每标题一行，标题级 rank）。
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -1433,16 +2320,15 @@ impl MangaBakaDbDownloader {
             let conn = rusqlite::Connection::open(&self.database_file)
                 .map_err(|e| format!("SQLiteException: {e}"))?;
             conn.execute_batch(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS series_fts USING fts5 \
-                 (id, titles, type, tokenize = 'trigram');",
+                "CREATE VIRTUAL TABLE titles_fts USING fts5
+                 (id, title, type, tokenize = 'trigram');",
             )
             .map_err(|e| format!("SQLiteException: {e}"))?;
             conn.execute_batch(
-                "INSERT INTO series_fts \
-                 SELECT s.id, GROUP_CONCAT(json_extract(json_each.value, '$.title'), ', '), s.type \
-                 FROM series s, json_each(titles) \
-                 WHERE state = 'active' \
-                 GROUP BY s.id;",
+                "INSERT INTO titles_fts
+                 SELECT s.id, json_each.value ->> '$.title', s.type
+                 FROM series s, json_each(s.titles)
+                 WHERE s.state = 'active';",
             )
             .map_err(|e| format!("SQLiteException: {e}"))?;
         }
@@ -1473,6 +2359,325 @@ impl Clone for MangaBakaDbDownloader {
         }
     }
 }
+// ---------------------------------------------------------------------------
+// 管理 API 映射（core DTO -> komf-api-models DTO，对应 Kotlin `MangaBakaMapper.kt`）
+// ---------------------------------------------------------------------------
+
+fn api_content_rating(v: Option<MangaBakaContentRatingDto>) -> komf_api_models::mangabaka::MangaBakaContentRating {
+    match v.unwrap_or_default() {
+        MangaBakaContentRatingDto::Safe => komf_api_models::mangabaka::MangaBakaContentRating::Safe,
+        MangaBakaContentRatingDto::Suggestive => {
+            komf_api_models::mangabaka::MangaBakaContentRating::Suggestive
+        }
+        MangaBakaContentRatingDto::Erotica => komf_api_models::mangabaka::MangaBakaContentRating::Erotica,
+        MangaBakaContentRatingDto::Pornographic => {
+            komf_api_models::mangabaka::MangaBakaContentRating::Pornographic
+        }
+    }
+}
+
+fn api_status(v: MangaBakaStatusDto) -> komf_api_models::mangabaka::MangaBakaStatus {
+    match v {
+        MangaBakaStatusDto::Cancelled => komf_api_models::mangabaka::MangaBakaStatus::Cancelled,
+        MangaBakaStatusDto::Completed => komf_api_models::mangabaka::MangaBakaStatus::Completed,
+        MangaBakaStatusDto::Hiatus => komf_api_models::mangabaka::MangaBakaStatus::Hiatus,
+        MangaBakaStatusDto::Releasing => komf_api_models::mangabaka::MangaBakaStatus::Releasing,
+        MangaBakaStatusDto::Upcoming => komf_api_models::mangabaka::MangaBakaStatus::Upcoming,
+        MangaBakaStatusDto::Unknown => komf_api_models::mangabaka::MangaBakaStatus::Unknown,
+    }
+}
+
+fn api_type(v: MangaBakaTypeDto) -> komf_api_models::mangabaka::MangaBakaType {
+    match v {
+        MangaBakaTypeDto::Manga => komf_api_models::mangabaka::MangaBakaType::Manga,
+        MangaBakaTypeDto::Novel => komf_api_models::mangabaka::MangaBakaType::Novel,
+        MangaBakaTypeDto::Manhwa => komf_api_models::mangabaka::MangaBakaType::Manhwa,
+        MangaBakaTypeDto::Manhua => komf_api_models::mangabaka::MangaBakaType::Manhua,
+        MangaBakaTypeDto::Oel => komf_api_models::mangabaka::MangaBakaType::Oel,
+        MangaBakaTypeDto::Other => komf_api_models::mangabaka::MangaBakaType::Other,
+    }
+}
+
+fn api_state(v: Option<MangaBakaSeriesStateDto>) -> komf_api_models::mangabaka::MangaBakaSeriesState {
+    match v.unwrap_or_default() {
+        MangaBakaSeriesStateDto::Active => komf_api_models::mangabaka::MangaBakaSeriesState::Active,
+        MangaBakaSeriesStateDto::Merged => komf_api_models::mangabaka::MangaBakaSeriesState::Merged,
+        MangaBakaSeriesStateDto::Deleted => komf_api_models::mangabaka::MangaBakaSeriesState::Deleted,
+    }
+}
+
+fn api_link_type(v: Option<MangaBakaLinkTypeDto>) -> komf_api_models::mangabaka::MangaBakaLinkType {
+    match v.unwrap_or(MangaBakaLinkTypeDto::Other) {
+        MangaBakaLinkTypeDto::Publisher => komf_api_models::mangabaka::MangaBakaLinkType::Publisher,
+        MangaBakaLinkTypeDto::Retailer => komf_api_models::mangabaka::MangaBakaLinkType::Retailer,
+        MangaBakaLinkTypeDto::Webplatform => komf_api_models::mangabaka::MangaBakaLinkType::Webplatform,
+        MangaBakaLinkTypeDto::Info => komf_api_models::mangabaka::MangaBakaLinkType::Info,
+        MangaBakaLinkTypeDto::Social => komf_api_models::mangabaka::MangaBakaLinkType::Social,
+        MangaBakaLinkTypeDto::News => komf_api_models::mangabaka::MangaBakaLinkType::News,
+        MangaBakaLinkTypeDto::Piracy => komf_api_models::mangabaka::MangaBakaLinkType::Piracy,
+        MangaBakaLinkTypeDto::Other => komf_api_models::mangabaka::MangaBakaLinkType::Other,
+    }
+}
+
+fn api_relation_type(v: MangaBakaRelationTypeDto) -> komf_api_models::mangabaka::MangaBakaRelationType {
+    use komf_api_models::mangabaka::MangaBakaRelationType as A;
+    match v {
+        MangaBakaRelationTypeDto::Adaptation => A::Adaptation,
+        MangaBakaRelationTypeDto::Alternative => A::Alternative,
+        MangaBakaRelationTypeDto::Cameo => A::Cameo,
+        MangaBakaRelationTypeDto::CharacterFocus => A::CharacterFocus,
+        MangaBakaRelationTypeDto::Compilation => A::Compilation,
+        MangaBakaRelationTypeDto::Contains => A::Contains,
+        MangaBakaRelationTypeDto::Crossover => A::Crossover,
+        MangaBakaRelationTypeDto::Expansion => A::Expansion,
+        MangaBakaRelationTypeDto::Main => A::Main,
+        MangaBakaRelationTypeDto::Other => A::Other,
+        MangaBakaRelationTypeDto::Parent => A::Parent,
+        MangaBakaRelationTypeDto::Parody => A::Parody,
+        MangaBakaRelationTypeDto::Prequel => A::Prequel,
+        MangaBakaRelationTypeDto::Reboot => A::Reboot,
+        MangaBakaRelationTypeDto::Remake => A::Remake,
+        MangaBakaRelationTypeDto::Sequel => A::Sequel,
+        MangaBakaRelationTypeDto::Series => A::Series,
+        MangaBakaRelationTypeDto::SideStory => A::SideStory,
+        MangaBakaRelationTypeDto::Source => A::Source,
+        MangaBakaRelationTypeDto::SpinOff => A::SpinOff,
+        MangaBakaRelationTypeDto::Summary => A::Summary,
+        MangaBakaRelationTypeDto::Uncollected => A::Uncollected,
+    }
+}
+
+fn api_chronology(v: MangaBakaRelationshipChronologyDto) -> komf_api_models::mangabaka::MangaBakaRelationshipChronology {
+    match v {
+        MangaBakaRelationshipChronologyDto::Narrative => {
+            komf_api_models::mangabaka::MangaBakaRelationshipChronology::Narrative
+        }
+        MangaBakaRelationshipChronologyDto::Release => {
+            komf_api_models::mangabaka::MangaBakaRelationshipChronology::Release
+        }
+        MangaBakaRelationshipChronologyDto::Unknown => {
+            komf_api_models::mangabaka::MangaBakaRelationshipChronology::Unknown
+        }
+    }
+}
+
+fn api_weight(v: Option<MangaBakaTagWeightDto>) -> komf_api_models::mangabaka::MangaBakaTagWeight {
+    match v.unwrap_or(MangaBakaTagWeightDto::Unweighted) {
+        MangaBakaTagWeightDto::Core => komf_api_models::mangabaka::MangaBakaTagWeight::Core,
+        MangaBakaTagWeightDto::Defining => komf_api_models::mangabaka::MangaBakaTagWeight::Defining,
+        MangaBakaTagWeightDto::Recurrent => komf_api_models::mangabaka::MangaBakaTagWeight::Recurrent,
+        MangaBakaTagWeightDto::Incidental => komf_api_models::mangabaka::MangaBakaTagWeight::Incidental,
+        MangaBakaTagWeightDto::Unweighted => komf_api_models::mangabaka::MangaBakaTagWeight::Unweighted,
+    }
+}
+
+fn api_title_trait(v: &str) -> komf_api_models::mangabaka::MangaBakaTitleTrait {
+    match v.to_lowercase().as_str() {
+        "official" => komf_api_models::mangabaka::MangaBakaTitleTrait::Official,
+        "native" => komf_api_models::mangabaka::MangaBakaTitleTrait::Native,
+        _ => komf_api_models::mangabaka::MangaBakaTitleTrait::Alternative,
+    }
+}
+
+fn api_source_id(v: &Option<serde_json::Value>) -> Option<i64> {
+    v.as_ref().and_then(|v| match v {
+        serde_json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    })
+}
+
+fn api_source_id_string(v: &Option<serde_json::Value>) -> Option<String> {
+    v.as_ref().and_then(|v| match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+macro_rules! map_source_field {
+    ($source:expr, $ty:ident, $conv:expr) => {{
+        let entry = $source.as_ref();
+        $ty {
+            id: $conv(&entry.and_then(|e| e.id.clone())),
+            rating: entry.and_then(|e| e.rating),
+            rating_normalized: entry.and_then(|e| e.rating_normalized),
+        }
+    }};
+}
+
+/// `MangaBakaSeries.toDto()`：core DTO -> 管理 API DTO（对应 Kotlin MangaBakaMapper）。
+pub fn to_api_series(series: &MangaBakaSeriesDto) -> komf_api_models::mangabaka::KomfMangaBakaSeries {
+    use komf_api_models::mangabaka::*;
+    KomfMangaBakaSeries {
+        id: MangaBakaSeriesId(series.id),
+        has_anime: series.has_anime,
+        anime: series.anime.as_ref().map(|a| MangaBakaAnimeInfo {
+            start: a.start.clone(),
+            end: a.end.clone(),
+        }),
+        artists: series.artists.clone(),
+        authors: series.authors.clone(),
+        canonical_url: series.canonical_url.clone(),
+        content_rating: api_content_rating(series.content_rating),
+        cover: MangaBakaCover {
+            raw: series.cover.raw.as_ref().map(|raw| MangaBakaCoverRaw {
+                url: raw.url.clone(),
+                size: raw.size,
+                height: raw.height,
+                width: raw.width,
+                blurhash: raw.blurhash.clone(),
+                thumbhash: raw.thumbhash.clone(),
+                format: raw.format.clone(),
+            }),
+            x150: series.cover.x150.as_ref().map(map_dpi),
+            x250: series.cover.x250.as_ref().map(map_dpi),
+            x350: series.cover.x350.as_ref().map(map_dpi),
+        },
+        description: series.description.clone(),
+        final_volume: series.final_volume.clone(),
+        is_licensed: series.is_licensed,
+        last_updated_at: series.last_updated_at.clone(),
+        merged_with: series.merged_with,
+        original_language: series.original_language.clone(),
+        publishers: series.publishers.as_ref().map(|pubs| {
+            pubs.iter()
+                .map(|p| MangaBakaPublisher {
+                    name: p.name.clone(),
+                    note: p.note.clone(),
+                    r#type: p.type_.clone(),
+                })
+                .collect()
+        }),
+        rating: series.rating,
+        state: api_state(series.state),
+        status: api_status(series.status),
+        total_chapters: series.total_chapters.clone(),
+        r#type: api_type(series.r#type),
+        links: series.links_v2.as_ref().map(|links| {
+            links
+                .iter()
+                .map(|l| MangaBakaLink {
+                    id: MangaBakaLinkId(l.id.clone().unwrap_or_default()),
+                    language: l.language.clone().unwrap_or_default(),
+                    name: l.name.clone().unwrap_or_default(),
+                    name_display: l.name_display.clone(),
+                    r#type: api_link_type(l.type_),
+                    url: l.url.clone(),
+                })
+                .collect()
+        }),
+        published: series.published.as_ref().map(|p| MangaBakaPublishedDate {
+            end_date: p.end_date.clone(),
+            end_date_is_estimated: p.end_date_is_estimated,
+            start_date: p.start_date.clone(),
+            start_date_is_estimated: p.start_date_is_estimated,
+        }),
+        relationships: series.relationships_v2.as_ref().map(|rels| {
+            rels.iter()
+                .map(|r| MangaBakaRelationship {
+                    id: MangaBakaRelationshipId(r.id.clone()),
+                    chronology: api_chronology(r.chronology),
+                    is_manual: r.is_manual,
+                    note: r.note.clone(),
+                    relation_type: api_relation_type(r.relation_type),
+                    to_series_id: MangaBakaSeriesId(r.to_series_id),
+                })
+                .collect()
+        }),
+        tags: series.tags_v2.as_ref().map(|tags| {
+            tags.iter()
+                .map(|t| MangaBakaSeriesTag {
+                    id: MangaBakaTagId(t.id),
+                    content_rating: api_content_rating(t.content_rating),
+                    description: t.description.clone(),
+                    is_spoiler: t.is_spoiler,
+                    level: t.level,
+                    name: t.name.clone(),
+                    name_path: t.name_path.clone(),
+                    parent_id: t.parent_id.map(MangaBakaTagId),
+                    series_count: t.series_count,
+                    implied_by_tag_ids: t.implied_by_tag_ids.iter().map(|id| MangaBakaTagId(*id)).collect(),
+                    is_explicit: t.is_explicit,
+                    is_genre: t.is_genre,
+                    merged_with: t.merged_with,
+                    weight: api_weight(t.weight),
+                })
+                .collect()
+        }),
+        titles: series.titles.as_ref().map(|titles| {
+            titles
+                .iter()
+                .map(|t| MangaBakaTitle {
+                    language: t.language.clone(),
+                    title: t.title.clone(),
+                    traits: t.traits.iter().map(|v| api_title_trait(v)).collect(),
+                    is_primary: t.is_primary,
+                    note: t.note.clone(),
+                })
+                .collect()
+        }),
+        source: MangaBakaSource {
+            anilist: map_source_field!(series.source.anilist, MangaBakaAniListSource, api_source_id),
+            anime_news_network: map_source_field!(
+                series.source.anime_news_network,
+                MangaBakaAnimeNewsNetworkSource,
+                api_source_id
+            ),
+            anime_planet: map_source_field!(
+                series.source.anime_planet,
+                MangaBakaAnimePlanetSource,
+                api_source_id_string
+            ),
+            kitsu: map_source_field!(series.source.kitsu, MangaBakaKitsuSource, api_source_id),
+            manga_updates: map_source_field!(
+                series.source.manga_updates,
+                MangaBakaMangaUpdatesSource,
+                api_source_id_string
+            ),
+            my_anime_list: map_source_field!(
+                series.source.my_anime_list,
+                MangaBakaMyAnimeListSource,
+                api_source_id
+            ),
+            shikimori: map_source_field!(series.source.shikimori, MangaBakaShikimoriSource, api_source_id),
+        },
+    }
+}
+
+fn map_dpi(dpi: &MangaBakaCoverDpiDto) -> komf_api_models::mangabaka::MangaBakaCoverDpi {
+    komf_api_models::mangabaka::MangaBakaCoverDpi {
+        x1: dpi.x1.clone(),
+        x2: dpi.x2.clone(),
+        x3: dpi.x3.clone(),
+    }
+}
+
+/// `MangaBakaTag.toDto()`：标签目录（GET /series/tags 响应）。
+pub fn to_api_tag(tag: &MangaBakaTagDto) -> komf_api_models::mangabaka::KomfMangaBakaTag {
+    komf_api_models::mangabaka::KomfMangaBakaTag {
+        id: komf_api_models::mangabaka::MangaBakaTagId(tag.id),
+        content_rating: api_content_rating(Some(tag.content_rating)),
+        description: tag.description.clone(),
+        is_spoiler: tag.is_spoiler,
+        level: tag.level,
+        name: tag.name.clone(),
+        name_path: tag.name_path.clone(),
+        parent_id: tag.parent_id.map(komf_api_models::mangabaka::MangaBakaTagId),
+        series_count: tag.series_count,
+        is_genre: tag.is_genre,
+        merged_with: tag.merged_with,
+    }
+}
+
+/// `MangaBakaLinkedSeries.toDto()`：Komga 系列与其 MangaBaka 系列的关联。
+pub fn to_api_linked(linked: &MangaBakaLinkedSeriesDto) -> komf_api_models::mangabaka::KomfMangaBakaLinkedSeries {
+    komf_api_models::mangabaka::KomfMangaBakaLinkedSeries {
+        komga_id: komf_api_models::common::KomfServerSeriesId(linked.komga_id.clone()),
+        manga_baka: to_api_series(&linked.series),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -1524,17 +2729,37 @@ mod tests {
     }
 
     #[test]
+    fn official_link_url_parses_and_encodes() {
+        assert_eq!(
+            official_link_url("https://example.com/a b/日本語?q=1 2#frag ment"),
+            Some(
+                "https://example.com/a%20b/%E6%97%A5%E6%9C%AC%E8%AA%9E?q=1%202#frag%20ment"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            official_link_url("https://example.com/path%20already?a=%41"),
+            Some("https://example.com/path%20already?a=%41".to_string())
+        );
+        assert_eq!(official_link_url("not a url"), None);
+        assert_eq!(
+            official_link_url("https://example.com"),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            official_link_url("https://example.com/"),
+            Some("https://example.com/".to_string())
+        );
+    }
+
+    #[test]
     fn primary_title_selection() {
         let series = MangaBakaSeriesDto {
             id: 1,
             artists: None,
             authors: None,
             canonical_url: "https://mangabaka.org/1".to_string(),
-            cover: MangaBakaCoverDto {
-                x150: None,
-                x250: None,
-                x350: None,
-            },
+            cover: MangaBakaCoverDto::default(),
             description: None,
             final_volume: None,
             publishers: None,
@@ -1544,29 +2769,33 @@ mod tests {
             links_v2: None,
             published: None,
             tags_v2: None,
+            has_anime: false,
+            anime: None,
+            content_rating: None,
+            is_licensed: false,
+            last_updated_at: None,
+            merged_with: None,
+            original_language: None,
+            state: None,
+            total_chapters: None,
+            relationships_v2: None,
             titles: Some(vec![
                 MangaBakaTitleDto {
                     language: "en".to_string(),
                     title: "English Title".to_string(),
                     traits: vec!["romanized".to_string()],
                     is_primary: Some(true),
+                    note: None,
                 },
                 MangaBakaTitleDto {
                     language: "ja".to_string(),
                     title: "日本語".to_string(),
                     traits: vec!["native".to_string()],
                     is_primary: None,
+                    note: None,
                 },
             ]),
-            source: MangaBakaSourceDto {
-                anilist: None,
-                anime_news_network: None,
-                anime_planet: None,
-                kitsu: None,
-                manga_updates: None,
-                my_anime_list: None,
-                shikimori: None,
-            },
+            source: MangaBakaSourceDto::default(),
         };
         assert_eq!(primary_title(&series), "日本語");
     }
@@ -1613,5 +2842,145 @@ mod tests {
             Some("abc")
         );
         assert_eq!(primary_title(&series), "Test");
+    }
+
+    /// 真实 SQLite 回环：komga_series 关联（link/unlink/find/find_all_linked）
+    /// 与 tags 目录（get_all_tags + series_tags 全字段补全）。
+    #[test]
+    fn repository_linking_and_tags_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("komf-mangabaka-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("mangabaka.sqlite");
+
+        let repo = MangaBakaDbRepository::new(db_path.clone());
+        // Repository::open() 触发 ensure komga_series / tags / series_tags。
+        assert!(repo.get_all_tags().unwrap().is_empty());
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE series (
+                id INTEGER PRIMARY KEY,
+                canonical_url TEXT,
+                cover_x350_x1 TEXT,
+                description TEXT,
+                final_volume TEXT,
+                publishers TEXT,
+                rating REAL,
+                status TEXT,
+                type TEXT,
+                links_v2 TEXT,
+                published_start_date TEXT,
+                published_start_date_is_estimated INTEGER,
+                published_end_date TEXT,
+                published_end_date_is_estimated INTEGER,
+                tags_v2 TEXT,
+                titles TEXT,
+                artists TEXT,
+                authors TEXT,
+                has_anime INTEGER,
+                anime_start TEXT,
+                anime_end TEXT,
+                content_rating TEXT,
+                is_licensed INTEGER,
+                last_updated_at TEXT,
+                merged_with INTEGER,
+                original_language TEXT,
+                state TEXT,
+                total_chapters TEXT,
+                relationships_v2 TEXT,
+                cover_raw_url TEXT,
+                cover_raw_size INTEGER,
+                cover_raw_height INTEGER,
+                cover_raw_width INTEGER,
+                cover_raw_blurhash TEXT,
+                cover_raw_thumbhash TEXT,
+                cover_raw_format TEXT,
+                source_anilist_id TEXT,
+                source_anilist_rating REAL,
+                source_anilist_rating_normalized INTEGER,
+                source_anime_news_network_id TEXT,
+                source_anime_news_network_rating REAL,
+                source_anime_news_network_rating_normalized INTEGER,
+                source_anime_planet_id TEXT,
+                source_anime_planet_rating REAL,
+                source_anime_planet_rating_normalized INTEGER,
+                source_kitsu_id TEXT,
+                source_kitsu_rating REAL,
+                source_kitsu_rating_normalized INTEGER,
+                source_manga_updates_id TEXT,
+                source_manga_updates_rating REAL,
+                source_manga_updates_rating_normalized INTEGER,
+                source_my_anime_list_id TEXT,
+                source_my_anime_list_rating REAL,
+                source_my_anime_list_rating_normalized INTEGER,
+                source_shikimori_id TEXT,
+                source_shikimori_rating REAL,
+                source_shikimori_rating_normalized INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO series (id, canonical_url, status, type, titles)
+             VALUES (1, 'https://mangabaka.org/1', 'releasing', 'manga', '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO series (id, canonical_url, status, type, titles)
+             VALUES (2, 'https://mangabaka.org/2', 'completed', 'manga', '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (id, name, name_path, content_rating, is_genre, series_count, level)
+             VALUES (10, 'Action', '/Action', 'safe', 1, 5, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO series_tags (series_id, tag_id, weight, is_explicit)
+             VALUES (1, 10, 'CORE', 0)",
+            [],
+        )
+        .unwrap();
+
+        // link + find（含 series_tags join 补全 tags_v2）
+        repo.link("komga-1", 1).unwrap();
+        let linked = repo.find("komga-1").unwrap().expect("linked series");
+        assert_eq!(linked.komga_id, "komga-1");
+        assert_eq!(linked.series.id, 1);
+        let tags = linked.series.tags_v2.as_ref().expect("series tags");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "Action");
+        assert!(tags[0].is_genre);
+        assert_eq!(tags[0].weight, Some(MangaBakaTagWeightDto::Core));
+
+        // find_all_linked 保持输入顺序、缺 id 跳过
+        let all = repo
+            .find_all_linked(&["komga-1".to_string(), "missing".to_string()])
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].komga_id, "komga-1");
+
+        // 重复 link 先删旧关联
+        repo.link("komga-1", 2).unwrap();
+        let linked = repo.find("komga-1").unwrap().expect("re-linked series");
+        assert_eq!(linked.series.id, 2);
+
+        // unlink
+        repo.unlink("komga-1").unwrap();
+        assert!(repo.find("komga-1").unwrap().is_none());
+
+        // link 不存在的系列 -> 错误
+        assert!(repo.link("komga-x", 999).is_err());
+
+        // tags 目录
+        let tags = repo.get_all_tags().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "Action");
+        assert_eq!(tags[0].content_rating, MangaBakaContentRatingDto::Safe);
+        assert!(tags[0].is_genre);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

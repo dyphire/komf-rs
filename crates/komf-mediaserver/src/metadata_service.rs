@@ -151,7 +151,7 @@ impl MetadataService {
                 if let Some(result) = provider_ref.resolve_link_search_result(&name).await {
                     return vec![result];
                 }
-                match provider_ref.search_series(&name, 5, Some(library_type)).await {
+                match provider_ref.search_series(&name, 20, Some(library_type)).await {
                     Ok(results) => results,
                     Err(error) => {
                         tracing::error!("search failed for provider {}: {}", provider_ref.provider_name(), error);
