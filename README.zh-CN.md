@@ -14,8 +14,9 @@
 - ComicInfo 读写、书籍排序、评分标签、阅读方向覆盖
 - 配置热更新（`PATCH /api/config`）、任务跟踪、元数据搜索/识别/匹配/重置端点
 - 用户脚本兼容的配置界面
-- 内置 WebUI 工作台：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、离线 DB 下载、明暗主题
+- 内置 WebUI 工作台：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi）、离线 DB 下载、明暗主题
 - **MAL / AniList / Bangumi OAuth 登录**：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
+- **阅读进度同步（Tracker，仅 Rust）**：AniList / MyAnimeList / Bangumi 阅读状态同步，含 WebUI 页面与 `/api/tracker/*` 接口——支持标题或平台链接搜索、tracked 标记、状态读取与状态/评分/进度推送
 
 ## 元数据 provider
 
@@ -224,6 +225,26 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 登录后该 provider 的请求以 OAuth bearer token 鉴权（优先于手动 `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`）；token 过期后若有 refresh token 则自动刷新，否则清除登录态并回退匿名请求。WebUI Provider 页显示各平台登录状态并提供登录/退出入口。
 
+### 阅读追踪（Tracker）（`{provider}` = `anilist`、`mal` 或 `bangumi`；需先 OAuth 登录）
+
+三平台阅读进度同步，基于上述 OAuth 登录。
+
+- `GET /api/tracker/{provider}/search?name=...&nsfw=...` —— 搜索平台条目；每条带 `tracked`（是否已在用户列表中）。`nsfw` 缺省 `true`，仅在 `false` 时过滤成人内容。`name` 也支持平台条目链接——`anilist.co/manga/{id}`、`myanimelist.net/manga/{id}`、`bgm.tv`/`bangumi.tv/subject/{id}`——后端直接解析为单条结果。
+- `GET /api/tracker/{provider}/state?trackId=...` —— 当前列表条目（`status`、`score`、已读卷/话、开始/完成日期、总量）；未入列表返回空状态。
+- `POST /api/tracker/{provider}/update` —— 推送状态更新：
+
+```json
+{ "trackId": "70345", "score": 8, "status": "reading", "lastReadChapter": 12, "lastReadVolume": 1, "startReadDate": "2026-09-01", "finishReadDate": null }
+```
+
+`status` 取值为 `reading`（在读）、`planning`（想看）、`completed`（看过）、`paused`（搁置）、`dropped`（抛弃）、`rereading`（重看）；省略该字段表示保持当前状态。
+
+说明：`tracked` 为用户态——AniList 取 `mediaListEntry`、MAL 取 `my_list_status`（详情并发拉取）、Bangumi 拉取用户收藏集合。Bangumi 搜索在 v0 API 失败时兜底旧版 `GET /search/subject/{q}?type=1`（元数据匹配 provider 同样兜底）。AniList 评分跟随账户 `mediaListOptions.scoreFormat`（POINT_10 账户读写 0–10，其余 0–100）。
+
+- `GET /api/tracker/links` —— 本实例已关联条目的本地台账：每次成功 `update` 都会按 `{provider, trackId, title, coverUrl, url, updatedAt}`（最新在前）upsert 进 `<configDir>/oauth.sqlite` 的 `tracker_links` 表。`update` 可附带 `title` / `coverUrl`（不推送平台，仅用于台账展示）。
+
+WebUI Tracker 页中该台账显示在**已关联**下（与搜索结果互斥）；选中条目后状态表单直接在条目下方展开，再次点击可收起。
+
 ### 旧版路由（无 `/api` 前缀，兼容保留）
 
 - `/config`、`/{media-server}/{providers,search,identify,match,reset}`
@@ -252,7 +273,7 @@ cd web && npm install && npm run build # 生成 web/dist
 npm run dev                            # 开发模式（/api 代理到 127.0.0.1:8085）
 ```
 
-它是完整工作台：媒体服务器连接与库列表、12 个 Provider 矩阵（启用/优先级/字段开关、Provider 专属选项）、元数据更新默认策略、按库覆盖（库选择 + Provider 门控、长尾字段如 `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`）、通知模板编辑器（编辑/渲染/发送）、任务（match/reset 触发 + 实时 SSE 事件流）、搜索试跑一键设元数据、离线 DB 下载进度，以及 PATCH 预览（增量语义：缺省=保持、`null`=清空；密码留空=不发送）。UI 跟随系统明暗主题，并支持顶栏手动切换（持久化在 `localStorage`）。后端把 `web/dist`（Docker 内为 `./ui`，可用 `KOMF_WEB_DIR` 覆盖）作为默认路由并 SPA fallback；未构建时纯 API 模式。Release 镜像会自动把 `web/dist` 打进 `/app/ui`。
+它是完整工作台：媒体服务器连接与库列表、12 个 Provider 矩阵（启用/优先级/字段开关、Provider 专属选项）、元数据更新默认策略、按库覆盖（库选择 + Provider 门控、长尾字段如 `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`）、通知模板编辑器（编辑/渲染/发送）、任务（match/reset 触发 + 实时 SSE 事件流）、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi：标题或链接搜索、已关联台账、内联状态编辑）、离线 DB 下载进度，以及 PATCH 预览（增量语义：缺省=保持、`null`=清空；密码留空=不发送）。UI 跟随系统明暗主题，并支持顶栏手动切换（持久化在 `localStorage`）。后端把 `web/dist`（Docker 内为 `./ui`，可用 `KOMF_WEB_DIR` 覆盖）作为默认路由并 SPA fallback；未构建时纯 API 模式。Release 镜像会自动把 `web/dist` 打进 `/app/ui`。
 
 ## 与 Kotlin 版的差异
 

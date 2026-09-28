@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ServerKind, streamJobEvents, updateDb } from './api';
 import { diff, isEmptyPatch } from './diff';
 import { useLang } from './i18n';
 import * as YAML from 'yaml';
 
 const SERVERS: ServerKind[] = ['komga', 'kavita', 'stump'];
-const TABS = ['overview', 'servers', 'providers', 'metadata', 'library', 'notifications', 'jobs', 'patch'] as const;
+const TABS = ['overview', 'servers', 'providers', 'metadata', 'library', 'tracker', 'notifications', 'jobs', 'patch'] as const;
 const SERVER_LABEL: Record<ServerKind, string> = { komga: 'Komga', kavita: 'Kavita', stump: 'Stump' };
 
 // 配置 DTO 中的 Provider key → 展示名 / 提示
@@ -518,6 +518,335 @@ function JobEventsFeed(props: { id: string }) {
   );
 }
 
+
+// ---------------- Tracker（阅读状态同步） ----------------
+
+const TRACKER_PROVIDERS = ['anilist', 'mal', 'bangumi'];
+const TRACKER_STATUSES = ['', 'reading', 'planning', 'completed', 'paused', 'dropped', 'rereading'];
+const TRACKER_STATUS_LABEL: Record<string, string> = {
+  reading: 'Reading', planning: 'Planning', completed: 'Completed',
+  paused: 'Paused', dropped: 'Dropped', rereading: 'Rereading',
+};
+const TRACKER_PROVIDER_LABEL: Record<string, string> = { anilist: 'AniList', mal: 'MyAnimeList', bangumi: 'Bangumi' };
+
+function TrackerPage() {
+  const { t } = useLang();
+  const [provider, setProvider] = useState('anilist');
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [query, setQuery] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState<any[] | null>(null);
+  const [err, setErr] = useState('');
+  const [trackId, setTrackId] = useState('');
+  const [state, setState] = useState<any | null>(null);
+  const [stateBusy, setStateBusy] = useState(false);
+  const [score, setScore] = useState('');
+  const [status, setStatus] = useState('');
+  const [chapter, setChapter] = useState('');
+  const [volume, setVolume] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [finishDate, setFinishDate] = useState('');
+  const [saved, setSaved] = useState('');
+  const [nsfw, setNsfw] = useState(true);
+  const [links, setLinks] = useState<any[] | null>(null);
+  const [linksBusy, setLinksBusy] = useState(false);
+  const [pickedTitle, setPickedTitle] = useState('');
+  const [pickedCover, setPickedCover] = useState('');
+  const [loginLost, setLoginLost] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api.oauthStatus(provider).then((s) => {
+      if (!alive) return;
+      setLoggedIn(s.logged_in);
+      if (!s.logged_in) { setResults(null); setState(null); }
+    });
+    return () => { alive = false; };
+  }, [provider]);
+
+  // 401 (token lost) -> also flag login lost for a re-sign-in banner.
+  function fail(e: any) {
+    const msg = String(e?.message ?? e);
+    setErr(msg);
+    if (/^401\b/.test(msg)) setLoginLost(true);
+  }
+
+  async function doSearch() {
+    setBusy(true); setErr(''); setResults(null); setLinks(null); setState(null); setSaved('');
+    try {
+      // 链接输入由 tracker 后端识别（搜索接口直接返回单条目）。
+      const res = await fetch(`/api/tracker/${provider}/search?name=${encodeURIComponent(query)}&nsfw=${nsfw}`);
+      if (!res.ok) {
+        const b = await res.text().catch(() => '');
+        throw new Error(`${res.status}: ${b.slice(0, 200)}`);
+      }
+      const list = await res.json();
+      setResults(list);
+      // 输入是平台链接时后端返回单条，自动选中进入状态表单。
+      if (/^https?:\/\//i.test(query.trim()) && Array.isArray(list) && list.length === 1) {
+        pick(list[0]);
+      }
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function pick(r: any) {
+    if (trackId === r.id) { setTrackId(''); return; } // 再次点击同一条目：收起
+    setTrackId(r.id);
+    setPickedTitle(r.title ?? '');
+    setPickedCover(r.coverUrl ?? '');
+    setSaved('');
+    loadState(r.id);
+  }
+
+  async function loadLinks() {
+    setLinksBusy(true); setErr(''); setResults(null);
+    try {
+      const res = await fetch('/api/tracker/links');
+      if (!res.ok) {
+        const b = await res.text().catch(() => '');
+        throw new Error(`${res.status}: ${b.slice(0, 200)}`);
+      }
+      setLinks(await res.json());
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setLinksBusy(false);
+    }
+  }
+
+  function openLink(l: any) {
+    if (trackId === l.trackId) { setTrackId(''); return; } // 再次点击同一条目：收起
+    setProvider(l.provider);
+    setTrackId(l.trackId);
+    setPickedTitle(l.title ?? '');
+    setPickedCover(l.coverUrl ?? '');
+    setSaved('');
+    setResults(null);
+    loadState(l.trackId, l.provider);
+  }
+
+  async function loadState(id: string, p?: string) {
+    setStateBusy(true); setErr('');
+    const prov = p ?? provider;
+    try {
+      const res = await fetch(`/api/tracker/${prov}/state?trackId=${encodeURIComponent(id)}`);
+      if (!res.ok) {
+        const b = await res.text().catch(() => '');
+        throw new Error(`${res.status}: ${b.slice(0, 200)}`);
+      }
+      const st = await res.json();
+      setState(st);
+      setScore(st.score ?? '');
+      setStatus(st.status ?? '');
+      setChapter(st.lastReadChapter ?? '');
+      setVolume(st.lastReadVolume ?? '');
+      setStartDate(st.startReadDate ?? '');
+      setFinishDate(st.finishReadDate ?? '');
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setStateBusy(false);
+    }
+  }
+
+  async function pushUpdate() {
+    setBusy(true); setErr(''); setSaved('');
+    const body: any = { trackId };
+    if (pickedTitle) body.title = pickedTitle;
+    if (pickedCover) body.coverUrl = pickedCover;
+    if (status) body.status = status;
+    if (score !== '') body.score = Number(score);
+    if (chapter !== '') body.lastReadChapter = Number(chapter);
+    if (volume !== '') body.lastReadVolume = Number(volume);
+    if (startDate) body.startReadDate = startDate;
+    if (finishDate) body.finishReadDate = finishDate;
+    try {
+      const res = await fetch(`/api/tracker/${provider}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const b = await res.text().catch(() => '');
+        throw new Error(`${res.status}: ${b.slice(0, 200)}`);
+      }
+      setSaved(t('tr.pushed'));
+      loadState(trackId);
+    } catch (e: any) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function renderStatePanel() {
+    return (
+      <div className="card" style={{ marginTop: 8, marginBottom: 8 }}>
+        <h3>{t('tr.selected', { id: trackId })}</h3>
+        <p className="desc">
+          {stateBusy ? t('tr.stateLoading') : t('tr.scoreHint')}
+        </p>
+        {state && !stateBusy ? (
+          state.status || state.score != null || state.lastReadChapter != null || state.lastReadVolume != null || state.startReadDate || state.finishReadDate ? (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <span className="badge">{t('tr.state')}: {state.status ? TRACKER_STATUS_LABEL[state.status] ?? state.status : '-'}</span>
+              <span className="badge">{t('tr.score')}: {state.score ?? '-'}</span>
+              <span className="badge">{t('tr.chapter')}: {state.lastReadChapter ?? '-'}{state.totalChapters ? ` / ${state.totalChapters}` : ''}</span>
+              <span className="badge">{t('tr.volume')}: {state.lastReadVolume ?? '-'}{state.totalVolumes ? ` / ${state.totalVolumes}` : ''}</span>
+            </div>
+          ) : (
+            <div className="toast ok">{t('tr.noEntry')}</div>
+          )
+        ) : null}
+        <div className="grid" style={{ marginTop: 8 }}>
+          <div className="fld">
+            <label>{t('tr.status')}</label>
+            <select value={status} onChange={(e) => setStatus(e.target.value)}>
+              {TRACKER_STATUSES.map((s) => <option key={s} value={s}>{s ? TRACKER_STATUS_LABEL[s] : t('keep')}</option>)}
+            </select>
+          </div>
+          <div className="fld">
+            <label>{t('tr.score')}</label>
+            <input type="number" value={score} onChange={(e) => setScore(e.target.value)} placeholder="0" />
+          </div>
+          <div className="fld">
+            <label>{t('tr.chapter')}</label>
+            <input type="number" value={chapter} onChange={(e) => setChapter(e.target.value)} placeholder="0" />
+          </div>
+          <div className="fld">
+            <label>{t('tr.volume')}</label>
+            <input type="number" value={volume} onChange={(e) => setVolume(e.target.value)} placeholder="0" />
+          </div>
+          <div className="fld">
+            <label>{t('tr.startDate')}</label>
+            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </div>
+          <div className="fld">
+            <label>{t('tr.finishDate')}</label>
+            <input type="date" value={finishDate} onChange={(e) => setFinishDate(e.target.value)} />
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="btn primary" disabled={busy} onClick={pushUpdate}>{busy ? t('searching') : t('tr.push')}</button>
+          <button className="btn" disabled={stateBusy} onClick={() => loadState(trackId)}>{t('refresh')}</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="card">
+        <h2>{t('tr.title')}</h2>
+        <p className="desc">{t('tr.desc')}</p>
+        <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <select value={provider} onChange={(e) => { setProvider(e.target.value); setTrackId(''); setLoginLost(false); }}>
+            {TRACKER_PROVIDERS.map((p) => <option key={p} value={p}>{TRACKER_PROVIDER_LABEL[p]}</option>)}
+          </select>
+          {loggedIn ? (
+            <span className="badge" style={{ color: 'var(--ok)' }}>{t('tr.loggedIn')}</span>
+          ) : (
+            <span className="badge">{t('tr.notLoggedIn')}</span>
+          )}
+          <a className="btn" href={`/api/oauth/${provider}/start`} onClick={() => setTrackId('')}>{t('oauth.login')}</a>
+          <button className="btn" onClick={loadLinks} disabled={linksBusy}>{linksBusy ? t('searching') : t('tr.links')}</button>
+        </div>
+        {loggedIn && (
+          <div className="row" style={{ marginTop: 8 }}>
+            <input style={{ flex: 1 }} value={query} placeholder={t('tr.phQuery')} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && doSearch()} />
+            <label className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, whiteSpace: 'nowrap' }}>
+              <input type="checkbox" checked={nsfw} onChange={(e) => setNsfw(e.target.checked)} />
+              {t('tr.nsfw')}
+            </label>
+            <button className="btn primary" disabled={busy || !query.trim()} onClick={doSearch}>{busy ? t('searching') : t('tr.search')}</button>
+          </div>
+        )}
+      </div>
+
+      {loginLost && (
+        <div className="toast err" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span>{t('tr.loginLost')}</span>
+          <a className="btn" href={`/api/oauth/${provider}/start`} onClick={() => setLoginLost(false)}>{t('tr.relogin')}</a>
+        </div>
+      )}
+      {err ? <div className="toast err">{err}</div> : null}
+      {saved ? <div className="toast ok">{saved}</div> : null}
+
+      {links && (
+        <div className="card" style={{ marginTop: 10 }}>
+          <p className="desc">{t('tr.linksDesc')}</p>
+          {links.length === 0 ? <div className="toast ok">{t('tr.linksEmpty')}</div> : null}
+          {links.map((l, i) => (
+            <Fragment key={i}>
+              <div className="search-hit" style={{ cursor: 'pointer' }} onClick={() => openLink(l)}>
+                {l.coverUrl ? (
+                  <img
+                    key={`${l.provider}-${l.trackId}-${l.coverUrl}`}
+                    src={`/api/cover/redirect?url=${encodeURIComponent(l.coverUrl)}`}
+                    className="hit-cover"
+                    alt=""
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
+                ) : (
+                  <div className="hit-cover empty" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>
+                    {TRACKER_PROVIDER_LABEL[l.provider] ?? l.provider}
+                  </div>
+                )}
+                <div className="hit-body">
+                  <b>{l.title ?? l.trackId}</b>
+                  <div className="row">
+                    <span className="badge">{l.provider}</span>
+                    {l.url ? <a href={l.url} target="_blank" rel="noreferrer">{t('source')}</a> : null}
+                    <span className="muted" style={{ fontSize: 12 }}>{l.updatedAt ? new Date(l.updatedAt * 1000).toLocaleString() : ''}</span>
+                  </div>
+                </div>
+                <span className="btn">{t('tr.pick')}</span>
+              </div>
+              {l.trackId === trackId && renderStatePanel()}
+            </Fragment>
+          ))}
+        </div>
+      )}
+
+      {results && (
+        <div className="card" style={{ marginTop: 10 }}>
+          <p className="desc">{t('tr.results', { n: results.length })}</p>
+          {results.length === 0 ? <div className="toast ok">{t('noResults')}</div> : null}
+          {results.map((r, i) => (
+            <Fragment key={i}>
+              <div className="search-hit">
+                {r.coverUrl ? (
+                  <img
+                    key={`${r.id}-${r.coverUrl}`}
+                    src={`/api/cover/redirect?url=${encodeURIComponent(r.coverUrl)}`}
+                    className="hit-cover"
+                    alt=""
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
+                ) : <div className="hit-cover empty" />}
+                <div className="hit-body">
+                  <b>{r.title}</b>
+                  <div className="row">
+                    {r.tracked ? <span className="badge">{t('tr.tracked')}</span> : null}
+                    {r.url ? <a href={r.url} target="_blank" rel="noreferrer">{t('source')}</a> : null}
+                  </div>
+                  {r.description ? <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>{r.description.slice(0, 200)}{r.description.length > 200 ? '…' : ''}</p> : null}
+                </div>
+                <button className="btn" onClick={() => pick(r)}>{t('tr.pick')}</button>
+              </div>
+              {r.id === trackId && renderStatePanel()}
+            </Fragment>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 // ---------------- 主应用 ----------------
 
 export default function App() {
@@ -882,6 +1211,7 @@ export default function App() {
         ))}
       </div>
       <div className="main">
+        {tab === 'tracker' && <TrackerPage />}
         {tab === 'overview' && (
           <>
             <div className="card">

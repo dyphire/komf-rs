@@ -122,7 +122,7 @@ pub struct AniListTitle {
     pub romaji: Option<String>,
     pub english: Option<String>,
     pub native: Option<String>,
-    /// 账号显示语言偏好下的标题（Aidoku 同款选择）；匿名请求默认 romaji。
+    /// 账号显示语言偏好下的标题；匿名请求默认 romaji。
     #[serde(default)]
     pub user_preferred: Option<String>,
 }
@@ -361,7 +361,7 @@ impl AniListMetadataMapper {
         let cfg = &self.metadata_config;
 
         // Kotlin: english(LOCALIZED/en) 在前，romaji(ROMAJI/ja-ro) 次之，native(NATIVE/ja) 最后。
-        // userPreferred（Aidoku 同款）：仅 OAuth 登录后生效——命中的语言版本提到主标题位
+        // userPreferred：仅 OAuth 登录后生效——命中的语言版本提到主标题位
         // （语言元数据保持不变，后处理 seriesTitleLanguage / 备选标题排序不受影响）；
         // 未登录 / 未命中保持原顺序（原有行为）。
         let mut titles: Vec<SeriesTitle> = Vec::new();
@@ -488,7 +488,7 @@ impl AniListMetadataMapper {
     }
 
     pub fn to_series_search_result(&self, media: &AniListMedia) -> SeriesSearchResult {
-        // Kotlin: title = english ?: romaji ?: native；userPreferred（Aidoku 同款）仅在
+        // title = english ?: romaji ?: native；userPreferred 仅在
         // OAuth 登录后优先（未登录保持原有 english 优先行为）。仅用于搜索结果显示，
         // 不影响匹配（匹配仍基于全量语言标题）。
         let title = if self.prefer_user_preferred() {
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(out.metadata.titles.len(), 3);
     }
 
-    /// userPreferred（Aidoku 同款）：仅 OAuth 登录后生效。未登录（匿名）时即使返回了
+    /// userPreferred：仅 OAuth 登录后生效。未登录（匿名）时即使返回了
     /// userPreferred，主标题/搜索显示也保持原有 english 优先行为。
     #[test]
     fn anonymous_keeps_english_first_even_with_user_preferred() {

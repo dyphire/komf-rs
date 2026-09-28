@@ -14,8 +14,9 @@ This is the **Rust implementation** of [komf](https://github.com/Snd-R/komf), a 
 - ComicInfo reading/writing, book ordering, score tags, reading direction override
 - Config hot-reload (`PATCH /api/config`), job tracking, metadata search/identify/match/reset endpoints
 - userscript compatible configuration UI
-- Built-in WebUI workbench: 12-provider matrix, per-library overrides, notification template editor, jobs with live SSE progress, search trial with one-click identify, offline DB download, light/dark theme
+- Built-in WebUI workbench: 12-provider matrix, per-library overrides, notification template editor, jobs with live SSE progress, search trial with one-click identify, tracker page (AniList / MAL / Bangumi reading-status sync), offline DB download, light/dark theme
 - **OAuth login for MAL / AniList / Bangumi**: server-side OAuth2 with a shared client + official relay page — no per-instance callback registration needed; login/logout/status in the Providers page, token auto-refresh and SQLite persistence
+- **Reading-list tracker sync** (Rust-only): AniList / MyAnimeList / Bangumi reading-status sync with a WebUI page and `/api/tracker/*` endpoints — search by title or platform link, `tracked` marking, state read and status/score/progress push
 
 ## Metadata providers
 
@@ -224,6 +225,27 @@ Server-side OAuth2 login for metadata providers, using a **shared client + offic
 
 Once logged in, the provider requests are authenticated with the OAuth bearer token (takes precedence over the manual `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID` options); expired tokens are auto-refreshed when a refresh token exists, otherwise the login is cleared and the provider falls back to anonymous. The WebUI Providers page shows login status and offers login/logout per provider.
 
+### Tracker (`{provider}` = `anilist`, `mal` or `bangumi`; requires OAuth login)
+
+Reading-list sync for the three platforms, backed by the OAuth login above.
+
+- `GET /api/tracker/{provider}/search?name=...&nsfw=...` — search the platform; each item carries `tracked` (whether it is already in the user's list). `nsfw` defaults to `true` and is filtered only when `false`. `name` may also be a platform entry link — `anilist.co/manga/{id}`, `myanimelist.net/manga/{id}`, `bgm.tv`/`bangumi.tv`/`subject/{id}` — with or without a scheme; the backend resolves it directly to the single item.
+- `GET /api/tracker/{provider}/state?trackId=...` — the current list entry (`status`, `score`, chapters/volumes read, start/finish dates, totals); not in the list returns an empty state (Bangumi maps the "not collected" `404` to an empty state).
+- `POST /api/tracker/{provider}/update` — push a state update:
+
+```json
+{ "trackId": "70345", "score": 8, "status": "reading", "lastReadChapter": 12, "lastReadVolume": 1, "startReadDate": "2026-09-01", "finishReadDate": null }
+```
+
+`status` is one of `reading`, `planning`, `completed`, `paused`, `dropped`, `rereading`; omit the field to keep the current value.
+
+Notes: `tracked` is user-scoped — AniList via `mediaListEntry`, MAL via `my_list_status` (details fetched concurrently), Bangumi via the user's collection list. Bangumi search falls back to the legacy `GET /search/subject/{q}?type=1` when the v0 API fails (the metadata matching provider has the same fallback). AniList scores follow the account's `mediaListOptions.scoreFormat` (POINT_10 accounts read/write 0–10; other formats 0–100).
+
+- `GET /api/tracker/links` — the local ledger of items linked through this komf instance: every successful `update` upserts `{provider, trackId, title, coverUrl, url, updatedAt}` (newest first) into the `tracker_links` table in `<configDir>/oauth.sqlite`. `update` accepts optional `title` / `coverUrl` fields that are not sent to the platform but are stored for this list.
+
+In the WebUI Tracker page, the ledger is shown under **Linked** (mutually exclusive with search results); picking an item expands the state form inline under it, and clicking it again collapses it.
+
+
 ### Legacy (no `/api` prefix, kept for compatibility)
 
 - `/config`, `/{media-server}/{providers,search,identify,match,reset}`
@@ -252,7 +274,7 @@ cd web && npm install && npm run build # outputs web/dist
 npm run dev                            # dev mode (proxies /api to 127.0.0.1:8085)
 ```
 
-It is a full workbench: media-server connections and libraries, the 12-provider matrix (enable/priority/per-field toggles, provider-specific options), metadata-update defaults, per-library overrides (library selector with provider gates, long-tail fields such as `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`), notification template editor (edit/render/send), jobs with match/reset triggers and a live SSE event stream, a search trial with one-click identify, offline DB download with progress, and a PATCH preview (incremental semantics: omitted = keep, `null` = clear; empty passwords are not sent). The UI follows the system light/dark theme with a manual override (topbar toggle, persisted in `localStorage`). The backend serves `web/dist` (or `./ui` in Docker, overridable via `KOMF_WEB_DIR`) as the default route with SPA fallback; without a build the service runs API-only. Release Docker images build `web/dist` into `/app/ui` automatically.
+It is a full workbench: media-server connections and libraries, the 12-provider matrix (enable/priority/per-field toggles, provider-specific options), metadata-update defaults, per-library overrides (library selector with provider gates, long-tail fields such as `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`), notification template editor (edit/render/send), jobs with match/reset triggers and a live SSE event stream, a search trial with one-click identify, a tracker page (AniList / MAL / Bangumi reading-status sync: search by title or link, linked-item ledger, inline state editing), offline DB download with progress, and a PATCH preview (incremental semantics: omitted = keep, `null` = clear; empty passwords are not sent). The UI follows the system light/dark theme with a manual override (topbar toggle, persisted in `localStorage`). The backend serves `web/dist` (or `./ui` in Docker, overridable via `KOMF_WEB_DIR`) as the default route with SPA fallback; without a build the service runs API-only. Release Docker images build `web/dist` into `/app/ui` automatically.
 
 ## Differences from the Kotlin version
 

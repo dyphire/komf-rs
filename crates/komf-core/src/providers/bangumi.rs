@@ -17,7 +17,12 @@ const BASE_URL: &str = "https://api.bgm.tv";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BangumiSearchResponse {
+    /// v0 API 字段。
+    #[serde(default)]
     pub data: Vec<BangumiSubject>,
+    /// 旧 API 字段（fallback 搜索结果）。
+    #[serde(default)]
+    pub list: Vec<BangumiSubject>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,8 +146,16 @@ impl BangumiClient {
         name: &str,
         _limit: u32,
     ) -> Result<Vec<BangumiSubject>, ProviderError> {
-        // POST /v0/search/subjects，JSON body
-        // { "keyword": ..., "sort": "match", "filter": { "type": [1], "nsfw": true } }
+        match self.search_v0(name).await {
+            Ok(subjects) => Ok(subjects),
+            // v0 失败时兜底旧 API（公开搜索接口，无鉴权）。
+            Err(_v0_err) => self.search_legacy(name).await,
+        }
+    }
+
+    /// v0 搜索：POST /v0/search/subjects，JSON body
+    /// { "keyword": ..., "sort": "match", "filter": { "type": [1], "nsfw": true } }
+    async fn search_v0(&self, name: &str) -> Result<Vec<BangumiSubject>, ProviderError> {
         let body = serde_json::json!({
             "keyword": name,
             "sort": "match",
@@ -161,6 +174,35 @@ impl BangumiClient {
         }
         let body: BangumiSearchResponse = response.json().await?;
         Ok(body.data)
+    }
+
+    /// 旧 API 兜底：GET /search/subject/{name}?type=1（公开，无鉴权；响应字段为 list）。
+    async fn search_legacy(&self, name: &str) -> Result<Vec<BangumiSubject>, ProviderError> {
+        let encoded: String = name
+            .as_bytes()
+            .iter()
+            .map(|b| {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        (*b as char).to_string()
+                    }
+                    _ => format!("%{b:02X}"),
+                }
+            })
+            .collect();
+        let response = self
+            .http
+            .get(format!("{BASE_URL}/search/subject/{encoded}?type=1"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::Status(CoreProviders::Bangumi, status, body));
+        }
+        let body: BangumiSearchResponse = response.json().await?;
+        Ok(body.list)
     }
 
     pub async fn get(&self, id: u64) -> Result<BangumiSubject, ProviderError> {
@@ -2941,6 +2983,20 @@ mod tests {
         assert_eq!(subject.name, "ONE PIECE");
         assert_eq!(subject.name_cn.as_deref(), Some("海贼王"));
         assert_eq!(subject.tags.len(), 1);
+        assert_eq!(subject.subject_type, Some(1));
+    }
+
+    /// 旧 API 搜索响应（2026-09 抓取）：`list` 字段（非 v0 的 `data`）。
+    #[test]
+    fn search_response_parses_list_field() {
+        let json = r#"{"results":608,"list":[{"id":3510,"name":"ONE PIECE","name_cn":"海贼王","summary":"拥有财富、名声、权力……","image":"https://lain.bgm.tv/pic/cover/l/2f/37/3510_1j4W8.jpg","tags":[{"name":"热血","count":1234}],"type":1}]}"#;
+        let response: BangumiSearchResponse = serde_json::from_str(json).unwrap();
+        assert!(response.data.is_empty());
+        assert_eq!(response.list.len(), 1);
+        let subject = &response.list[0];
+        assert_eq!(subject.id, 3510);
+        assert_eq!(subject.name, "ONE PIECE");
+        assert_eq!(subject.name_cn.as_deref(), Some("海贼王"));
         assert_eq!(subject.subject_type, Some(1));
     }
 

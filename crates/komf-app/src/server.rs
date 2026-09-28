@@ -1,7 +1,7 @@
 //! HTTP 服务模块 —— 对应 `ServerModule.kt`。
 use crate::routes::{
     config_routes, cover_routes, deprecated, job_routes, mangabaka_routes, media_server_routes, metadata_routes,
-    notification_routes, oauth_routes, web_auth, ServerKind, SharedState,
+    notification_routes, oauth_routes, tracker_routes, web_auth, ServerKind, SharedState,
 };
 use axum::http::HeaderValue;
 use axum::routing::get;
@@ -92,6 +92,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(notification_routes::router())
         .merge(mangabaka_routes::router())
         .merge(oauth_routes::router())
+        .merge(tracker_routes::router())
         .merge(cover_routes::router())
         .nest(
             "/komga",
@@ -136,15 +137,15 @@ pub fn build_router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-/// 对应 Kotlin `DefaultHeaders`：COEP/COOP 头，并附带版本头方便检查健康度。
+/// 对应 Kotlin `DefaultHeaders`：COOP 头，并附带版本头方便检查健康度。
+/// 注意：不发送 `Cross-Origin-Embedder-Policy: require-corp`——它会把跨源
+/// 封面图片（`<img>`，含 `/api/cover/redirect` 的 302 目标）全部拦截
+/// （ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep）。
 async fn default_headers(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let mut response = next.run(request).await;
-    if let Ok(value) = HeaderValue::from_str("require-corp") {
-        response.headers_mut().insert("Cross-Origin-Embedder-Policy", value);
-    }
     if let Ok(value) = HeaderValue::from_str("same-origin") {
         response.headers_mut().insert("Cross-Origin-Opener-Policy", value);
     }
