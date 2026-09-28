@@ -27,6 +27,7 @@ async fn main() {
                 ..Default::default()
             },
             archive: BangumiArchiveConfig::default(),
+            series_title_language: None,
         },
         matcher,
         None,

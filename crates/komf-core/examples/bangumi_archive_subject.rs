@@ -87,6 +87,7 @@ async fn main() {
                 update_interval_hours: 0,
                 idle_release_secs: None,
             },
+            series_title_language: None,
         },
         matcher,
         None,

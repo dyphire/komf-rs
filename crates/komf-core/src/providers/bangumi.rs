@@ -246,6 +246,8 @@ pub struct BangumiMetadataMapper {
     /// 简繁归一化判重（t2s/s2t 双向；none 时退化为精确判重）
     chinese_t2s: ChineseConverter,
     chinese_s2t: ChineseConverter,
+    /// seriesTitleLanguage 联动：非中文时作者/出版社不查 name_cn（用原名）
+    use_chinese_names: bool,
 }
 
 impl BangumiMetadataMapper {
@@ -255,6 +257,25 @@ impl BangumiMetadataMapper {
         author_roles: Vec<AuthorRole>,
         artist_roles: Vec<AuthorRole>,
         tag_whitelist: Vec<String>,
+    ) -> Self {
+        Self::with_chinese_names(
+            series_metadata_config,
+            book_metadata_config,
+            author_roles,
+            artist_roles,
+            tag_whitelist,
+            true,
+        )
+    }
+
+    /// 指定是否查 name_cn（seriesTitleLanguage 联动；create_provider 按配置传入）
+    pub fn with_chinese_names(
+        series_metadata_config: crate::config::SeriesMetadataConfig,
+        book_metadata_config: crate::config::BookMetadataConfig,
+        author_roles: Vec<AuthorRole>,
+        artist_roles: Vec<AuthorRole>,
+        tag_whitelist: Vec<String>,
+        use_chinese_names: bool,
     ) -> Self {
         Self {
             series_metadata_config,
@@ -266,6 +287,7 @@ impl BangumiMetadataMapper {
                 .unwrap_or_else(|_| ChineseConverter::none()),
             chinese_s2t: ChineseConverter::new(ChineseDirection::S2t)
                 .unwrap_or_else(|_| ChineseConverter::none()),
+            use_chinese_names,
         }
     }
 
@@ -444,7 +466,13 @@ impl BangumiMetadataMapper {
             .flatten();
 
         let authors = if cfg.authors {
-            resolve_authors(subject, persons, &self.author_roles, &self.artist_roles)
+            resolve_authors(
+                subject,
+                persons,
+                &self.author_roles,
+                &self.artist_roles,
+                self.use_chinese_names,
+            )
         } else {
             Vec::new()
         };
@@ -454,7 +482,7 @@ impl BangumiMetadataMapper {
         // name 采用 name_cn 优先。在线（persons 空）保持 infobox 解析现状。
         let (publisher, alternative_publishers): (Option<Publisher>, Vec<Publisher>) =
             if cfg.publisher {
-                resolve_publishers(subject, persons)
+                resolve_publishers(subject, persons, self.use_chinese_names)
             } else {
                 (None, Vec::new())
             };
@@ -633,7 +661,13 @@ impl BangumiMetadataMapper {
                 .map(|n| n.start),
             release_date: cfg.release_date.then_some(release_date.clone()).flatten(),
             authors: if cfg.authors {
-                resolve_authors(book, persons, &self.author_roles, &self.artist_roles)
+                resolve_authors(
+                    book,
+                    persons,
+                    &self.author_roles,
+                    &self.artist_roles,
+                    self.use_chinese_names,
+                )
             } else {
                 Vec::new()
             },
@@ -1362,7 +1396,7 @@ fn offline_person_authors_and_publishers() {
         appear_eps: String::new(),
         aliases: Vec::new(),
     };
-    assert_eq!(person_display_name(&p_no_cn), "週刊少年ジャンプ");
+    assert_eq!(person_display_name(&p_no_cn, true), "週刊少年ジャンプ");
     // 连载杂志（2005）不产生 person 作者；persons 无作者类关联时回退 infobox「作者」解析
     let md2 = mapper.to_series_metadata_persons(&subject, &[], None, &[p_no_cn]);
     assert_eq!(
@@ -1386,6 +1420,70 @@ fn offline_person_authors_and_publishers() {
     assert!(md4.metadata.publisher.is_none());
     assert!(md4.metadata.alternative_publishers.is_empty());
 }
+
+    /// seriesTitleLanguage 非中文（None/ja/en）→ 作者/出版社不查 name_cn（用原名）；
+    /// 中文（zh*）→ 查 name_cn。产品默认（None）为原名。
+    #[test]
+    fn offline_persons_original_names_when_language_not_chinese() {
+        let subject: BangumiSubject = serde_json::from_str(
+            r#"{"id":9,"name":"Z","name_cn":null,"summary":null,"tags":[],"infobox":[{"key":"出版社","value":"尖端出版"}]}"#,
+        )
+        .unwrap();
+        let persons = vec![
+            PersonInfo {
+                person_id: 10,
+                name: "尖端出版".to_string(),
+                name_cn: Some("台湾尖端".to_string()),
+                person_type: Some(2),
+                career: Vec::new(),
+                position: Some(2004),
+                appear_eps: String::new(),
+                aliases: Vec::new(),
+            },
+            PersonInfo {
+                person_id: 11,
+                name: "藤本タツキ".to_string(),
+                name_cn: Some("藤本树".to_string()),
+                person_type: Some(1),
+                career: vec!["mangaka".to_string()],
+                position: Some(2001),
+                appear_eps: String::new(),
+                aliases: Vec::new(),
+            },
+        ];
+        let cfg = crate::config::SeriesMetadataConfig::default();
+        let book = crate::config::BookMetadataConfig::default();
+        // 非中文（默认 None）→ 原名
+        let mapper_off = BangumiMetadataMapper::with_chinese_names(
+            cfg.clone(),
+            book.clone(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            Vec::new(),
+            false,
+        );
+        let md_off = mapper_off.to_series_metadata_persons(&subject, &[], None, &persons);
+        assert_eq!(md_off.metadata.authors[0].name, "藤本タツキ");
+        assert_eq!(
+            md_off.metadata.publisher.as_ref().map(|p| p.name.as_str()),
+            Some("尖端出版")
+        );
+        // 中文（zh*）→ name_cn
+        let mapper_cn = BangumiMetadataMapper::with_chinese_names(
+            cfg,
+            book,
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            Vec::new(),
+            true,
+        );
+        let md_cn = mapper_cn.to_series_metadata_persons(&subject, &[], None, &persons);
+        assert_eq!(md_cn.metadata.authors[0].name, "藤本树");
+        assert_eq!(
+            md_cn.metadata.publisher.as_ref().map(|p| p.name.as_str()),
+            Some("台湾尖端")
+        );
+    }
 
 /// 评分标签：score 配置开启且评分>0 时追加 "score:N"（Math.round）
 #[test]
@@ -1496,32 +1594,38 @@ fn media_type_platform(media_type: crate::model::MediaType) -> Option<&'static s
 }
 
 
-/// person 显示名：name_cn 优先（非空），否则日文原名。
-fn person_display_name(p: &PersonInfo) -> String {
-    p.name_cn
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&p.name)
-        .to_string()
+/// person 显示名：use_chinese_names 时 name_cn 优先（非空），否则日文原名。
+fn person_display_name(p: &PersonInfo, use_chinese_names: bool) -> String {
+    if use_chinese_names {
+        if let Some(cn) = p.name_cn.as_deref().filter(|s| !s.is_empty()) {
+            return cn.to_string();
+        }
+    }
+    p.name.clone()
 }
 
 /// 出版社显示名：persons 中按 name 或 name_cn 匹配时用 name_cn 优先（离线扩展），
 /// 未匹配保持原名（对齐 Kotlin infobox 出版社原文）。
-fn publisher_display_name(persons: &[PersonInfo], name: &str) -> String {
+fn publisher_display_name(
+    persons: &[PersonInfo],
+    name: &str,
+    use_chinese_names: bool,
+) -> String {
     for p in persons.iter().filter(|p| p.position == Some(2004)) {
         if p.name == name || p.name_cn.as_deref() == Some(name) {
-            return person_display_name(p);
+            return person_display_name(p, use_chinese_names);
         }
     }
     name.to_string()
 }
 
 /// 出版社解析（series）：infobox「出版社/其他出版社」优先（Kotlin 语义）；
-/// persons position=2004 出版社实体仅做 name_cn 映射（publisher_display_name），
-/// 不做 persons 兜底——infobox 无「出版社」键时 publisher 为空。
+/// persons position=2004 出版社实体做可选 name_cn 映射（publisher_display_name，
+/// use_chinese_names 时 name_cn 优先），不做 persons 兜底——infobox 无「出版社」键时 publisher 为空。
 fn resolve_publishers(
     subject: &BangumiSubject,
     persons: &[PersonInfo],
+    use_chinese_names: bool,
 ) -> (Option<Publisher>, Vec<Publisher>) {
     // infobox 解析：「出版社」→ ORIGINAL +「其他出版社」→ LOCALIZED，
     // 名称过 publisher_display_name（persons 匹配时 name_cn 优先，未匹配保持原文）
@@ -1541,7 +1645,7 @@ fn resolve_publishers(
                 let name = name.trim();
                 if !name.is_empty() {
                     target.push(Publisher {
-                        name: publisher_display_name(persons, name),
+                        name: publisher_display_name(persons, name, use_chinese_names),
                         r#type: Some(kind),
                         language_tag: None,
                     });
@@ -1584,11 +1688,12 @@ fn info_box_get<'a>(
 
 /// 离线作者（persons 路径）：position 角色映射对齐 infobox 语义，
 /// 2001（作者）→ author_roles + artist_roles；2007（原作）→ author_roles；
-/// 2002（作画/人物原案/人物设定）→ artist_roles；name 用 name_cn 优先。
+/// 2002（作画/人物原案/人物设定）→ artist_roles；name 在 use_chinese_names 时 name_cn 优先。
 fn offline_person_authors(
     persons: &[PersonInfo],
     author_roles: &[AuthorRole],
     artist_roles: &[AuthorRole],
+    use_chinese_names: bool,
 ) -> Vec<Author> {
     let mut out: Vec<Author> = Vec::new();
     for p in persons {
@@ -1605,7 +1710,7 @@ fn offline_person_authors(
             Some(2009) => artist_roles.to_vec(), // 插画/画师（样例均为画师/插画家）
             _ => continue,
         };
-        let name = person_display_name(p);
+        let name = person_display_name(p, use_chinese_names);
         for role in roles {
             if !out.iter().any(|a: &Author| a.name == name && a.role == role) {
                 out.push(Author {
@@ -1626,11 +1731,12 @@ fn resolve_authors(
     persons: &[PersonInfo],
     author_roles: &[AuthorRole],
     artist_roles: &[AuthorRole],
+    use_chinese_names: bool,
 ) -> Vec<Author> {
     if persons.is_empty() {
         return extract_authors(subject, author_roles, artist_roles);
     }
-    let out = offline_person_authors(persons, author_roles, artist_roles);
+    let out = offline_person_authors(persons, author_roles, artist_roles, use_chinese_names);
     if out.is_empty() {
         extract_authors(subject, author_roles, artist_roles)
     } else {
@@ -1831,14 +1937,22 @@ pub fn create_provider(
     } else {
         None
     };
+    // seriesTitleLanguage 联动：中文（zh/zh-hans/zh-tw/...）→ 作者/出版社查 name_cn；
+    // None 或非中文（ja/en/...）→ 用原名（不查 name_cn）。
+    let use_chinese_names = config
+        .series_title_language
+        .as_deref()
+        .map(|l| l.to_ascii_lowercase().starts_with("zh"))
+        .unwrap_or(false);
     Some(BangumiMetadataProvider {
         client: BangumiClient::new(client),
-        metadata_mapper: BangumiMetadataMapper::new(
+        metadata_mapper: BangumiMetadataMapper::with_chinese_names(
             provider.series_metadata.clone(),
             provider.book_metadata.clone(),
             provider.author_roles.clone(),
             provider.artist_roles.clone(),
             tag_whitelist,
+            use_chinese_names,
         ),
         name_matcher,
         fetch_series_covers: provider.series_metadata.thumbnail,
@@ -2511,6 +2625,7 @@ mod tests {
             &persons,
             &[AuthorRole::Writer],
             &[AuthorRole::Penciller],
+            true,
         );
         assert_eq!(authors.len(), 2);
         assert!(authors.contains(&Author {
@@ -2532,7 +2647,8 @@ mod tests {
             appear_eps: String::new(),
             aliases: Vec::new(),
         }];
-        let authors = offline_person_authors(&all, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
+        let authors =
+            offline_person_authors(&all, &[AuthorRole::Writer], &[AuthorRole::Penciller], true);
         assert_eq!(authors.len(), 2);
         assert!(authors.iter().all(|a| a.name == "藤本树"));
     }
@@ -2748,7 +2864,12 @@ mod tests {
             mk(2, "画师B", 2009),
             mk(3, "脚本C", 2010),
         ];
-        let authors = offline_person_authors(&persons, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
+        let authors = offline_person_authors(
+            &persons,
+            &[AuthorRole::Writer],
+            &[AuthorRole::Penciller],
+            true,
+        );
         assert!(authors.contains(&Author { name: "插画师A".to_string(), role: AuthorRole::Penciller }));
         assert!(authors.contains(&Author { name: "画师B".to_string(), role: AuthorRole::Penciller }));
         assert!(authors.contains(&Author { name: "脚本C".to_string(), role: AuthorRole::Writer }));

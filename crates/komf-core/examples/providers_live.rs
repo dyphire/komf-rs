@@ -82,6 +82,7 @@ async fn main() {
                     ..Default::default()
                 },
                 archive: komf_core::config::BangumiArchiveConfig::default(),
+                series_title_language: None,
             },
             matcher,
             None,

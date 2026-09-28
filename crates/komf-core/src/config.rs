@@ -108,6 +108,7 @@ impl Default for ProvidersConfig {
                     ..Default::default()
                 },
                 archive: BangumiArchiveConfig::default(),
+                series_title_language: None,
             },
             webtoons: ProviderConfig {
                 priority: 130,
@@ -173,6 +174,10 @@ pub struct BangumiConfig {
     pub provider: ProviderConfig,
     #[serde(default)]
     pub archive: BangumiArchiveConfig,
+    /// 主标题语言（postProcessing.seriesTitleLanguage）联动：非中文时 bangumi
+    /// 作者/出版社不查 name_cn（用原名）；None/非 zh* → 原名。Rust 扩展。
+    #[serde(default)]
+    pub series_title_language: Option<String>,
 }
 
 impl Default for BangumiConfig {
@@ -180,6 +185,7 @@ impl Default for BangumiConfig {
         Self {
             provider: ProviderConfig::default(),
             archive: BangumiArchiveConfig::default(),
+            series_title_language: None,
         }
     }
 }
