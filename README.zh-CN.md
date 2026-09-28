@@ -48,6 +48,12 @@ cargo build --release # 构建 release 二进制到 target/release/komf-app
 cargo test --workspace # 运行单元测试
 ```
 
+OAuth `client_secret` 采用**编译时注入**（非运行时环境变量）：构建时设置
+`KOMF_OAUTH_ANILIST_CLIENT_SECRET` / `KOMF_OAUTH_MAL_CLIENT_SECRET` /
+`KOMF_OAUTH_BANGUMI_CLIENT_SECRET`，经 `option_env!` 固化进二进制。
+官方发布的二进制/镜像已携带 secret；详见
+[`docs/oauth-relay/README.md`](docs/oauth-relay/README.md)。
+
 ## 运行
 
 仓库不提供 `application.yml`；请使用模板：
@@ -202,6 +208,10 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 ### 通知
 
 - `GET|POST /api/notifications/{discord,apprise}/{templates,send,render}`
+
+### 封面重定向
+
+- `GET /api/cover/redirect?url=<encoded>` —— `302` + `Referrer-Policy: no-referrer` 跳转到目标封面 URL。WebUI 用它展示搜索结果封面：MangaDex 等封面 CDN 对白名单外 `Referer`（自部署域名、局域网 IP 等）返回占位横幅，无 `Referer` 时放行真实封面——重定向让浏览器丢弃 Referer 后直连加载真封面。目标 host 经 provider 封面域名白名单校验（防开放重定向 / SSRF），白名单外返回 `400`。搜索 API 的 `imageUrl` 保持直链，第三方服务端消费者不受影响，也可按需使用本端点。
 
 ### OAuth 登录（`{provider}` = `anilist`、`mal` 或 `bangumi`）
 

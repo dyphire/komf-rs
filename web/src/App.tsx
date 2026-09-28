@@ -933,7 +933,7 @@ export default function App() {
                     <div className="search-hit" key={i}>
                       {r.image_url || r.imageUrl ? (
                         <img
-                          src={r.image_url || r.imageUrl}
+                          src={`/api/cover/redirect?url=${encodeURIComponent(r.image_url || r.imageUrl)}`}
                           className="hit-cover"
                           alt=""
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

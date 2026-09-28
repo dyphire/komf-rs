@@ -191,14 +191,15 @@ impl MangaDexClient {
     }
 
     pub async fn get_cover_url(&self, manga: &MangaDexManga) -> Option<String> {
-        // Kotlin: getCover = $filesUrl/covers/$id/$fileName.512.jpg
+        // 封面原始文件 URL（fileName 已含扩展名）。不带 .512.jpg 尺寸后缀：
+        // 部分网络环境下 uploads CDN 对缩略图端点返回 MangaDex 占位横幅而非封面。
         let cover = manga
             .relationships
             .iter()
             .find(|r| r.r#type == "cover_art")?;
         let file_name = cover.attributes.as_ref()?.file_name.clone()?;
         Some(format!(
-            "https://uploads.mangadex.org/covers/{}/{file_name}.512.jpg",
+            "https://uploads.mangadex.org/covers/{}/{file_name}",
             manga.id
         ))
     }
@@ -491,7 +492,7 @@ impl MangaDexMetadataMapper {
             .and_then(|a| a.file_name.clone())
             .map(|f| {
                 format!(
-                    "https://uploads.mangadex.org/covers/{}/{f}.512.jpg",
+                    "https://uploads.mangadex.org/covers/{}/{f}",
                     manga.id
                 )
             });
@@ -793,7 +794,7 @@ impl MetadataProvider for MangaDexMetadataProvider {
         // Kotlin: cover = if fetchBookCovers getCover(mangaId, bookId.id); BookMetadata(thumbnail=cover)
         let cover = if self.fetch_book_covers {
             let url = format!(
-                "https://uploads.mangadex.org/covers/{}/{}.512.jpg",
+                "https://uploads.mangadex.org/covers/{}/{}",
                 series_id.0, book_id.0
             );
             self.client.get_thumbnail(&url).await?

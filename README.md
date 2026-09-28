@@ -209,6 +209,10 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 - `GET|POST /api/notifications/{discord,apprise}/{templates,send,render}`
 
+### Cover redirect
+
+- `GET /api/cover/redirect?url=<encoded>` — `302` + `Referrer-Policy: no-referrer` to the target cover URL. The WebUI uses it to render search-result covers: provider cover CDNs (MangaDex and others) return a placeholder banner for any `Referer` outside their allowlist, but serve the real cover when no `Referer` is sent — the redirect lets the browser drop the Referer and load the actual cover. The target host is validated against a provider-cover-domain allowlist (open-redirect / SSRF protection); other hosts get `400`. The search API's `imageUrl` stays a direct link, so third-party server-side consumers are unaffected and may optionally use this endpoint.
+
 ### OAuth login (`{provider}` = `anilist`, `mal` or `bangumi`)
 
 Server-side OAuth2 login for metadata providers, using a **shared client + official relay page** (no per-instance callback registration). See [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md) for the mechanism, client-secret injection and deployment notes.

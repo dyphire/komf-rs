@@ -1,5 +1,6 @@
 //! HTTP 路由 —— 对应 `snd.komf.app.api` 包。
 pub mod config_routes;
+pub mod cover_routes;
 pub mod deprecated;
 pub mod job_routes;
 pub mod mangabaka_routes;
