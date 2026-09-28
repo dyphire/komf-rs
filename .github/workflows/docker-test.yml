@@ -11,6 +11,12 @@ jobs:
   build-binaries:
     name: Build binary (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    env:
+      # OAuth client secrets：编译时注入（option_env! 固化进二进制）。
+      # 与 release.yml 的 binary_release 保持一致，确保测试镜像同样携带 secret。
+      KOMF_OAUTH_ANILIST_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_ANILIST_CLIENT_SECRET }}
+      KOMF_OAUTH_MAL_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_MAL_CLIENT_SECRET }}
+      KOMF_OAUTH_BANGUMI_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_BANGUMI_CLIENT_SECRET }}
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +100,20 @@ jobs:
           set -euo pipefail
           test -f docker-artifacts/linux-musl/amd64/komf-app
           test -f docker-artifacts/linux-musl/arm64/komf-app
+
+      - name: Setup Node for WebUI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package.json
+
+      - name: Build WebUI
+        run: |
+          set -euo pipefail
+          npm --prefix web ci
+          npm --prefix web run build
+          test -f web/dist/index.html
 
       - name: Strip Docker runtime artifacts
         run: |

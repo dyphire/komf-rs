@@ -26,6 +26,8 @@ zstd = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 sha1 = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
 image = { workspace = true }
 scraper = { workspace = true }
 percent-encoding = { workspace = true }

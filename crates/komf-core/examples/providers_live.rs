@@ -52,6 +52,7 @@ async fn main() {
             },
             matcher,
             &http,
+            None,
         );
         run(&p, "AniList").await;
     }
@@ -88,6 +89,7 @@ async fn main() {
             None,
             &http,
             None,
+            None,
         );
         run(&p, "Bangumi").await;
     }
@@ -106,6 +108,7 @@ async fn main() {
                     Some(k),
                     matcher,
                     &http,
+                    None,
                 );
                 run(&p, "MAL").await;
             }

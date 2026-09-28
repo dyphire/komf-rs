@@ -16,6 +16,8 @@ pub struct AppContext {
     pub state: SharedState,
     config_path: Option<PathBuf>,
     http_client: reqwest::Client,
+    /// OAuth 管理器（AniList/MAL/Bangumi 登录态；热重载复用同一实例，token 不丢）。
+    pub oauth_manager: Arc<komf_core::oauth::OAuthManager>,
 }
 
 impl AppContext {
@@ -33,19 +35,28 @@ impl AppContext {
             .build()
             .expect("failed to build http client");
 
-        let state = build_state(&config, &http_client, config_path.as_deref());
+        let work_dir = work_dir_from(config_path.as_deref());
+        let oauth_manager =
+            komf_core::oauth::OAuthManager::new(Some(&work_dir), http_client.clone());
+        let state = build_state(&config, &http_client, config_path.as_deref(), oauth_manager.clone());
 
         Self {
             state: Arc::new(std::sync::RwLock::new(state)),
             config_path,
             http_client,
+            oauth_manager,
         }
     }
 
     /// 热重载：以新配置重建所有模块并整体替换状态。
     pub fn reload(&self, new_config: crate::config::AppConfig) -> anyhow::Result<()> {
         tracing::info!("Reconfiguring application state");
-        let new_state = build_state(&new_config, &self.http_client, self.config_path.as_deref());
+        let new_state = build_state(
+            &new_config,
+            &self.http_client,
+            self.config_path.as_deref(),
+            self.oauth_manager.clone(),
+        );
         *self.state.write().unwrap() = new_state;
         if let Some(path) = &self.config_path {
             ConfigWriter::write_config(&new_config, path).ok();
@@ -56,26 +67,33 @@ impl AppContext {
     }
 }
 
-fn build_state(
-    config: &crate::config::AppConfig,
-    http_client: &reqwest::Client,
-    config_path: Option<&std::path::Path>,
-) -> AppState {
-    // 对应 Kotlin `AppContext`：workDir = configDir（数据库下载器工作目录）
-    let work_dir: PathBuf = match config_path {
+/// workDir 语义：configPath 为目录 → 本身；文件 → 父目录；None → 当前目录。
+fn work_dir_from(config_path: Option<&std::path::Path>) -> PathBuf {
+    match config_path {
         Some(path) if path.is_dir() => path.to_path_buf(),
         Some(path) => path
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".")),
         None => PathBuf::from("."),
-    };
+    }
+}
+
+fn build_state(
+    config: &crate::config::AppConfig,
+    http_client: &reqwest::Client,
+    config_path: Option<&std::path::Path>,
+    oauth_manager: Arc<komf_core::oauth::OAuthManager>,
+) -> AppState {
+    // 对应 Kotlin `AppContext`：workDir = configDir（数据库下载器工作目录）
+    let work_dir = work_dir_from(config_path);
     let db_work_dir = work_dir.join("mangabaka");
 
-    let providers_module = ProvidersModule::new(
+    let providers_module = ProvidersModule::with_oauth(
         &config.metadata_providers,
         http_client.clone(),
         Some(&work_dir),
+        Some(oauth_manager.clone()),
     );
     let notifications_module = NotificationsModule::new(&config.notifications, http_client.clone());
     let media_server_module = MediaServerModule::new(
@@ -114,6 +132,7 @@ fn build_state(
         manga_baka_db_downloader,
         manga_baka_repository,
         book_walker_db_downloader,
+        oauth_manager,
     )
 }
 

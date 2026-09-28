@@ -293,6 +293,8 @@ impl MetadataProviders {
 /// BookWalker 不注册、MangaBaka DATABASE 模式禁用（与 Kotlin 行为一致）。
 pub struct ProvidersModule {
     pub metadata_providers: MetadataProviders,
+    /// OAuth 管理器（AniList/MAL/Bangumi 登录态；None = 未初始化）。
+    pub oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
 }
 
 impl ProvidersModule {
@@ -300,6 +302,16 @@ impl ProvidersModule {
         config: &MetadataProvidersConfig,
         http_client: reqwest::Client,
         database_work_dir: Option<&std::path::Path>,
+    ) -> Self {
+        Self::with_oauth(config, http_client, database_work_dir, None)
+    }
+
+    /// 带 OAuth 的构造：`oauth_manager` 由 app 层创建（共享 http client 与 work_dir）。
+    pub fn with_oauth(
+        config: &MetadataProvidersConfig,
+        http_client: reqwest::Client,
+        database_work_dir: Option<&std::path::Path>,
+        oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
     ) -> Self {
         let default_name_matcher = config.name_matching_mode;
 
@@ -309,6 +321,7 @@ impl ProvidersModule {
             config,
             &http_client,
             database_work_dir,
+            oauth_manager.clone(),
         );
         let library_providers = config
             .library_providers
@@ -322,6 +335,7 @@ impl ProvidersModule {
                         config,
                         &http_client,
                         database_work_dir,
+                        oauth_manager.clone(),
                     ),
                 )
             })
@@ -330,6 +344,7 @@ impl ProvidersModule {
         Self {
             metadata_providers: MetadataProviders::new(default_providers)
                 .with_library(library_providers),
+            oauth_manager,
         }
     }
 }
@@ -340,6 +355,7 @@ fn create_metadata_providers(
     global: &MetadataProvidersConfig,
     http_client: &reqwest::Client,
     database_work_dir: Option<&std::path::Path>,
+    oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
 ) -> MetadataProvidersContainer {
     let mut providers: Vec<RegisteredProvider> = Vec::new();
 
@@ -360,13 +376,19 @@ fn create_metadata_providers(
         global.mal_client_id.as_deref(),
         default_name_matcher,
         http_client,
+        oauth_manager.clone(),
     ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
             priority: config.mal.priority,
         });
     }
-    if let Some(p) = anilist::create_provider(&config.ani_list, default_name_matcher, http_client) {
+    if let Some(p) = anilist::create_provider(
+        &config.ani_list,
+        default_name_matcher,
+        http_client,
+        oauth_manager.clone(),
+    ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
             priority: config.ani_list.priority,
@@ -385,6 +407,7 @@ fn create_metadata_providers(
         global.bangumi_token.as_deref(),
         http_client,
         database_work_dir,
+        oauth_manager.clone(),
     ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),

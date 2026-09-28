@@ -18,7 +18,7 @@ query ($search: String, $type: MediaType, $perPage: Int, $formats: [MediaFormat!
   mediaSearch: Page(page: 1, perPage: $perPage) {
     media(search: $search, type: $type, format_in: $formats) {
       id
-      title { romaji english native }
+      title { romaji english native userPreferred }
       coverImage { large extraLarge }
       startDate { year month day }
       bannerImage
@@ -29,7 +29,7 @@ query ($search: String, $type: MediaType, $perPage: Int, $formats: [MediaFormat!
       genres
       meanScore
       siteUrl
-      staff { edges { role node { name { full } languageV2 } } }
+      staff { edges { role node { name { full languageV2 userPreferred } } } }
       studios { edges { node { name } isMain } }
       tags { name rank }
     }
@@ -41,7 +41,7 @@ const GET_QUERY: &str = r#"
 query ($id: Int) {
   Media(id: $id, type: MANGA) {
     id
-    title { romaji english native }
+    title { romaji english native userPreferred }
     coverImage { large extraLarge }
     startDate { year month day }
     bannerImage
@@ -52,7 +52,7 @@ query ($id: Int) {
     genres
     meanScore
     siteUrl
-    staff { edges { role node { name { full } languageV2 } } }
+    staff { edges { role node { name { full languageV2 userPreferred } } } }
     studios { edges { node { name } isMain } }
     tags { name rank }
   }
@@ -122,6 +122,9 @@ pub struct AniListTitle {
     pub romaji: Option<String>,
     pub english: Option<String>,
     pub native: Option<String>,
+    /// 账号显示语言偏好下的标题（Aidoku 同款选择）；匿名请求默认 romaji。
+    #[serde(default)]
+    pub user_preferred: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,6 +171,9 @@ pub struct AniListStaff {
 pub struct AniListStaffName {
     #[serde(default)]
     pub full: String,
+    /// 账号显示语言偏好下的姓名（如中文用户返回 native 名）；匿名默认 romaji。
+    #[serde(default)]
+    pub user_preferred: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -200,11 +206,16 @@ pub struct AniListTag {
 
 pub struct AniListClient {
     http: reqwest::Client,
+    /// OAuth 登录态（登录后请求附加 `Authorization: Bearer`；None = 未接入）。
+    oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 }
 
 impl AniListClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+    pub fn new(
+        http: reqwest::Client,
+        oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    ) -> Self {
+        Self { http, oauth }
     }
 
     async fn execute(
@@ -212,9 +223,15 @@ impl AniListClient {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
-        let response = self
-            .http
-            .post(GRAPHQL_URL)
+        let mut request = self.http.post(GRAPHQL_URL);
+        let token = match &self.oauth {
+            Some(o) => o.access_token(crate::oauth::OAuthProvider::Anilist).await,
+            None => None,
+        };
+        if let Some(token) = token {
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = request
             .json(&GraphQlRequest {
                 query: query.to_string(),
                 variables,
@@ -305,6 +322,8 @@ pub struct AniListMetadataMapper {
     artist_roles: Vec<AuthorRole>,
     tags_size_limit: usize,
     tags_score_threshold: i32,
+    /// OAuth 登录态（登录时 userPreferred 生效；未登录保持原有 english 优先行为）。
+    oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 }
 
 impl AniListMetadataMapper {
@@ -314,6 +333,7 @@ impl AniListMetadataMapper {
         artist_roles: Vec<AuthorRole>,
         tags_size_limit: i32,
         tags_score_threshold: i32,
+        oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
     ) -> Self {
         Self {
             metadata_config,
@@ -321,7 +341,16 @@ impl AniListMetadataMapper {
             artist_roles,
             tags_size_limit: tags_size_limit.max(0) as usize,
             tags_score_threshold,
+            oauth,
         }
+    }
+
+    /// 是否启用 userPreferred（仅 OAuth 登录后生效；匿名保持原有行为）。
+    fn prefer_user_preferred(&self) -> bool {
+        self.oauth
+            .as_ref()
+            .map(|o| o.status(crate::oauth::OAuthProvider::Anilist).logged_in)
+            .unwrap_or(false)
     }
 
     pub fn to_series_metadata(
@@ -332,6 +361,9 @@ impl AniListMetadataMapper {
         let cfg = &self.metadata_config;
 
         // Kotlin: english(LOCALIZED/en) 在前，romaji(ROMAJI/ja-ro) 次之，native(NATIVE/ja) 最后。
+        // userPreferred（Aidoku 同款）：仅 OAuth 登录后生效——命中的语言版本提到主标题位
+        // （语言元数据保持不变，后处理 seriesTitleLanguage / 备选标题排序不受影响）；
+        // 未登录 / 未命中保持原顺序（原有行为）。
         let mut titles: Vec<SeriesTitle> = Vec::new();
         if let Some(english) = media.title.english.clone() {
             titles.push(SeriesTitle {
@@ -353,6 +385,9 @@ impl AniListMetadataMapper {
                 r#type: Some(TitleType::Native),
                 language: Some("ja".into()),
             });
+        }
+        if self.prefer_user_preferred() {
+            promote_user_preferred(&mut titles, media.title.user_preferred.as_deref());
         }
         // Kotlin MetadataConfigApplier.seriesTitles：title 关闭时保留标题名但清空 type/language。
         if !cfg.title {
@@ -453,20 +488,34 @@ impl AniListMetadataMapper {
     }
 
     pub fn to_series_search_result(&self, media: &AniListMedia) -> SeriesSearchResult {
-        // Kotlin: title = english ?: romaji ?: native；imageUrl = extraLarge；url = 构造 anilist.co/manga/{id}
+        // Kotlin: title = english ?: romaji ?: native；userPreferred（Aidoku 同款）仅在
+        // OAuth 登录后优先（未登录保持原有 english 优先行为）。仅用于搜索结果显示，
+        // 不影响匹配（匹配仍基于全量语言标题）。
+        let title = if self.prefer_user_preferred() {
+            media
+                .title
+                .user_preferred
+                .clone()
+                .or_else(|| media.title.english.clone())
+                .or_else(|| media.title.romaji.clone())
+                .or_else(|| media.title.native.clone())
+                .unwrap_or_default()
+        } else {
+            media
+                .title
+                .english
+                .clone()
+                .or_else(|| media.title.romaji.clone())
+                .or_else(|| media.title.native.clone())
+                .unwrap_or_default()
+        };
         SeriesSearchResult {
             url: Some(format!("https://anilist.co/manga/{}", media.id)),
             image_url: media
                 .cover_image
                 .as_ref()
                 .and_then(|c| c.extra_large.clone()),
-            title: media
-                .title
-                .english
-                .clone()
-                .or_else(|| media.title.romaji.clone())
-                .or_else(|| media.title.native.clone())
-                .unwrap_or_default(),
+            title,
             provider: CoreProviders::Anilist.as_str().to_string(),
             result_id: media.id.to_string(),
             media_type: None,
@@ -485,6 +534,15 @@ const ALLOWED_ROLES: [&str; 6] = [
     "Art",
     "Illustration",
 ];
+
+/// 把 userPreferred 命中的语言版本提到主标题位（语言元数据不变）；未命中不改动。
+fn promote_user_preferred(titles: &mut Vec<SeriesTitle>, user_preferred: Option<&str>) {
+    let Some(pref) = user_preferred else { return };
+    if let Some(idx) = titles.iter().position(|t| t.name == pref) {
+        let t = titles.remove(idx);
+        titles.insert(0, t);
+    }
+}
 
 fn strip_parenthesized(role: &str) -> String {
     // Kotlin extractNameAndRole: role.replace("\\([^)]*\\)".toRegex(), "")
@@ -529,6 +587,7 @@ fn map_status(status: &str) -> Option<SeriesStatus> {
 /// Kotlin AniListMetadataMapper.toSeriesMetadata 的作者展开：
 /// 角色去括号后必须在 allowedRoles 白名单；"Story & Art" → artistRoles + authorRoles 各映射一个；
 /// "Story"/"Original Story"/"Original Creator" → authorRoles；"Art"/"Illustration" → artistRoles。
+/// 姓名优先 userPreferred（账号显示语言偏好），缺失回落 full —— 仅影响写入/显示，不参与匹配。
 fn map_authors(
     media: &AniListMedia,
     author_roles: &[AuthorRole],
@@ -544,7 +603,12 @@ fn map_authors(
             if !ALLOWED_ROLES.contains(&role.as_str()) {
                 return None;
             }
-            let name = edge.node.name.full.clone();
+            let name = edge
+                .node
+                .name
+                .user_preferred
+                .clone()
+                .unwrap_or_else(|| edge.node.name.full.clone());
             let authors: Vec<Author> = match role.as_str() {
                 "Story & Art" => artist_roles
                     .iter()
@@ -619,19 +683,21 @@ pub fn create_provider(
     config: &AniListConfig,
     default_name_matcher: NameSimilarityMatcher,
     http_client: &reqwest::Client,
+    oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 ) -> Option<AniListMetadataProvider> {
     if !config.enabled {
         return None;
     }
     let name_matcher = config.name_matching_mode.unwrap_or(default_name_matcher);
     Some(AniListMetadataProvider {
-        client: AniListClient::new(http_client.clone()),
+        client: AniListClient::new(http_client.clone(), oauth_manager.clone()),
         metadata_mapper: AniListMetadataMapper::new(
             config.series_metadata.clone(),
             config.author_roles.clone(),
             config.artist_roles.clone(),
             config.tags_size_limit,
             config.tags_score_threshold,
+            oauth_manager.clone(),
         ),
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
@@ -798,6 +864,18 @@ mod tests {
             vec![AuthorRole::Penciller],
             15,
             60,
+            None,
+        )
+    }
+
+    fn mapper_with_oauth(oauth: std::sync::Arc<crate::oauth::OAuthManager>) -> AniListMetadataMapper {
+        AniListMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            15,
+            60,
+            Some(oauth),
         )
     }
 
@@ -835,9 +913,89 @@ mod tests {
             vec![AuthorRole::Penciller],
             15,
             60,
+            None,
         );
         let out = mapper.to_series_metadata(&media, None);
         assert_eq!(out.metadata.titles.len(), 3);
+    }
+
+    /// userPreferred（Aidoku 同款）：仅 OAuth 登录后生效。未登录（匿名）时即使返回了
+    /// userPreferred，主标题/搜索显示也保持原有 english 优先行为。
+    #[test]
+    fn anonymous_keeps_english_first_even_with_user_preferred() {
+        let json = r#"{"id":1,"title":{"romaji":"ROMAJI","english":"English Title","native":"ネイティブ","userPreferred":"ネイティブ"}}"#;
+        let media: AniListMedia = serde_json::from_str(json).unwrap();
+        let oauth = crate::oauth::OAuthManager::new(
+            Some(std::path::Path::new("__komf_test_no_dir__")),
+            reqwest::Client::new(),
+        );
+        assert!(!oauth.status(crate::oauth::OAuthProvider::Anilist).logged_in);
+        let mapper = mapper_with_oauth(oauth);
+        let out = mapper.to_series_metadata(&media, None);
+        let t: Vec<_> = out
+            .metadata
+            .titles
+            .iter()
+            .map(|t| (t.name.as_str(), t.r#type, t.language.as_deref()))
+            .collect();
+        assert_eq!(t[0], ("English Title", Some(TitleType::Localized), Some("en")));
+        assert_eq!(t[1], ("ROMAJI", Some(TitleType::Romaji), Some("ja-ro")));
+        assert_eq!(t[2], ("ネイティブ", Some(TitleType::Native), Some("ja")));
+        assert_eq!(out.metadata.title.as_ref().unwrap().name, "English Title");
+        assert_eq!(mapper.to_series_search_result(&media).title, "English Title");
+    }
+
+    /// 登录态下 userPreferred 命中：语言版本提到主标题位、语言元数据不变、全量标题保留；
+    /// 未命中保持原顺序。
+    #[test]
+    fn user_preferred_promotes_matching_language_title() {
+        let mut titles = vec![
+            SeriesTitle { name: "English Title".into(), r#type: Some(TitleType::Localized), language: Some("en".into()) },
+            SeriesTitle { name: "ROMAJI".into(), r#type: Some(TitleType::Romaji), language: Some("ja-ro".into()) },
+            SeriesTitle { name: "ネイティブ".into(), r#type: Some(TitleType::Native), language: Some("ja".into()) },
+        ];
+        // 命中 native → 提到首位，语言元数据不变
+        promote_user_preferred(&mut titles, Some("ネイティブ"));
+        assert_eq!(titles[0].name, "ネイティブ");
+        assert_eq!(titles[0].r#type, Some(TitleType::Native));
+        assert_eq!(titles[0].language.as_deref(), Some("ja"));
+        assert_eq!(titles[1].name, "English Title");
+        assert_eq!(titles[2].name, "ROMAJI");
+
+        // 未命中（任意字符串）→ 顺序不变
+        promote_user_preferred(&mut titles, Some("Nope"));
+        assert_eq!(titles[0].name, "ネイティブ");
+
+        // None → 顺序不变
+        promote_user_preferred(&mut titles, None);
+        assert_eq!(titles[0].name, "ネイティブ");
+    }
+
+    /// staff 姓名优先 userPreferred（账号显示语言偏好），缺失回落 full。
+    #[test]
+    fn staff_name_prefers_user_preferred() {
+        let json = r#"{"id":1,"title":{"romaji":"x"},"staff":{"edges":[{"role":"Story","node":{"name":{"full":"Eiichirou Oda","userPreferred":"尾田栄一郎"}}}]}}"#;
+        let media: AniListMedia = serde_json::from_str(json).unwrap();
+        let out = mapper().to_series_metadata(&media, None);
+        let names: Vec<_> = out
+            .metadata
+            .authors
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["尾田栄一郎"]);
+
+        // 无 userPreferred → 回落 full
+        let json2 = r#"{"id":2,"title":{"romaji":"x"},"staff":{"edges":[{"role":"Art","node":{"name":{"full":"Dude"}}}]}}"#;
+        let media2: AniListMedia = serde_json::from_str(json2).unwrap();
+        let out2 = mapper().to_series_metadata(&media2, None);
+        let names2: Vec<_> = out2
+            .metadata
+            .authors
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names2, vec!["Dude"]);
     }
 
     #[test]
@@ -853,6 +1011,7 @@ mod tests {
             vec![AuthorRole::Penciller],
             15,
             60,
+            None,
         );
         let out = mapper.to_series_metadata(&media, None);
         assert_eq!(out.metadata.score, Some(7.5));

@@ -15,6 +15,7 @@ This is the **Rust implementation** of [komf](https://github.com/Snd-R/komf), a 
 - Config hot-reload (`PATCH /api/config`), job tracking, metadata search/identify/match/reset endpoints
 - userscript compatible configuration UI
 - Built-in WebUI workbench: 12-provider matrix, per-library overrides, notification template editor, jobs with live SSE progress, search trial with one-click identify, offline DB download, light/dark theme
+- **OAuth login for MAL / AniList / Bangumi**: server-side OAuth2 with a shared client + official relay page — no per-instance callback registration needed; login/logout/status in the Providers page, token auto-refresh and SQLite persistence
 
 ## Metadata providers
 
@@ -46,6 +47,12 @@ Requirements: [Rust](https://rustup.rs/) (stable toolchain).
 cargo build --release # builds the release binary at target/release/komf-app
 cargo test --workspace # run unit tests
 ```
+
+OAuth `client_secret` values are **build-time injected** (not runtime env vars): set
+`KOMF_OAUTH_ANILIST_CLIENT_SECRET` / `KOMF_OAUTH_MAL_CLIENT_SECRET` /
+`KOMF_OAUTH_BANGUMI_CLIENT_SECRET` when building and they are compiled into the
+binary via `option_env!`. Released binaries/images already carry them; see
+[`docs/oauth-relay/README.md`](docs/oauth-relay/README.md).
 
 ## Running
 
@@ -201,6 +208,17 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 ### Notifications
 
 - `GET|POST /api/notifications/{discord,apprise}/{templates,send,render}`
+
+### OAuth login (`{provider}` = `anilist`, `mal` or `bangumi`)
+
+Server-side OAuth2 login for metadata providers, using a **shared client + official relay page** (no per-instance callback registration). See [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md) for the mechanism, client-secret injection and deployment notes.
+
+- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal)
+- `GET /api/oauth/{provider}/callback` — OAuth callback (via the relay page): exchanges the code, stores the token in `<configDir>/oauth.sqlite`, then `302` to `/?oauth=success` (or `/?oauth=error&message=...`)
+- `GET /api/oauth/{provider}/status` — `200` JSON `{"logged_in":bool,"username":string|null}`
+- `POST /api/oauth/{provider}/logout` — `204`, clears the stored token
+
+Once logged in, the provider requests are authenticated with the OAuth bearer token (takes precedence over the manual `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID` options); expired tokens are auto-refreshed when a refresh token exists, otherwise the login is cleared and the provider falls back to anonymous. The WebUI Providers page shows login status and offers login/logout per provider.
 
 ### Legacy (no `/api` prefix, kept for compatibility)
 

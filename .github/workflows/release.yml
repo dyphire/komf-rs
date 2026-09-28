@@ -114,6 +114,11 @@ jobs:
       VERSION: ${{ needs.version.outputs.version_next }}
       VERSION_NEXT: ${{ needs.version.outputs.version_next }}
       KOMF_VERSION: ${{ needs.version.outputs.version_next }}
+      # OAuth client secrets：编译时注入（option_env! 固化进二进制），
+      # 未配置的 secret 为空串 → 对应平台 OAuth 不可用。
+      KOMF_OAUTH_ANILIST_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_ANILIST_CLIENT_SECRET }}
+      KOMF_OAUTH_MAL_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_MAL_CLIENT_SECRET }}
+      KOMF_OAUTH_BANGUMI_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_BANGUMI_CLIENT_SECRET }}
     defaults:
       run:
         shell: bash

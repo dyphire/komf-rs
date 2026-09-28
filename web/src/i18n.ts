@@ -134,6 +134,17 @@ const dict: Record<string, { zh: string; en: string }> = {
   'blankClears': { zh: '留空=清空', en: 'blank = clear' },
   'ov.mangaBakaChecksum': { zh: 'MangaBaka DB: {v} / checksum {c}', en: 'MangaBaka DB: {v} / checksum {c}' },
 
+  // ---- OAuth ----
+  'oauth.title': { zh: 'OAuth 登录（共享 client）', en: 'OAuth sign-in (shared client)' },
+  'oauth.desc': { zh: '登录后请求携带 Bearer token：MAL 无需 malClientId、Bangumi token 自动续期、AniList 解锁更高限额。', en: 'Requests carry a Bearer token after sign-in: MAL works without malClientId, Bangumi tokens auto-renew, AniList unlocks higher limits.' },
+  'oauth.login': { zh: '登录', en: 'Sign in' },
+  'oauth.logout': { zh: '退出', en: 'Sign out' },
+  'oauth.loggedInAs': { zh: '{u}', en: '{u}' },
+  'oauth.notLoggedIn': { zh: '未登录', en: 'Not signed in' },
+  'oauth.success': { zh: 'OAuth 登录成功。', en: 'OAuth sign-in successful.' },
+  'oauth.failed': { zh: 'OAuth 登录失败：{msg}', en: 'OAuth sign-in failed: {msg}' },
+  'oauth.checking': { zh: '检查中…', en: 'Checking…' },
+
   // ---- 元数据 ----
   'md.defaultTitle': { zh: '{s} · 默认更新策略', en: '{s} · Default update strategy' },
   'md.desc': { zh: '对应 {s}.metadataUpdate.default。', en: 'Maps to {s}.metadataUpdate.default.' },

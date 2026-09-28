@@ -1,7 +1,7 @@
 //! HTTP 服务模块 —— 对应 `ServerModule.kt`。
 use crate::routes::{
     config_routes, deprecated, job_routes, mangabaka_routes, media_server_routes, metadata_routes,
-    notification_routes, web_auth, ServerKind, SharedState,
+    notification_routes, oauth_routes, web_auth, ServerKind, SharedState,
 };
 use axum::http::HeaderValue;
 use axum::routing::get;
@@ -91,6 +91,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(job_routes::router())
         .merge(notification_routes::router())
         .merge(mangabaka_routes::router())
+        .merge(oauth_routes::router())
         .nest(
             "/komga",
             Router::new()

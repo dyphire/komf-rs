@@ -545,6 +545,10 @@ export default function App() {
   const [dbBusy, setDbBusy] = useState<string | null>(null);
   const [dbProg, setDbProg] = useState<{ kind: string; pct: number; info?: string } | null>(null);
   const [dbErr, setDbErr] = useState<{ kind: string; msg: string } | null>(null);
+  // OAuth 登录态（anilist / mal / bangumi，共享 client + 中转页）
+  const OAUTH_PROVIDERS = ['anilist', 'mal', 'bangumi'];
+  const [oauth, setOauth] = useState<Record<string, { logged_in: boolean; username?: string | null }>>({});
+  const [oauthBusy, setOauthBusy] = useState(false);
   // 按库覆盖编辑
   const [scopeServer, setScopeServer] = useState<ServerKind>('komga');
   const [scopeLib, setScopeLib] = useState('');
@@ -611,6 +615,13 @@ export default function App() {
   async function load() {
     setLoading(true);
     setMsg(null);
+    // OAuth 回调跳回（/?oauth=success|error）时显示结果提示
+    try {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('oauth') === 'success') setMsg({ ok: true, text: t('oauth.success') });
+      else if (q.get('oauth') === 'error') setMsg({ ok: false, text: t('oauth.failed', { msg: q.get('message') ?? '' }) });
+    } catch { /* ignore */ }
+    refreshOAuth();
     try {
       const [cfg, ver] = await Promise.all([api.getConfig(), api.version().catch(() => ({ version: '' }) as any)]);
       setOrig(cfg);
@@ -645,6 +656,28 @@ export default function App() {
   useEffect(() => {
     load();
   }, []);
+
+  /** 拉取三平台 OAuth 登录态（登录/退出后重拉刷新徽标） */
+  async function refreshOAuth() {
+    setOauthBusy(true);
+    try {
+      const entries = await Promise.all(OAUTH_PROVIDERS.map(async (p) => [p, await api.oauthStatus(p)] as const));
+      setOauth(Object.fromEntries(entries));
+    } catch { /* 单个失败按未登录处理 */ } finally {
+      setOauthBusy(false);
+    }
+  }
+
+  /** 退出某平台 OAuth 登录态 */
+  async function oauthLogout(p: string) {
+    try {
+      await api.oauthLogout(p);
+      setMsg({ ok: true, text: t('oauth.logout') });
+    } catch (e: any) {
+      setMsg({ ok: false, text: t('err.loadFailed', { msg: e.message }) });
+    }
+    refreshOAuth();
+  }
 
   const patch = useMemo(() => {
     if (!orig || !draft) return undefined;
@@ -978,6 +1011,30 @@ export default function App() {
                 <Field label={t('f.comicVineSearchLimit')}><TriText value={getPath(draft, ['metadataProviders', 'comicVineSearchLimit'])} onChange={(v) => upd(['metadataProviders', 'comicVineSearchLimit'], v === null ? null : (Number(v) || 0))} placeholder={t('ph.ex20')} /></Field>
                 <Field label={t('f.comicVineIssueName')}><TriText value={getPath(draft, ['metadataProviders', 'comicVineIssueName'])} onChange={(v) => upd(['metadataProviders', 'comicVineIssueName'], v)} placeholder={t('blankClears')} /></Field>
                 <Field label={t('f.comicVineIdFormat')}><TriText value={getPath(draft, ['metadataProviders', 'comicVineIdFormat'])} onChange={(v) => upd(['metadataProviders', 'comicVineIdFormat'], v)} placeholder={t('blankClears')} /></Field>
+              </div>
+              <div className="card sub" style={{ marginTop: 10 }}>
+                <h3>{t('oauth.title')}</h3>
+                <p className="desc">{t('oauth.desc')}</p>
+                <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                  {OAUTH_PROVIDERS.map((p) => {
+                    const st = oauth[p];
+                    const label = p === 'mal' ? 'MyAnimeList' : p === 'bangumi' ? 'Bangumi' : 'AniList';
+                    return (
+                      <span className="badge" key={p} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <b>{label}</b>
+                        {st?.logged_in ? (
+                          <>
+                            <span className="muted" title={t('oauth.loggedInAs', { u: st.username ?? '' })}>{st.username || t('oauth.loggedInAs', { u: '✓' })}</span>
+                            <button className="btn" onClick={() => oauthLogout(p)}>{t('oauth.logout')}</button>
+                          </>
+                        ) : (
+                          <a className="btn" href={`/api/oauth/${p}/start`}>{t('oauth.login')}</a>
+                        )}
+                      </span>
+                    );
+                  })}
+                  {oauthBusy ? <span className="muted" style={{ fontSize: 12 }}>{t('oauth.checking')}</span> : null}
+                </div>
               </div>
               <div className="row" style={{ marginTop: 8 }}>
                 <span className="badge">{t('ov.mangaBakaChecksum', { v: draft.metadataProviders?.mangaBakaDatabase?.downloadTimestamp ?? t('db.undownloaded'), c: draft.metadataProviders?.mangaBakaDatabase?.checksum?.slice(0, 12) ?? '-' })}</span>
