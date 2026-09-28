@@ -257,11 +257,13 @@ fn login_page_html() -> String {
     e.preventDefault(); err.textContent = '';
     go.disabled = true; go.textContent = s.logging;
     try {
-      var r = await fetch('/api/auth/login', {
+      // 相对路径（对齐 snd/komf PR#337）：反代子路径部署（如 https://host/komf/）
+      // 下绝对 '/api/...' 会锚 host 根丢前缀；相对路径跟随页面目录。
+      var r = await fetch('api/auth/login', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: k.value }), credentials: 'same-origin'
       });
-      if (r.status === 204) { location.href = '/'; return; }
+      if (r.status === 204) { location.href = './'; return; }
       var t = await r.text().catch(function () { return ''; });
       err.textContent = r.status === 401 ? s.badKey : (s.fail + ' (' + r.status + ')');
     } catch (ex) {
