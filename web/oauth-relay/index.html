@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>komf OAuth 中转页</title>
+<style>
+  body{margin:0;font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#0f1419;color:#e6edf3;padding:32px 16px}
+  .wrap{max-width:720px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 8px}
+  h2{font-size:16px;margin:28px 0 8px}
+  .sub{color:#8b949e;font-size:13px;margin-bottom:20px}
+  .card{background:#161b22;border:1px solid #2d333b;border-radius:12px;padding:20px 24px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{border-bottom:1px solid #2d333b;padding:10px 8px;text-align:left;vertical-align:top}
+  th{color:#8b949e;font-weight:600;font-size:13px}
+  code{background:#1c2128;border-radius:4px;padding:2px 6px;font-size:13px;color:#7ee787;word-break:break-all}
+  .tip{color:#8b949e;font-size:13px;margin-top:16px}
+  .tip b{color:#e6edf3}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>komf OAuth 中转页</h1>
+  <div class="sub">共享 client 的统一回调地址。授权结果经本页转交回各 komf 实例。</div>
+  <div class="card">
+    <h2>注册 client 时使用的回调 URL</h2>
+    <table>
+      <tr><th>Provider</th><th>回调 URL（将 &lt;BASE&gt; 替换为实际部署地址）</th></tr>
+      <tr><td>AniList</td><td><code>&lt;BASE&gt;/anilist.html</code></td></tr>
+      <tr><td>MyAnimeList</td><td><code>&lt;BASE&gt;/mal.html</code></td></tr>
+      <tr><td>Bangumi</td><td><code>&lt;BASE&gt;/bangumi.html</code></td></tr>
+      <tr><td>MangaBaka</td><td><code>&lt;BASE&gt;/mangabaka.html</code></td></tr>
+    </table>
+    <div class="tip">
+      <b>示例：</b>部署于 <code>https://komf.github.io/oauth-relay/</code> 时，AniList 的回调即
+      <code>https://komf.github.io/oauth-relay/anilist.html</code>。
+      授权请求中的 <code>state</code> 必须携带 <code>redirectUrl</code>（当前 komf 实例的
+      <code>/api/oauth/&lt;provider&gt;/callback</code>），本页据此转交授权结果。
+    </div>
+  </div>
+</div>
+</body>
+</html>

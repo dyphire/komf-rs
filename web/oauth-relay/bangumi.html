@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>komf OAuth 中转页 - Bangumi</title>
+<style>
+  body{margin:0;font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#0f1419;color:#e6edf3;min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{background:#161b22;border:1px solid #2d333b;border-radius:12px;padding:28px 32px;max-width:520px;width:calc(100% - 40px);box-sizing:border-box}
+  h1{font-size:18px;margin:0 0 6px}
+  .sub{color:#8b949e;font-size:13px;margin-bottom:18px}
+  .badge{display:inline-block;padding:3px 12px;border-radius:999px;font-size:13px;margin-bottom:12px}
+  .badge.ok{background:#0e4429;color:#7ee787;border:1px solid #238636}
+  .badge.error{background:#3d1218;color:#ff7b72;border:1px solid #da3633}
+  .detail{color:#8b949e;font-size:13px;word-break:break-all;background:#1c2128;border-radius:6px;padding:10px 12px}
+  .back{margin-top:16px;font-size:13px;color:#8b949e}
+  .back a{color:#79c0ff}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>komf OAuth 中转页 · Bangumi</h1>
+  <div class="sub">本页是 komf 共享 client 注册的回调地址，负责把授权结果转交回你的 komf 实例。若你不是正在 komf WebUI 中授权，可忽略本页。</div>
+  <span id="relay-status" class="badge">处理中…</span>
+  <div id="relay-detail" class="detail">正在解析授权结果…</div>
+  <div class="back">等待无反应时请返回 komf WebUI「设置 → 元数据提供商」重新发起授权。</div>
+</div>
+<noscript><div style="text-align:center;color:#ff7b72;padding:12px">本页需要 JavaScript 才能完成授权结果转发，请启用后重试。</div></noscript>
+<script src="./relay.js"></script>
+<script>KomfOAuthRelay.main();</script>
+</body>
+</html>

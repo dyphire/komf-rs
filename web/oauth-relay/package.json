@@ -1,0 +1,7 @@
+{
+  "name": "komf-oauth-relay",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "description": "komf 共享 OAuth client 的静态中转页（回调 relay）。独立于 webui 构建，部署到任意静态托管。"
+}
