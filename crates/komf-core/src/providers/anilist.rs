@@ -29,7 +29,7 @@ query ($search: String, $type: MediaType, $perPage: Int, $formats: [MediaFormat!
       genres
       meanScore
       siteUrl
-      staff { edges { role node { name { full languageV2 userPreferred } } } }
+      staff { edges { role node { name { full userPreferred } } } }
       studios { edges { node { name } isMain } }
       tags { name rank }
     }
@@ -52,7 +52,7 @@ query ($id: Int) {
     genres
     meanScore
     siteUrl
-    staff { edges { role node { name { full languageV2 userPreferred } } } }
+    staff { edges { role node { name { full userPreferred } } } }
     studios { edges { node { name } isMain } }
     tags { name rank }
   }
