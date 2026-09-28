@@ -111,11 +111,29 @@ pub struct BangumiSubjectRelation {
 
 pub struct BangumiClient {
     http: reqwest::Client,
+    /// OAuth 登录态（登录后请求附加 `Authorization: Bearer`，覆盖手动 token）。
+    oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 }
 
 impl BangumiClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+    pub fn new(
+        http: reqwest::Client,
+        oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    ) -> Self {
+        Self { http, oauth }
+    }
+
+    /// 已登录时附加 OAuth Bearer（覆盖 default header 的手动 token）；未登录原样返回。
+    async fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let token = match &self.oauth {
+            Some(o) => o.access_token(crate::oauth::OAuthProvider::Bangumi).await,
+            None => None,
+        };
+        if let Some(token) = token {
+            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        } else {
+            request
+        }
     }
 
     pub async fn search(
@@ -131,8 +149,8 @@ impl BangumiClient {
             "filter": { "type": [1], "nsfw": true }
         });
         let response = self
-            .http
-            .post(format!("{BASE_URL}/v0/search/subjects"))
+            .authorized(self.http.post(format!("{BASE_URL}/v0/search/subjects")))
+            .await
             .json(&body)
             .send()
             .await?;
@@ -147,8 +165,8 @@ impl BangumiClient {
 
     pub async fn get(&self, id: u64) -> Result<BangumiSubject, ProviderError> {
         let response = self
-            .http
-            .get(format!("{BASE_URL}/v0/subjects/{id}"))
+            .authorized(self.http.get(format!("{BASE_URL}/v0/subjects/{id}")))
+            .await
             .send()
             .await?;
         let status = response.status();
@@ -165,8 +183,8 @@ impl BangumiClient {
         id: u64,
     ) -> Result<Vec<BangumiSubjectRelation>, ProviderError> {
         let response = self
-            .http
-            .get(format!("{BASE_URL}/v0/subjects/{id}/subjects"))
+            .authorized(self.http.get(format!("{BASE_URL}/v0/subjects/{id}/subjects")))
+            .await
             .send()
             .await?;
         let status = response.status();
@@ -1891,6 +1909,7 @@ pub fn create_provider(
     token: Option<&str>,
     http_client: &reqwest::Client,
     work_dir: Option<&std::path::Path>,
+    oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 ) -> Option<BangumiMetadataProvider> {
     let provider = &config.provider;
     if !provider.enabled {
@@ -1945,7 +1964,7 @@ pub fn create_provider(
         .map(|l| l.to_ascii_lowercase().starts_with("zh"))
         .unwrap_or(false);
     Some(BangumiMetadataProvider {
-        client: BangumiClient::new(client),
+        client: BangumiClient::new(client, oauth_manager),
         metadata_mapper: BangumiMetadataMapper::with_chinese_names(
             provider.series_metadata.clone(),
             provider.book_metadata.clone(),
@@ -2881,6 +2900,7 @@ mod tests {
         let provider = BangumiMetadataProvider {
             client: BangumiClient::new(
                 crate::providers::client_with_default_headers(reqwest::header::HeaderMap::new()),
+                None,
             ),
             metadata_mapper: BangumiMetadataMapper::new(
                 crate::config::SeriesMetadataConfig::default(),

@@ -125,24 +125,45 @@ pub struct MalAuthorNode {
 
 pub struct MalClient {
     http: reqwest::Client,
+    /// OAuth 登录态（登录后请求附加 `Authorization: Bearer`，优先于 X-MAL-CLIENT-ID）。
+    oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 }
 
 impl MalClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+    pub fn new(
+        http: reqwest::Client,
+        oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    ) -> Self {
+        Self { http, oauth }
+    }
+
+    /// 已登录时附加 OAuth Bearer；未登录返回原请求（依赖 X-MAL-CLIENT-ID）。
+    async fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let token = match &self.oauth {
+            Some(o) => o.access_token(crate::oauth::OAuthProvider::Mal).await,
+            None => None,
+        };
+        if let Some(token) = token {
+            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        } else {
+            request
+        }
     }
 
     pub async fn search(&self, name: &str) -> Result<Vec<MalManga>, ProviderError> {
         let response = self
-            .http
-            .get(format!("{BASE_URL}/manga"))
-            .query(&[
-                ("q", name),
-                ("fields", SEARCH_FIELDS),
-                // Kotlin MalClient: parameter("nsfw", "true") —— 不过滤成人向作品
-                // Kotlin searchSeries 不传 limit（MAL 默认 100）。
-                ("nsfw", "true"),
-            ])
+            .authorized(
+                self.http
+                    .get(format!("{BASE_URL}/manga"))
+                    .query(&[
+                        ("q", name),
+                        ("fields", SEARCH_FIELDS),
+                        // Kotlin MalClient: parameter("nsfw", "true") —— 不过滤成人向作品
+                        // Kotlin searchSeries 不传 limit（MAL 默认 100）。
+                        ("nsfw", "true"),
+                    ]),
+            )
+            .await
             .send()
             .await?;
         let status = response.status();
@@ -156,9 +177,12 @@ impl MalClient {
 
     pub async fn get(&self, id: u64) -> Result<MalManga, ProviderError> {
         let response = self
-            .http
-            .get(format!("{BASE_URL}/manga/{id}"))
-            .query(&[("fields", GET_FIELDS)])
+            .authorized(
+                self.http
+                    .get(format!("{BASE_URL}/manga/{id}"))
+                    .query(&[("fields", GET_FIELDS)]),
+            )
+            .await
             .send()
             .await?;
         let status = response.status();
@@ -380,20 +404,29 @@ pub fn create_provider(
     client_id: Option<&str>,
     default_name_matcher: NameSimilarityMatcher,
     _http_client: &reqwest::Client,
+    oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 ) -> Option<MalMetadataProvider> {
     if !config.enabled {
         return None;
     }
-    let client_id = client_id?;
+    // 注册条件：配置了 clientId，或已通过 OAuth 登录（登录后由热重载重建本 provider）。
+    let oauth_logged_in = oauth_manager
+        .as_ref()
+        .is_some_and(|o| o.status(crate::oauth::OAuthProvider::Mal).logged_in);
+    if client_id.is_none() && !oauth_logged_in {
+        return None;
+    }
     let mut headers = reqwest::header::HeaderMap::new();
-    if let Ok(value) = reqwest::header::HeaderValue::from_str(client_id) {
-        headers.insert("X-MAL-CLIENT-ID", value);
+    if let Some(client_id) = client_id {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(client_id) {
+            headers.insert("X-MAL-CLIENT-ID", value);
+        }
     }
     let client = crate::providers::client_with_default_headers(headers);
 
     let name_matcher = config.name_matching_mode.unwrap_or(default_name_matcher);
     Some(MalMetadataProvider {
-        client: MalClient::new(client),
+        client: MalClient::new(client, oauth_manager),
         metadata_mapper: MalMetadataMapper::new(
             config.series_metadata.clone(),
             config.author_roles.clone(),

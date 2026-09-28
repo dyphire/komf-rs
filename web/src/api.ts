@@ -30,6 +30,14 @@ export const api = {
       throw new Error(`PATCH /api/config ${res.status}: ${text.slice(0, 500)}`);
     }),
   version: () => req<{ name: string; version: string }>('/api/health'),
+
+  // ---- OAuth（共享 client + 中转页；start 走整页跳转，无需 API） ----
+  oauthStatus: (p: string) =>
+    req<{ logged_in: boolean; username?: string | null }>(`/api/oauth/${p}/status`).catch(
+      () => ({ logged_in: false }),
+    ),
+  oauthLogout: (p: string) => req<void>(`/api/oauth/${p}/logout`, { method: 'POST' }),
+
   connected: (s: ServerKind) =>
     req<{ success: boolean; httpStatusCode?: number | null; errorMessage?: string | null }>(
       `/api/${s}/media-server/connected`,

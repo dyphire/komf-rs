@@ -1,0 +1,185 @@
+//! OAuth 路由 —— 挂在 `/api/oauth/{provider}/*`。
+//!
+//! 采用「共享 client + 中转页」模式（与中转页 `docs/oauth-relay` 配合）：
+//! - `start`：生成 PKCE/state 并 302 到平台授权页；state 携带当前实例回调
+//!   `redirectUrl`，中转页授权完成后按 state 跳回本实例 callback；
+//! - `callback`：校验 state/nonce → code 换 token → 持久化；成功后触发配置
+//!   热重载（使 MAL 等"登录后才注册"的 provider 生效）并 302 回 WebUI；
+//! - `status` / `logout`：供 WebUI 展示登录态与退出。
+//!
+//! MangaBaka 尚未接入（无共享 client），`{provider}` 仅接受
+//! anilist / mal / bangumi，其余返回 404。
+
+use crate::routes::SharedState;
+use axum::extract::{Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use komf_api_models::common::KomfErrorResponse;
+use komf_core::oauth::{OAuthManager, OAuthProvider, OAuthStatus};
+use serde::Deserialize;
+use std::sync::Arc;
+
+pub fn router() -> Router<SharedState> {
+    Router::new()
+        .route("/oauth/:provider/start", get(start))
+        .route("/oauth/:provider/callback", get(callback))
+        .route("/oauth/:provider/status", get(status))
+        .route("/oauth/:provider/logout", axum::routing::post(logout))
+}
+
+fn parse_provider(name: &str) -> Result<OAuthProvider, Response> {
+    OAuthProvider::from_str(name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(KomfErrorResponse {
+                message: format!("OAuth provider '{name}' is not supported"),
+            }),
+        )
+            .into_response()
+    })
+}
+
+fn manager(state: &SharedState) -> Arc<OAuthManager> {
+    state.read().unwrap().oauth_manager.clone()
+}
+
+fn bad_request(message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(KomfErrorResponse {
+            message: message.into(),
+        }),
+    )
+        .into_response()
+}
+
+fn internal(message: impl std::fmt::Display) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(KomfErrorResponse {
+            message: format!("OAuth error: {message}"),
+        }),
+    )
+        .into_response()
+}
+
+/// 反向代理前缀优先（X-Forwarded-*），否则用 Host 头；协议默认 http。
+fn instance_scheme(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "http".to_string())
+}
+
+fn instance_host(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_string))
+}
+
+/// `GET /api/oauth/{provider}/start`：302 到平台授权页。
+async fn start(
+    State(state): State<SharedState>,
+    Path(provider): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let provider = match parse_provider(&provider) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(host) = instance_host(&headers) else {
+        return bad_request("cannot determine instance host (Host header missing)");
+    };
+    let scheme = instance_scheme(&headers);
+    // 实例回调（中转页经 state.redirectUrl 转交回来）。
+    let redirect_url = format!("{scheme}://{host}/api/oauth/{}/callback", provider.as_str());
+    match manager(&state).start(provider, &redirect_url) {
+        Ok(url) => Redirect::to(&url).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CallbackParams {
+    code: String,
+    state: String,
+}
+
+/// `GET /api/oauth/{provider}/callback?code&state`：换 token 后跳回 WebUI。
+async fn callback(
+    State(state): State<SharedState>,
+    Path(provider): Path<String>,
+    Query(params): Query<CallbackParams>,
+) -> Response {
+    let provider = match parse_provider(&provider) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let mgr = manager(&state);
+    let result = mgr.handle_callback(provider, &params.code, &params.state).await;
+    match result {
+        Ok(()) => {
+            // 使登录后才注册的 provider（如 MAL 无 clientId 时）生效：以当前配置热重载。
+            let config = state.read().unwrap().config.clone();
+            let _ = tokio::spawn(async move {
+                if let Err(e) = crate::app_context::reload_with_config(config).await {
+                    tracing::warn!("OAuth reload failed: {e}");
+                }
+            });
+            Redirect::to("/?oauth=success").into_response()
+        }
+        Err(e) => {
+            tracing::warn!("OAuth callback failed for {}: {e}", provider.as_str());
+            Redirect::to(&format!("/?oauth=error&message={}", urlencode(&e))).into_response()
+        }
+    }
+}
+
+/// `GET /api/oauth/{provider}/status`：登录态 + username。
+async fn status(
+    State(state): State<SharedState>,
+    Path(provider): Path<String>,
+) -> Response {
+    let provider = match parse_provider(&provider) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let s: OAuthStatus = manager(&state).status(provider);
+    Json(s).into_response()
+}
+
+/// `POST /api/oauth/{provider}/logout`：清除登录态。
+async fn logout(State(state): State<SharedState>, Path(provider): Path<String>) -> Response {
+    let provider = match parse_provider(&provider) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    manager(&state).logout(provider);
+    // 登出后同样热重载：MAL 等仅凭 OAuth 登录才注册的 provider 随之移除。
+    let config = state.read().unwrap().config.clone();
+    let _ = tokio::spawn(async move {
+        if let Err(e) = crate::app_context::reload_with_config(config).await {
+            tracing::warn!("OAuth reload after logout failed: {e}");
+        }
+    });
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// 轻量 URL 编码（错误消息跳回 WebUI 时用）。
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}

@@ -15,6 +15,7 @@
 - 配置热更新（`PATCH /api/config`）、任务跟踪、元数据搜索/识别/匹配/重置端点
 - 用户脚本兼容的配置界面
 - 内置 WebUI 工作台：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、离线 DB 下载、明暗主题
+- **MAL / AniList / Bangumi OAuth 登录**：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
 
 ## 元数据 provider
 
@@ -201,6 +202,17 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 ### 通知
 
 - `GET|POST /api/notifications/{discord,apprise}/{templates,send,render}`
+
+### OAuth 登录（`{provider}` = `anilist`、`mal` 或 `bangumi`）
+
+元数据 provider 的服务端 OAuth2 登录，采用**共享 client + 官方中转页**方案（无需按实例注册回调）。机制、client_secret 注入与部署说明见 [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md)。
+
+- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal 使用 PKCE）
+- `GET /api/oauth/{provider}/callback` —— OAuth 回调（经中转页转交）：校验后以 code 换取 token，存入 `<configDir>/oauth.sqlite`，随后 `302` 到 `/?oauth=success`（或 `/?oauth=error&message=...`）
+- `GET /api/oauth/{provider}/status` —— `200` JSON `{"logged_in":bool,"username":string|null}`
+- `POST /api/oauth/{provider}/logout` —— `204`，清除已存 token
+
+登录后该 provider 的请求以 OAuth bearer token 鉴权（优先于手动 `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`）；token 过期后若有 refresh token 则自动刷新，否则清除登录态并回退匿名请求。WebUI Provider 页显示各平台登录状态并提供登录/退出入口。
 
 ### 旧版路由（无 `/api` 前缀，兼容保留）
 

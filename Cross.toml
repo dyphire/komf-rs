@@ -14,7 +14,13 @@
 # Forward the host KOMF_VERSION (git tag version injected by the release workflow)
 # into the cross container, otherwise option_env!("KOMF_VERSION") is unavailable
 # during musl cross-compilation.
-passthrough = ["KOMF_VERSION"]
+# OAuth client secrets are build-time injected (option_env!)
+passthrough = [
+    "KOMF_VERSION",
+    "KOMF_OAUTH_ANILIST_CLIENT_SECRET",
+    "KOMF_OAUTH_MAL_CLIENT_SECRET",
+    "KOMF_OAUTH_BANGUMI_CLIENT_SECRET",
+]
 
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.4"
