@@ -184,6 +184,26 @@ pub struct KavitaSeries {
     pub cover_image_locked: bool,
     pub localized_name_locked: bool,
     pub sort_name_locked: bool,
+    // Kavita UpdateSeries 对请求缺失的字段按 0/null/false 覆写，
+    // 必须回读当前值原样发送；旧版 Kavita 可能不返回这些字段，全部带 default。
+    #[serde(default)]
+    pub name_locked: bool,
+    #[serde(default)]
+    pub ani_list_id: Option<i64>,
+    #[serde(default)]
+    pub mal_id: Option<i64>,
+    #[serde(default)]
+    pub hardcover_id: Option<i64>,
+    #[serde(default)]
+    pub metron_id: Option<i64>,
+    #[serde(default)]
+    pub comic_vine_id: Option<String>,
+    #[serde(default)]
+    pub manga_baka_id: Option<i64>,
+    #[serde(default)]
+    pub cbr_id: Option<i64>,
+    #[serde(default)]
+    pub metadata_provider_override: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -446,16 +466,35 @@ pub struct KavitaPagination {
 // 请求体（camelCase，对应 `kavita/model/request/*`）
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KavitaSeriesUpdateRequest {
     pub id: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub localized_name: Option<String>,
     pub sort_name: String,
     pub cover_image_locked: bool,
+    pub name_locked: bool,
     pub sort_name_locked: bool,
     pub localized_name_locked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ani_list_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mal_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardcover_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metron_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comic_vine_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manga_baka_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cbr_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_provider_override: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1187,7 +1226,7 @@ fn to_media_server_series(
                 .unwrap_or_default(),
 
             status_lock: metadata.publication_status_locked,
-            title_lock: false,
+            title_lock: series.name_locked,
             title_sort_lock: series.sort_name_locked,
             alternative_titles_lock: series.localized_name_locked,
             summary_lock: metadata.summary_locked,
@@ -1482,19 +1521,53 @@ fn to_kavita_series_metadata_update(
     }
 }
 
-/// 对应 Kotlin `toKavitaResetRequest`：系列重置专用请求——回退 komf 通过
-/// toKavitaTitleUpdate 写入的标题：sort_name 恢复为系列名、localized_name 置 null
-/// （Kavita UpdateSeries 用收到的值替换 LocalizedName，null 即清空）。
+/// 对应 Kotlin `withCurrentExternalIds`：Kavita UpdateSeries 对请求中缺失的
+/// 外部 id、metadata provider override、nameLocked 一律按 0/null/false 覆写——
+/// 不发送这些字段会把系列已有数据清掉并解锁。从系列回读当前值原样带回。
+fn with_current_external_ids(
+    request: KavitaSeriesUpdateRequest,
+    series: &KavitaSeries,
+) -> KavitaSeriesUpdateRequest {
+    KavitaSeriesUpdateRequest {
+        ani_list_id: series.ani_list_id,
+        mal_id: series.mal_id,
+        hardcover_id: series.hardcover_id,
+        metron_id: series.metron_id,
+        comic_vine_id: series.comic_vine_id.clone(),
+        manga_baka_id: series.manga_baka_id,
+        cbr_id: series.cbr_id,
+        metadata_provider_override: series.metadata_provider_override.clone(),
+        ..request
+    }
+}
+
+/// 对应 Kotlin `toKavitaResetRequest`（PR#15 语义）：系列重置专用请求——回退
+/// komf 通过标题更新写入的标题：name/sort_name 恢复为 OriginalName（Kavita
+/// scanner 按 OriginalName 匹配文件，重扫不覆盖）、localized_name 置 null、
+/// 全部解锁，并携带当前外部 id（避免 UpdateSeries 清掉）。
 /// 封面重置（delete_series_thumbnail）仍用保留双标题的 cover reset 请求。
 fn kavita_series_reset_update_request(series: &KavitaSeries) -> KavitaSeriesUpdateRequest {
-    KavitaSeriesUpdateRequest {
-        id: series.id,
-        localized_name: None,
-        sort_name: series.name.clone(),
-        sort_name_locked: false,
-        localized_name_locked: false,
-        cover_image_locked: false,
-    }
+    with_current_external_ids(
+        KavitaSeriesUpdateRequest {
+            id: series.id,
+            name: Some(series.original_name.clone()),
+            localized_name: None,
+            sort_name: series.original_name.clone(),
+            name_locked: false,
+            sort_name_locked: false,
+            localized_name_locked: false,
+            cover_image_locked: false,
+            ani_list_id: None,
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
+        },
+        series,
+    )
 }
 
 /// 对应 Kotlin `kavitaSeriesResetRequest`。
@@ -1751,6 +1824,58 @@ impl KavitaMediaServerClientAdapter {
     pub fn new(client: KavitaClient) -> Self {
         Self { client }
     }
+
+    /// 对齐 Kotlin `updateSeriesTitles`：Kavita 对标题更新返回 400（name/localized
+    /// name 已被库中其他系列使用，或改动会拆分/合并文件夹）且不说明是哪个字段。
+    /// 依次尝试去掉 name、去掉 localized name、两者都去掉，全部被拒才放弃。
+    /// 去重以序列化 JSON 为键实现（对应 Kotlin data class 的 distinct()）。
+    async fn update_series_titles(
+        &self,
+        series: &KavitaSeries,
+        request: KavitaSeriesUpdateRequest,
+    ) -> Result<(), MediaServerError> {
+        let keep_name = KavitaSeriesUpdateRequest {
+            name: None,
+            name_locked: series.name_locked,
+            ..request.clone()
+        };
+        let keep_localized = KavitaSeriesUpdateRequest {
+            localized_name: series.localized_name.clone(),
+            localized_name_locked: series.localized_name_locked,
+            ..request.clone()
+        };
+        let keep_both = KavitaSeriesUpdateRequest {
+            name: None,
+            name_locked: series.name_locked,
+            localized_name: series.localized_name.clone(),
+            localized_name_locked: series.localized_name_locked,
+            ..request.clone()
+        };
+        let attempts = [request, keep_name, keep_localized, keep_both];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut index = 0usize;
+        for attempt in attempts {
+            let key = serde_json::to_string(&attempt).unwrap_or_default();
+            if !seen.insert(key) {
+                continue;
+            }
+            match self.client.update_series(&attempt).await {
+                Ok(()) => return Ok(()),
+                Err(MediaServerError::Status(status, _)) if status == 400 && index < 3 => {
+                    tracing::warn!(
+                        "kavita: series {} title update rejected with 400, retrying without the offending field",
+                        series.id
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+            index += 1;
+        }
+        Err(MediaServerError::message(format!(
+            "kavita: series {} title update rejected with 400 on all variants",
+            series.id
+        )))
+    }
 }
 
 #[async_trait::async_trait]
@@ -1886,17 +2011,22 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
             .0
             .parse()
             .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+        // newName 由 title 决定；写入的标题字段同时锁定（Kavita
+        // scanner 重扫会重置未锁定的 sort/localized name）。
+        let new_name = metadata.title.as_ref().map(|t| t.name.clone());
         let localized_name = metadata
             .alternative_titles
             .as_ref()
             .and_then(|titles| titles.iter().find(|(_, _, language)| language.is_some()))
             .map(|(name, _, _)| name.clone());
-        if metadata.title_sort.is_some() || localized_name.is_some() {
+        if new_name.is_some() || metadata.title_sort.is_some() || localized_name.is_some() {
             let series = self.client.get_series(id).await?;
-            self.client
-                .update_series(&KavitaSeriesUpdateRequest {
+            let request = with_current_external_ids(
+                KavitaSeriesUpdateRequest {
                     id,
+                    name: new_name.as_ref().map(|n| n.trim().to_string()),
                     localized_name: localized_name
+                        .as_ref()
                         .map(|n| n.trim().to_string())
                         .or_else(|| series.localized_name.clone()),
                     sort_name: metadata
@@ -1904,11 +2034,22 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
                         .as_ref()
                         .map(|t| t.name.trim().to_string())
                         .unwrap_or_else(|| series.sort_name.clone()),
-                    sort_name_locked: series.sort_name_locked,
-                    localized_name_locked: series.localized_name_locked,
                     cover_image_locked: series.cover_image_locked,
-                })
-                .await?;
+                    name_locked: series.name_locked || new_name.is_some(),
+                    sort_name_locked: series.sort_name_locked || metadata.title_sort.is_some(),
+                    localized_name_locked: series.localized_name_locked || localized_name.is_some(),
+                    ani_list_id: None,
+                    mal_id: None,
+                    hardcover_id: None,
+                    metron_id: None,
+                    comic_vine_id: None,
+                    manga_baka_id: None,
+                    cbr_id: None,
+                    metadata_provider_override: None,
+                },
+                &series,
+            );
+            self.update_series_titles(&series, request).await?;
         }
         let old_metadata = self.client.get_series_metadata(id).await?;
         let request = to_kavita_series_metadata_update(metadata, &old_metadata, id);
@@ -1925,16 +2066,30 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
             .parse()
             .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
         let series = self.client.get_series(id).await?;
-        self.client
-            .update_series(&KavitaSeriesUpdateRequest {
+        // 封面重置只解锁封面，标题锁保持当前值（此前误把
+        // sort/localized 锁清掉，重扫会把 komf 写入的标题重置）
+        let request = with_current_external_ids(
+            KavitaSeriesUpdateRequest {
                 id,
+                name: None,
                 localized_name: series.localized_name.clone(),
                 sort_name: series.sort_name.clone(),
-                sort_name_locked: false,
-                localized_name_locked: false,
                 cover_image_locked: false,
-            })
-            .await
+                name_locked: series.name_locked,
+                sort_name_locked: series.sort_name_locked,
+                localized_name_locked: series.localized_name_locked,
+                ani_list_id: None,
+                mal_id: None,
+                hardcover_id: None,
+                metron_id: None,
+                comic_vine_id: None,
+                manga_baka_id: None,
+                cbr_id: None,
+                metadata_provider_override: None,
+            },
+            &series,
+        );
+        self.client.update_series(&request).await
     }
 
     async fn update_book_metadata(
@@ -1983,9 +2138,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
             .parse()
             .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series.id.0)))?;
         let series = self.client.get_series(id).await?;
-        // 对齐 PR#343：重置清掉 komf 写入的 localized/sort title（封面重置路径保留）
-        self.client
-            .update_series(&kavita_series_reset_update_request(&series))
+        // 对齐 PR#343：重置清掉 komf 写入的标题，标题请求走 400 重试
+        self.update_series_titles(&series, kavita_series_reset_update_request(&series))
             .await?;
         let current_metadata = self.client.get_series_metadata(id).await?;
         let request = kavita_series_reset_request(id, &current_metadata);
@@ -2380,23 +2534,101 @@ mod tests {
     fn series_update_request_serializes_kotlin_shape() {
         let request = KavitaSeriesUpdateRequest {
             id: 3,
+            name: Some("Kotlin Name".to_string()),
             localized_name: Some("ローカル名".to_string()),
             sort_name: "Sort Name".to_string(),
             cover_image_locked: true,
+            name_locked: true,
             sort_name_locked: false,
             localized_name_locked: true,
+            ani_list_id: None,
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["id"], 3);
+        assert_eq!(json["name"], "Kotlin Name");
         assert_eq!(json["localizedName"], "ローカル名");
         assert_eq!(json["sortName"], "Sort Name");
         assert_eq!(json["coverImageLocked"], true);
+        assert_eq!(json["nameLocked"], true);
         assert_eq!(json["localizedNameLocked"], true);
+        // 外部 id 为 None 时序列化省略（Kotlin @JsonInclude(NON_NULL)）
+        assert!(json.get("aniListId").is_none());
+        assert!(json.get("metadataProviderOverride").is_none());
+    }
+
+    /// 对齐 PR#15 `withCurrentExternalIds`：请求缺省的外部 id/metadata provider
+    /// override 必须从系列回读，避免 Kavita UpdateSeries 按 0/null 覆写。
+    #[test]
+    fn with_current_external_ids_carries_series_ids() {
+        let series = KavitaSeries {
+            id: 9,
+            name: "N".to_string(),
+            library_id: 1,
+            library_name: String::new(),
+            original_name: "O".to_string(),
+            localized_name: None,
+            sort_name: "S".to_string(),
+            pages: 0,
+            format: 0,
+            created: String::new(),
+            folder_path: String::new(),
+            cover_image_locked: false,
+            localized_name_locked: false,
+            sort_name_locked: false,
+            name_locked: false,
+            ani_list_id: Some(123),
+            mal_id: None,
+            hardcover_id: Some(456),
+            metron_id: None,
+            comic_vine_id: Some("cv-1".to_string()),
+            manga_baka_id: None,
+            cbr_id: Some(78),
+            metadata_provider_override: Some(serde_json::json!({"provider": "aniList", "id": 123})),
+        };
+        let request = with_current_external_ids(
+            KavitaSeriesUpdateRequest {
+                id: 9,
+                name: Some("New".to_string()),
+                localized_name: None,
+                sort_name: "S".to_string(),
+                cover_image_locked: false,
+                name_locked: false,
+                sort_name_locked: false,
+                localized_name_locked: false,
+                ani_list_id: None,
+                mal_id: None,
+                hardcover_id: None,
+                metron_id: None,
+                comic_vine_id: None,
+                manga_baka_id: None,
+                cbr_id: None,
+                metadata_provider_override: None,
+            },
+            &series,
+        );
+        assert_eq!(request.ani_list_id, Some(123));
+        assert_eq!(request.hardcover_id, Some(456));
+        assert_eq!(request.comic_vine_id.as_deref(), Some("cv-1"));
+        assert_eq!(request.cbr_id, Some(78));
+        assert_eq!(
+            request.metadata_provider_override,
+            Some(serde_json::json!({"provider": "aniList", "id": 123}))
+        );
+        // 未回读的字段保持请求原值
+        assert_eq!(request.name.as_deref(), Some("New"));
+        assert_eq!(request.id, 9);
     }
 
     /// 对齐 snd/komf PR#343：系列重置时清掉 komf 写入的标题——
-    /// sort_name 恢复为系列名、localized_name 置 null、lock 全 false；
-    /// 封面重置（delete_series_thumbnail）保留双标题，不受影响。
+    /// name/sort_name 恢复为 OriginalName、localized_name 置 null、lock 全 false；
+    /// 封面重置（delete_series_thumbnail）保留双标题与锁，不受影响。
     #[test]
     fn series_reset_update_request_clears_titles() {
         let series = KavitaSeries {
@@ -2404,7 +2636,7 @@ mod tests {
             name: "ペンと手錠と事実婚".to_string(),
             library_id: 1,
             library_name: String::new(),
-            original_name: String::new(),
+            original_name: "オリジナル名".to_string(),
             localized_name: Some("笔、手铐和事实婚".to_string()),
             sort_name: "PEN_TO_TEJYO".to_string(),
             pages: 0,
@@ -2414,16 +2646,234 @@ mod tests {
             cover_image_locked: false,
             localized_name_locked: true,
             sort_name_locked: true,
+            name_locked: true,
+            ani_list_id: Some(777),
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
         };
         let request = kavita_series_reset_update_request(&series);
         assert_eq!(request.id, 7);
+        assert_eq!(request.name, Some("オリジナル名".to_string()));
         assert_eq!(request.localized_name, None);
-        assert_eq!(request.sort_name, "ペンと手錠と事実婚");
+        assert_eq!(request.sort_name, "オリジナル名");
+        assert!(!request.name_locked);
         assert!(!request.sort_name_locked);
         assert!(!request.localized_name_locked);
         assert!(!request.cover_image_locked);
+        // 外部 id 从系列回读，不被重置请求清掉
+        assert_eq!(request.ani_list_id, Some(777));
         let json = serde_json::to_value(&request).unwrap();
         assert!(json.get("localizedName").is_none() || json["localizedName"].is_null());
+    }
+
+    /// 对齐 PR#15 `updateSeriesTitles`：Kavita 400 不说明是哪个字段，依次去掉
+    /// name → localized name → 两者，全部被拒才放弃（最后一次 400 抛错）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_series_titles_retries_without_offending_fields() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed2 = observed.clone();
+        tokio::spawn(async move {
+            // 首次连接是 authenticate（每次更新前认证），响应 token 后缓存生效
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"token\":\"t\"}",
+                )
+                .await;
+            for i in 0..4 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap();
+                observed2
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 11\r\n\r\nbad request")
+                    .await;
+            }
+        });
+
+        let client = KavitaClient::new(
+            reqwest::Client::builder().build().unwrap(),
+            &format!("http://{addr}"),
+            "key",
+        )
+        .unwrap();
+        let adapter = KavitaMediaServerClientAdapter::new(client);
+        let series = KavitaSeries {
+            id: 1,
+            name: "N".to_string(),
+            library_id: 1,
+            library_name: String::new(),
+            original_name: "O".to_string(),
+            localized_name: Some("JP".to_string()),
+            sort_name: "S".to_string(),
+            pages: 0,
+            format: 0,
+            created: String::new(),
+            folder_path: String::new(),
+            cover_image_locked: false,
+            localized_name_locked: false,
+            sort_name_locked: false,
+            name_locked: false,
+            ani_list_id: None,
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
+        };
+        let request = KavitaSeriesUpdateRequest {
+            id: 1,
+            name: Some("New".to_string()),
+            localized_name: Some("New JP".to_string()),
+            sort_name: "S".to_string(),
+            cover_image_locked: false,
+            name_locked: false,
+            sort_name_locked: false,
+            localized_name_locked: false,
+            ani_list_id: None,
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            adapter.update_series_titles(&series, request),
+        )
+        .await
+        .expect("update_series_titles timed out");
+        assert!(result.is_err());
+        let bodies = observed.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 4);
+        // 每个 body 的最后一行是 JSON 请求体，按字段值断言（Kotlin 语义：
+        // keepName → 去掉 name；keepLocalized → localizedName 回退系列当前值）。
+        let field = |b: &str, f: &str| -> Option<String> {
+            b.lines()
+                .last()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                .and_then(|v| v.get(f).and_then(|x| x.as_str()).map(|s| s.to_string()))
+        };
+        let sequence: Vec<(Option<String>, Option<String>)> = bodies
+            .iter()
+            .map(|b| (field(b, "name"), field(b, "localizedName")))
+            .collect();
+        assert_eq!(
+            sequence,
+            vec![
+                (Some("New".to_string()), Some("New JP".to_string())), // 原请求
+                (None, Some("New JP".to_string())),                    // 去 name
+                (Some("New".to_string()), Some("JP".to_string())),     // 去 localized name（回退当前值）
+                (None, Some("JP".to_string())),                        // 都去
+            ]
+        );
+    }
+
+    /// 第 2 次尝试（去掉 name）被接受即返回 Ok。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_series_titles_recovers_on_second_attempt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // 首次连接是 authenticate，响应 token 后缓存生效
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"token\":\"t\"}",
+                )
+                .await;
+            for i in 0..2 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let response = if i == 0 {
+                    b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 11\r\n\r\nbad request".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok".as_slice()
+                };
+                let _ = sock.write_all(response).await;
+            }
+        });
+
+        let client = KavitaClient::new(
+            reqwest::Client::builder().build().unwrap(),
+            &format!("http://{addr}"),
+            "key",
+        )
+        .unwrap();
+        let adapter = KavitaMediaServerClientAdapter::new(client);
+        let series = KavitaSeries {
+            id: 1,
+            name: "N".to_string(),
+            library_id: 1,
+            library_name: String::new(),
+            original_name: "O".to_string(),
+            localized_name: Some("JP".to_string()),
+            sort_name: "S".to_string(),
+            pages: 0,
+            format: 0,
+            created: String::new(),
+            folder_path: String::new(),
+            cover_image_locked: false,
+            localized_name_locked: false,
+            sort_name_locked: false,
+            name_locked: false,
+            ani_list_id: None,
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
+        };
+        let request = KavitaSeriesUpdateRequest {
+            id: 1,
+            name: Some("New".to_string()),
+            localized_name: Some("New JP".to_string()),
+            sort_name: "S".to_string(),
+            cover_image_locked: false,
+            name_locked: false,
+            sort_name_locked: false,
+            localized_name_locked: false,
+            ani_list_id: None,
+            mal_id: None,
+            hardcover_id: None,
+            metron_id: None,
+            comic_vine_id: None,
+            manga_baka_id: None,
+            cbr_id: None,
+            metadata_provider_override: None,
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            adapter.update_series_titles(&series, request),
+        )
+        .await
+        .expect("update_series_titles timed out");
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -1336,6 +1336,28 @@ fn remove_parentheses(name: &str) -> String {
     regex.replace_all(name, "").trim().to_string()
 }
 
+/// 重复标题折叠（对齐 snd/komf PR#15）：部分发行以标题在破折号两侧重复命名系列
+/// （"All about My Best Friend - All about My Best Friend"），CLOSEST_MATCH 编辑距离
+/// 限制下永远匹配不到真实标题。两侧被空白包围的破折号（- – —）分隔、忽略大小写与
+/// 空白后相等时，折叠为单个标题；单词内破折号（"Spider-Man"/"X-Men"）不是分隔符。
+fn collapse_repeated_title(name: &str) -> Option<String> {
+    let separator = regex::Regex::new(r"\s+[-–—]\s+").unwrap();
+    let whitespace = regex::Regex::new(r"\s+").unwrap();
+    fn normalize_part(part: &str, whitespace: &regex::Regex) -> String {
+        whitespace.replace_all(part.trim(), " ").to_lowercase()
+    }
+    for m in separator.find_iter(name) {
+        let first = &name[..m.start()];
+        let second = &name[m.end()..];
+        if !first.trim().is_empty()
+            && normalize_part(first, &whitespace) == normalize_part(second, &whitespace)
+        {
+            return Some(first.trim().to_string());
+        }
+    }
+    None
+}
+
 /// 构造搜索标题链：series_title → 提取候选（若启用）→ remove_parentheses → 备选标题。
 /// `remove_parentheses` 排在提取处理之后（用户既定）。
 ///
@@ -1350,6 +1372,10 @@ fn build_search_titles(
     let mut search_titles: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     push_search_title(&mut search_titles, &mut seen, series_title, cfg);
+    // 破折号两侧重复的标题折叠为单个，追加为额外搜索标题
+    if let Some(collapsed) = collapse_repeated_title(series_title) {
+        push_search_title(&mut search_titles, &mut seen, &collapsed, cfg);
+    }
     if cfg.enabled {
         for candidate in extract_series_titles(series_title, cfg) {
             push_search_title(&mut search_titles, &mut seen, &candidate, cfg);
@@ -1357,6 +1383,9 @@ fn build_search_titles(
     }
     let no_parens_title = remove_parentheses(series_title);
     push_search_title(&mut search_titles, &mut seen, &no_parens_title, cfg);
+    if let Some(collapsed) = collapse_repeated_title(&no_parens_title) {
+        push_search_title(&mut search_titles, &mut seen, &collapsed, cfg);
+    }
     for alt in alternative_titles {
         push_search_title(&mut search_titles, &mut seen, &alt.title, cfg);
     }
@@ -1737,6 +1766,32 @@ mod tests {
         let titles = build_search_titles("名侦探柯南 (境外版)", &[alt("柯南")], &cfg());
         // enabled=false：无提取候选，remove_parentheses 保留，备选在后
         assert_eq!(titles, vec!["名侦探柯南 (境外版)", "名侦探柯南", "柯南"]);
+    }
+
+    /// 破折号两侧重复的标题折叠为单个追加搜索；单词内
+    /// 破折号与 "A - B"（两侧不同）不折叠。
+    #[test]
+    fn repeated_title_collapses_into_single_search_title() {
+        let c = cfg();
+        let titles = build_search_titles("All about My Best Friend - All about My Best Friend", &[], &c);
+        assert_eq!(
+            titles,
+            vec![
+                "All about My Best Friend - All about My Best Friend",
+                "All about My Best Friend",
+            ]
+        );
+        // 大小写/空白差异仍折叠（en dash）
+        let titles2 = build_search_titles("All about  My Best Friend  –  all about my best friend", &[], &c);
+        assert!(titles2.contains(&"All about  My Best Friend".to_string()));
+        // 单词内破折号不折叠
+        assert_eq!(build_search_titles("Spider-Man", &[], &c), vec!["Spider-Man"]);
+        assert_eq!(build_search_titles("X-Men", &[], &c), vec!["X-Men"]);
+        // 两侧不同不折叠
+        assert_eq!(
+            build_search_titles("Kaguya-sama - Love is War", &[], &c),
+            vec!["Kaguya-sama - Love is War"]
+        );
     }
 
     #[test]
