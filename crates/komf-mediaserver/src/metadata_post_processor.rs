@@ -75,24 +75,22 @@ impl MetadataPostProcessor {
 
     fn post_process_series(&self, series: &SeriesMetadata, excluded_alt_titles: &[String]) -> SeriesMetadata {
         let alt_titles: Vec<SeriesTitle> = if self.alternative_series_titles {
-            let mut titles: Vec<SeriesTitle> = series
-                .titles
-                .iter()
-                .filter(|t| {
-                    t.language.is_none()
-                        || self
-                            .alternative_series_title_languages
-                            .iter()
-                            .any(|l| Some(l.as_str()) == t.language.as_deref())
-                })
-                .cloned()
-                .collect();
-            // 对齐 Kotlin：sortedWith(compareBy(nullsLast()) { it.language }) —— 有语言标签的在前。
-            titles.sort_by(|a, b| match (&a.language, &b.language) {
-                (Some(x), Some(y)) => x.cmp(y),
+            let mut titles: Vec<SeriesTitle> = series.titles.iter().cloned().collect();
+            // 配置列表中的语言按配置位置排前（替代按语言名字母序——
+            // 字母序让 "ja" 恒先于 "ja-ro"，配置顺序失效；Kavita 只有单个
+            // localizedName 字段取第一个备选标题，配置优先的语言必须排在前面）。
+            // 未配置 / 不在配置中的语言保留并回退原有逻辑：有语言标签的按字母序
+            // 在前、无语言最后。
+            titles.sort_by(|a, b| match (self.language_priority(a.language.as_deref()), self.language_priority(b.language.as_deref())) {
+                (Some(x), Some(y)) => x.cmp(&y),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
+                (None, None) => match (&a.language, &b.language) {
+                    (Some(x), Some(y)) => x.cmp(y),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                },
             });
             let mut seen = std::collections::HashSet::new();
             titles.retain(|t| seen.insert(distinct_name(&t.name)));
@@ -148,6 +146,16 @@ impl MetadataPostProcessor {
             tags,
             ..series.clone()
         }
+    }
+
+    /// 语言在 alternativeSeriesTitleLanguages 配置中的位置；未配置或不在配置中
+    /// 返回 None（排序回退原有逻辑：有语言标签的在前）。大小写不敏感
+    /// （"JA-RO" 配置可匹配 provider 的 "ja-ro"）。
+    fn language_priority(&self, language: Option<&str>) -> Option<usize> {
+        let language = language?;
+        self.alternative_series_title_languages
+            .iter()
+            .position(|l| l.eq_ignore_ascii_case(language))
     }
 
     fn add_score_tag(&self, tags: &mut Vec<String>, series: &SeriesMetadata) {
@@ -420,6 +428,88 @@ mod tests {
         // 主标题 = 葬送的芙莉莲（zh），同名备选被 distinctName 剔除；语言排序 nullsLast：
         // 有语言(zh/en)在前、无语言(原名)在后
         assert_eq!(alts, vec!["Frieren", "葬送のフリーレン"]);
+    }
+
+    /// 备选标题按配置列表位置排序（而非语言名字母序）。
+    /// 配置 ["en", "zh"] → en 排在最前（字母序会让 zh 在前）；Kavita 的
+    /// localizedName 取第一个有语言的备选，得到配置优先的 en。
+    /// fallbackToAltTitle 也回退到配置优先语言（排序后 first）。
+    #[test]
+    fn alt_titles_ordered_by_config_language_priority() {
+        let p = MetadataPostProcessor::new(
+            MediaType::Manga,
+            true,
+            Some("zh".into()),
+            true,
+            vec!["en".to_string(), "zh".to_string()],
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec![],
+        );
+        let out = p.process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
+        // 主标题 = zh；en(0) 排在 zh(1) 前、无语言最后；zh 同名备选被主标题剔除
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Frieren", "葬送のフリーレン"]);
+    }
+
+    /// 语言匹配大小写不敏感：配置 "EN"，provider 语言 "en" 仍命中并排最前。
+    #[test]
+    fn alt_titles_language_match_is_case_insensitive() {
+        let p = MetadataPostProcessor::new(
+            MediaType::Manga,
+            true,
+            None,
+            true,
+            vec!["EN".to_string()],
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec![],
+        );
+        let out = p.process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
+        // 配置 ["EN"]：en 命中（ignoreCase）排前；zh 不在配置但保留，
+        // 按原有逻辑（字母序）排在配置语言之后、无语言之前
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送のフリーレン");
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Frieren", "葬送的芙莉莲"]);
+    }
+
+    /// 配置语言全部未命中时只保留无语言备选（filter 语义与旧实现一致），主标题不受影响。
+    #[test]
+    fn alt_titles_empty_config_keeps_only_unlanguaged() {
+        let mut series = bangumi_series();
+        series.title = Some(SeriesTitle {
+            name: "オリジナル名".into(),
+            r#type: Some(TitleType::Native),
+            language: None,
+        });
+        let p = MetadataPostProcessor::new(
+            MediaType::Manga,
+            false, // 保留 provider 主标题，避免主标题从备选剔除干扰断言
+            None,
+            true,
+            vec![],
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec![],
+        );
+        let out = p.process(&SeriesAndBookMetadata::new(series, HashMap::new()));
+        // 空配置：不过滤任何语言；排序回退原有逻辑——有语言(en,zh)按字母序
+        // 在前（en < zh）、无语言最后
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Frieren", "葬送的芙莉莲", "葬送のフリーレン"]);
     }
 
     /// alternativeTitles=false（excluded=全量标题名）：主标题语言选择仍基于全量候选，
