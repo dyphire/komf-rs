@@ -1482,6 +1482,21 @@ fn to_kavita_series_metadata_update(
     }
 }
 
+/// 对应 Kotlin `toKavitaResetRequest`：系列重置专用请求——回退 komf 通过
+/// toKavitaTitleUpdate 写入的标题：sort_name 恢复为系列名、localized_name 置 null
+/// （Kavita UpdateSeries 用收到的值替换 LocalizedName，null 即清空）。
+/// 封面重置（delete_series_thumbnail）仍用保留双标题的 cover reset 请求。
+fn kavita_series_reset_update_request(series: &KavitaSeries) -> KavitaSeriesUpdateRequest {
+    KavitaSeriesUpdateRequest {
+        id: series.id,
+        localized_name: None,
+        sort_name: series.name.clone(),
+        sort_name_locked: false,
+        localized_name_locked: false,
+        cover_image_locked: false,
+    }
+}
+
 /// 对应 Kotlin `kavitaSeriesResetRequest`。
 /// 实测（2026-09-26，Kavita 服务端不拦 locked，客户端须自己尊重）：
 /// 对应字段 locked=true 时保留 current 值 + 保持 lock 状态，未锁定字段正常重置。
@@ -1968,15 +1983,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
             .parse()
             .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series.id.0)))?;
         let series = self.client.get_series(id).await?;
+        // 对齐 PR#343：重置清掉 komf 写入的 localized/sort title（封面重置路径保留）
         self.client
-            .update_series(&KavitaSeriesUpdateRequest {
-                id,
-                localized_name: series.localized_name.clone(),
-                sort_name: series.sort_name.clone(),
-                sort_name_locked: false,
-                localized_name_locked: false,
-                cover_image_locked: false,
-            })
+            .update_series(&kavita_series_reset_update_request(&series))
             .await?;
         let current_metadata = self.client.get_series_metadata(id).await?;
         let request = kavita_series_reset_request(id, &current_metadata);
@@ -2383,6 +2392,38 @@ mod tests {
         assert_eq!(json["sortName"], "Sort Name");
         assert_eq!(json["coverImageLocked"], true);
         assert_eq!(json["localizedNameLocked"], true);
+    }
+
+    /// 对齐 snd/komf PR#343：系列重置时清掉 komf 写入的标题——
+    /// sort_name 恢复为系列名、localized_name 置 null、lock 全 false；
+    /// 封面重置（delete_series_thumbnail）保留双标题，不受影响。
+    #[test]
+    fn series_reset_update_request_clears_titles() {
+        let series = KavitaSeries {
+            id: 7,
+            name: "ペンと手錠と事実婚".to_string(),
+            library_id: 1,
+            library_name: String::new(),
+            original_name: String::new(),
+            localized_name: Some("笔、手铐和事实婚".to_string()),
+            sort_name: "PEN_TO_TEJYO".to_string(),
+            pages: 0,
+            format: 0,
+            created: String::new(),
+            folder_path: String::new(),
+            cover_image_locked: false,
+            localized_name_locked: true,
+            sort_name_locked: true,
+        };
+        let request = kavita_series_reset_update_request(&series);
+        assert_eq!(request.id, 7);
+        assert_eq!(request.localized_name, None);
+        assert_eq!(request.sort_name, "ペンと手錠と事実婚");
+        assert!(!request.sort_name_locked);
+        assert!(!request.localized_name_locked);
+        assert!(!request.cover_image_locked);
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("localizedName").is_none() || json["localizedName"].is_null());
     }
 
     #[test]
