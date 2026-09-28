@@ -1298,11 +1298,14 @@ fn to_kavita_series_metadata_update(
     } else if metadata.publisher.is_none() && metadata.alternative_publishers.is_none() {
         current.publishers.clone()
     } else {
-        let mut names = metadata.alternative_publishers.clone().unwrap_or_default();
-        if let Some(publisher) = &metadata.publisher {
-            names.push(publisher.clone());
-        }
-        // Kotlin: (alternativePublishers + publisher).map{...}.toSet() —— 去重
+        // Kavita 无主出版社概念：服务端按 normalized name 排序、系列头仅显示
+        // publishers[0]——写全量会让字母序（而非 provider 选择）决定显示哪个出版社。
+        // 只写 chosen publisher（useOriginalPublisher 生效）；无 chosen 时回退
+        // alternatives 保证仍有出版社；与 Komga adapter 一致（对齐 snd/komf PR#342）。
+        let names = match &metadata.publisher {
+            Some(publisher) => vec![publisher.clone()],
+            None => metadata.alternative_publishers.clone().unwrap_or_default(),
+        };
         let mut seen = std::collections::HashSet::new();
         names
             .into_iter()
@@ -2321,6 +2324,47 @@ mod tests {
         let request = kavita_series_reset_request(7, &unlocked);
         let metadata = &serde_json::to_value(&request).unwrap()["seriesMetadata"];
         assert!(metadata["genres"].as_array().unwrap().is_empty());
+    }
+
+    /// 对齐 snd/komf PR#342：Kavita 无主出版社概念（按 normalized name 排序、
+    /// 系列头只显示 publishers[0]），只写 chosen publisher；无 chosen 时回退
+    /// alternatives；两者皆无时保留 current（useOriginalPublisher 生效）。
+    #[test]
+    fn series_metadata_update_writes_only_chosen_publisher() {
+        let current = KavitaSeriesMetadata {
+            id: 7,
+            series_id: 7,
+            publishers: vec![KavitaAuthor { id: 1, name: "Current Pub".to_string() }],
+            ..Default::default()
+        };
+        // 有 chosen publisher → 只写 chosen（不带 alternatives，避免字母序覆盖选择）
+        let md = MediaServerSeriesMetadataUpdate {
+            publisher: Some("白泉社".to_string()),
+            alternative_publishers: Some(vec!["Seven Seas Entertainment".to_string()]),
+            ..Default::default()
+        };
+        let request = to_kavita_series_metadata_update(&md, &current, 7);
+        let publishers = &request.series_metadata.publishers;
+        assert_eq!(publishers.len(), 1);
+        assert_eq!(publishers[0].name, "白泉社");
+        // 无 chosen → 回退 alternatives（系列仍有一个出版社）
+        let md2 = MediaServerSeriesMetadataUpdate {
+            publisher: None,
+            alternative_publishers: Some(vec!["Seven Seas Entertainment".to_string()]),
+            ..Default::default()
+        };
+        let request2 = to_kavita_series_metadata_update(&md2, &current, 7);
+        assert_eq!(request2.series_metadata.publishers.len(), 1);
+        assert_eq!(request2.series_metadata.publishers[0].name, "Seven Seas Entertainment");
+        // 两者皆无（真实路径：空 alt 被 metadata_mapper 过滤为 None）→ 保留 current
+        let md3 = MediaServerSeriesMetadataUpdate {
+            publisher: None,
+            alternative_publishers: None,
+            ..Default::default()
+        };
+        let request3 = to_kavita_series_metadata_update(&md3, &current, 7);
+        assert_eq!(request3.series_metadata.publishers.len(), 1);
+        assert_eq!(request3.series_metadata.publishers[0].name, "Current Pub");
     }
 
     #[test]
