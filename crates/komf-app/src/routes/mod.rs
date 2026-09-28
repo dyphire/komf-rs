@@ -8,6 +8,7 @@ pub mod media_server_routes;
 pub mod metadata_routes;
 pub mod notification_routes;
 pub mod oauth_routes;
+pub mod tracker_routes;
 pub mod web_auth;
 
 use komf_mediaserver::jobs::{KomfJobTracker, KomfJobsRepository};
@@ -40,6 +41,8 @@ pub struct AppState {
     pub book_walker_db_downloader: Arc<komf_core::providers::bookwalker::BookWalkerDbDownloader>,
     /// OAuth 管理器（AniList/MAL/Bangumi 登录/状态/退出路由用；热重载复用同一实例）。
     pub oauth_manager: Arc<komf_core::oauth::OAuthManager>,
+    /// Tracker 服务（AniList/MAL/Bangumi 阅读状态同步；复用 OAuth token）。
+    pub tracker_services: Arc<komf_core::trackers::TrackerServices>,
     /// 持有媒体服务器模块（含事件监听器生命周期管理）。
     _module: Arc<komf_mediaserver::MediaServerModule>,
 }
@@ -73,6 +76,7 @@ impl AppState {
         manga_baka_repository: Option<Arc<komf_core::providers::mangabaka::MangaBakaDbRepository>>,
         book_walker_db_downloader: Arc<komf_core::providers::bookwalker::BookWalkerDbDownloader>,
         oauth_manager: Arc<komf_core::oauth::OAuthManager>,
+        tracker_services: Arc<komf_core::trackers::TrackerServices>,
     ) -> Self {
         // 持有模块以保持事件监听器存活（Drop 会取消监听器 token）；
         // 热重载整体替换 AppState 时旧模块 Drop，自动停止旧监听器。
@@ -95,6 +99,7 @@ impl AppState {
             manga_baka_repository,
             book_walker_db_downloader,
             oauth_manager,
+            tracker_services,
             _module: module,
         }
     }

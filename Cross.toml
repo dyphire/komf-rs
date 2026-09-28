@@ -14,7 +14,8 @@
 # Forward the host KOMF_VERSION (git tag version injected by the release workflow)
 # into the cross container, otherwise option_env!("KOMF_VERSION") is unavailable
 # during musl cross-compilation.
-# OAuth client secrets are build-time injected (option_env!)
+# OAuth client secrets are build-time injected (option_env!); without passthrough
+# the cross container's rustc reads them as unset → "构建时未注入" on login.
 passthrough = [
     "KOMF_VERSION",
     "KOMF_OAUTH_ANILIST_CLIENT_SECRET",

@@ -323,6 +323,63 @@ impl OAuthManager {
     }
 
     /// 生成 code_verifier（43-128 个 unreserved 字符；两段 uuid hex = 64 字符）。
+    /// 记录"通过 komf API 关联"的条目（update 成功后调用；按 provider+track_id upsert）。
+    pub fn record_tracker_link(
+        &self,
+        provider: &str,
+        track_id: &str,
+        title: Option<&str>,
+        url: Option<&str>,
+        cover_url: Option<&str>,
+    ) {
+        let mut guard = self.conn();
+        let Some(conn) = guard.as_mut() else {
+            return;
+        };
+        let _ = conn.execute(
+            "INSERT INTO tracker_links(provider, track_id, title, url, cover_url, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(provider, track_id) DO UPDATE SET title=excluded.title, url=excluded.url, cover_url=excluded.cover_url, updated_at=excluded.updated_at",
+            params![
+                provider,
+                track_id,
+                title,
+                url,
+                cover_url,
+                chrono::Utc::now().timestamp()
+            ],
+        );
+    }
+
+    /// 已关联条目台账（按更新时间倒序）。
+    /// 返回 (provider, track_id, title, url, updated_at)。
+    pub fn list_tracker_links(
+        &self,
+    ) -> Vec<(String, String, Option<String>, Option<String>, Option<String>, i64)> {
+        let mut guard = self.conn();
+        let Some(conn) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT provider, track_id, title, url, cover_url, updated_at FROM tracker_links ORDER BY updated_at DESC",
+        ) {
+            Ok(st) => st,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        });
+        rows
+            .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+            .unwrap_or_default()
+    }
+
     fn new_verifier() -> String {
         format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
     }
@@ -457,9 +514,16 @@ impl OAuthManager {
     }
 
     async fn exchange(&self, token_url: &str, form: &[(&str, String)]) -> Result<OAuthToken, String> {
+        // 覆盖为浏览器 UA：全局 client 的 UA（dyphire/komf-rs）会被 AniList 的
+        // Cloudflare 拦截（连接级 403/1010），而 MAL/Bangumi 不受影响。
+        // 仅对 token 交换/刷新请求生效，不改变其他请求（如 MangaDex 封面）的 UA。
         let resp = self
             .http
             .post(token_url)
+            .header(
+                reqwest::header::USER_AGENT,
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            )
             .form(form)
             .send()
             .await
@@ -624,9 +688,20 @@ fn open_db(path: &Path) -> Option<Connection> {
             nonce TEXT NOT NULL,
             verifier TEXT NOT NULL,
             created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tracker_links (
+            provider TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            title TEXT,
+            url TEXT,
+            cover_url TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (provider, track_id)
         );",
     )
     .ok()?;
+    // 迁移旧库：tracker_links 无 cover_url 列时补充（列已存在时报错，忽略）。
+    let _ = conn.execute("ALTER TABLE tracker_links ADD COLUMN cover_url TEXT", []);
     Some(conn)
 }
 

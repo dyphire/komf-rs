@@ -125,6 +125,10 @@ fn build_state(
         work_dir.join("bookwalker"),
         http_client.clone(),
     ));
+    let tracker_services = Arc::new(komf_core::trackers::TrackerServices::new(
+        http_client.clone(),
+        Some(oauth_manager.clone()),
+    ));
     AppState::from_modules(
         config.clone(),
         media_server_module,
@@ -133,6 +137,7 @@ fn build_state(
         manga_baka_repository,
         book_walker_db_downloader,
         oauth_manager,
+        tracker_services,
     )
 }
 
