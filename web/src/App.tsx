@@ -1321,8 +1321,8 @@ export default function App() {
             </div>
             <div className="grid">
               <SwitchField label="eventListener.enabled" value={getPath(draft, [s, 'eventListener', 'enabled'])} onChange={(v) => upd([s, 'eventListener', 'enabled'], v)} />
-              <Field label={t('f.metadataLibraryFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataLibraryFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name} (${l.id})`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataLibraryFilter'], v)} /></Field>
-              <Field label={t('f.metadataSeriesExcludeFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataSeriesExcludeFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name} (${l.id})`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataSeriesExcludeFilter'], v)} /></Field>
+              <Field label={t('f.metadataLibraryFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataLibraryFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name ?? l.id}`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataLibraryFilter'], v)} /></Field>
+              <Field label={t('f.metadataSeriesExcludeFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataSeriesExcludeFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name ?? l.id}`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataSeriesExcludeFilter'], v)} /></Field>
             </div>
           </div>
         ))}
@@ -1525,8 +1525,8 @@ export default function App() {
               )}
             </div>
             <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
-              <span className="badge">{t('lib.metaBadge', { ids: Object.keys(getPath(orig, [scopeServer, 'metadataUpdate', 'library']) ?? {}).join(', ') || t('noneList') })}</span>
-              <span className="badge">{t('lib.provBadge', { ids: Object.keys(getPath(orig, ['metadataProviders', 'libraryProviders']) ?? {}).join(', ') || t('noneList') })}</span>
+              <span className="badge">{t('lib.metaBadge', { ids: Object.keys(getPath(orig, [scopeServer, 'metadataUpdate', 'library']) ?? {}).map((id) => `${((libs[scopeServer] ?? []).find((l: any) => l.id === id)?.name ?? id)} (${id})`).join(', ') || t('noneList') })}</span>
+              <span className="badge">{t('lib.provBadge', { ids: Object.keys(getPath(orig, ['metadataProviders', 'libraryProviders']) ?? {}).map((id) => `${((libs[scopeServer] ?? []).find((l: any) => l.id === id)?.name ?? id)} (${id})`).join(', ') || t('noneList') })}</span>
             </div>
             <div className="card" style={{ background: 'var(--panel2)' }}>
               <h3 style={{ overflowWrap: 'anywhere' }}>{t('lib.metaTitle', { lib: scopeLib || t('lib.unselected') })}</h3>
