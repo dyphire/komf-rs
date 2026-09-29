@@ -17,7 +17,7 @@ use axum::Router;
 /// 覆盖：MangaDex（uploads.mangadex.org）、AniList（s4.anilist.co）、MAL
 /// （cdn.myanimelist.net）、Bangumi（lain.bgm.tv）、MangaUpdates、BookWalker
 /// （img.sos-dan.net）、eHentai（ehgt.org）、WebToons（webtoon-phinf.pstatic.net）、
-/// Viz、ComicVine、YenPress、MangaBaka。
+/// Viz、ComicVine、YenPress、MangaBaka（api.mangabaka.org + 封面 cdn/images.mangabaka.dev）。
 const ALLOWED_COVER_HOST_SUFFIXES: &[&str] = &[
     "mangadex.org",
     "anilist.co",
@@ -33,6 +33,7 @@ const ALLOWED_COVER_HOST_SUFFIXES: &[&str] = &[
     "gamespot.com",
     "yenpress.com",
     "mangabaka.org",
+    "mangabaka.dev",
     "webtoons.com",
 ];
 
