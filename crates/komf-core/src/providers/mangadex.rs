@@ -538,8 +538,9 @@ fn pick_title(
     alt_titles: &[std::collections::HashMap<String, String>],
     preference: Option<&str>,
 ) -> (String, Option<TitleType>, Option<String>) {
-    // 标题语言偏好：主 title map 命中则直接采用；miss 再查 alt_titles（同为已返回的本地数据）；
-    // 都未命中回落原有 en→ja→ja-ro→其他。仅影响显示/写入，不参与匹配。
+    // 标题语言偏好：优先完全匹配（zh 只命中 zh），未命中再前缀匹配（zh 可命中
+    // zh-hk/zh-tw/zh-cn 等，排除 -ro 罗马音变体，避免 ja 命中 ja-ro）；主 title map
+    // 依次查找；仅影响显示/写入，不参与匹配。
     if let Some(pref) = preference {
         let pref_type = if pref == "ja" {
             TitleType::Native
@@ -552,6 +553,20 @@ fn pick_title(
         for alt in alt_titles {
             if let Some(name) = alt.get(pref) {
                 return (name.clone(), Some(pref_type), Some(pref.to_string()));
+            }
+        }
+        if let Some((lang, name)) = title
+            .iter()
+            .find(|(l, _)| l.starts_with(pref) && !l.ends_with("-ro"))
+        {
+            return (name.clone(), Some(pref_type), Some(lang.clone()));
+        }
+        for alt in alt_titles {
+            if let Some((lang, name)) = alt
+                .iter()
+                .find(|(l, _)| l.starts_with(pref) && !l.ends_with("-ro"))
+            {
+                return (name.clone(), Some(pref_type), Some(lang.clone()));
             }
         }
     }
@@ -948,6 +963,37 @@ mod tests {
         let (name, _, lang) = pick_title(&t, &alts, Some("zh"));
         assert_eq!(name, "剑风传奇");
         assert_eq!(lang.as_deref(), Some("zh"));
+    }
+
+    /// 完全匹配未命中时前缀匹配兜底：zh 可命中 zh-hk/zh-tw/zh-cn（主 map 优先）
+    #[test]
+    fn pick_title_preference_prefix_fallback() {
+        let t = title_map(&[("en", "Berserk"), ("zh-hk", "烙印戰士")]);
+        let (name, _, lang) = pick_title(&t, &[], Some("zh"));
+        assert_eq!(name, "烙印戰士");
+        assert_eq!(lang.as_deref(), Some("zh-hk"));
+
+        // alt_titles 前缀命中（主 map 无前缀命中时）
+        let t2 = title_map(&[("en", "Berserk")]);
+        let alts = vec![title_map(&[("zh-tw", "烙印勇士")])];
+        let (name, _, lang) = pick_title(&t2, &alts, Some("zh"));
+        assert_eq!(name, "烙印勇士");
+        assert_eq!(lang.as_deref(), Some("zh-tw"));
+    }
+
+    /// 前缀匹配排除罗马音变体：ja 配置不命中 ja-ro（完全匹配 ja 存在时仍命中 ja）
+    #[test]
+    fn pick_title_prefix_excludes_romaji() {
+        let t = title_map(&[("en", "Berserk"), ("ja-ro", "Berserk (JP)")]);
+        let (name, _, _) = pick_title(&t, &[], Some("ja"));
+        // 完全匹配 ja 无 → 前缀 ja 不命中 ja-ro → fallback en
+        assert_eq!(name, "Berserk");
+
+        // 完全匹配 ja 存在 → 命中 ja
+        let t2 = title_map(&[("ja", "ベルセルク"), ("ja-ro", "Berserk (JP)")]);
+        let (name, _, lang) = pick_title(&t2, &[], Some("ja"));
+        assert_eq!(name, "ベルセルク");
+        assert_eq!(lang.as_deref(), Some("ja"));
     }
 
     #[test]

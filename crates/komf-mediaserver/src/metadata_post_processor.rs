@@ -223,7 +223,22 @@ impl MetadataPostProcessor {
 
     fn choose_series_title(&self, series: &SeriesMetadata) -> Option<SeriesTitle> {
         let chosen = match &self.series_title_language {
-            Some(lang) => series.titles.iter().find(|t| t.language.as_deref() == Some(lang.as_str())),
+            Some(lang) => {
+                // 优先语言标识完全匹配；未命中再前缀匹配（如 zh 命中 zh-Hant/zh-CN），
+                // 前缀匹配排除罗马音变体（归一后以 -ro 结尾，避免 ja 命中 ja-ro）。
+                series
+                    .titles
+                    .iter()
+                    .find(|t| t.language.as_deref() == Some(lang.as_str()))
+                    .or_else(|| {
+                        series.titles.iter().find(|t| {
+                            t.language
+                                .as_deref()
+                                .map(|l| l.starts_with(lang.as_str()) && !l.ends_with("-ro"))
+                                .unwrap_or(false)
+                        })
+                    })
+            }
             None => series.titles.first(),
         };
         chosen.cloned().or_else(|| series.title.clone())
@@ -382,6 +397,54 @@ mod tests {
         let out = processor(Some("zh".into()))
             .process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
         assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+    }
+
+    /// 完全匹配未命中时前缀匹配兜底：配置 zh 可命中 zh-Hant/zh-CN 标题
+    #[test]
+    fn series_title_falls_back_to_prefix_match() {
+        let mut series = bangumi_series();
+        series.titles = vec![
+            SeriesTitle {
+                name: "葬送のフリーレン".into(),
+                r#type: Some(TitleType::Native),
+                language: None,
+            },
+            SeriesTitle {
+                name: "葬送的芙莉蓮".into(),
+                r#type: None,
+                language: Some("zh-Hant".into()),
+            },
+            SeriesTitle {
+                name: "Frieren".into(),
+                r#type: Some(TitleType::Localized),
+                language: Some("en".into()),
+            },
+        ];
+        let out = processor(Some("zh".into()))
+            .process(&SeriesAndBookMetadata::new(series, HashMap::new()));
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉蓮");
+    }
+
+    /// 前缀匹配排除罗马音变体：配置 ja 时仅有 ja-ro（归一后的罗马音）不命中 → title 保持 None
+    #[test]
+    fn series_title_prefix_match_excludes_romaji() {
+        let mut series = bangumi_series();
+        series.title = None;
+        series.titles = vec![
+            SeriesTitle {
+                name: "Frieren".into(),
+                r#type: Some(TitleType::Romaji),
+                language: Some("ja-ro".into()),
+            },
+            SeriesTitle {
+                name: "Frieren (EN)".into(),
+                r#type: Some(TitleType::Localized),
+                language: Some("en".into()),
+            },
+        ];
+        let out = processor(Some("ja".into()))
+            .process(&SeriesAndBookMetadata::new(series, HashMap::new()));
+        assert_eq!(out.series_metadata.title, None);
     }
 
     /// 未配置 seriesTitleLanguage → titles.first()（日文原名），不预设 name_cn 优先

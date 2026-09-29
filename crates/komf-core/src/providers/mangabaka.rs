@@ -958,8 +958,16 @@ fn primary_title(series: &MangaBakaSeriesDto, preference: Option<&str>) -> Strin
         Some(titles) => titles,
         None => return String::new(),
     };
-    // 标题语言偏好：命中偏好语言（前缀匹配，排除 -Latn 罗马音变体）；未命中回落 native→primary_en→first。
+    // 标题语言偏好：优先完全匹配（-Latn 罗马音变体归一为 -ro 后比较，与主标题
+    // choose_series_title 口径一致）；未命中再前缀匹配（zh 可命中 zh-Hant/zh-CN 等，
+    // 排除 -Latn 罗马音变体，避免 ja 命中 ja-Latn）；仍未命中回落 native→primary_en→first。
     if let Some(pref) = preference {
+        if let Some(t) = titles
+            .iter()
+            .find(|t| t.language.replace("-Latn", "-ro") == pref)
+        {
+            return t.title.clone();
+        }
         if let Some(t) = titles
             .iter()
             .find(|t| t.language.starts_with(pref) && !t.language.ends_with("-Latn"))
@@ -3072,18 +3080,92 @@ mod tests {
                     note: None,
                 },
                 MangaBakaTitleDto {
+                    language: "zh-Hant".to_string(),
+                    title: "繁體名".to_string(),
+                    traits: vec![],
+                    is_primary: Some(true),
+                    note: None,
+                },
+                MangaBakaTitleDto {
                     language: "ja".to_string(),
                     title: "日本語".to_string(),
                     traits: vec!["native".to_string()],
                     is_primary: None,
                     note: None,
                 },
+                MangaBakaTitleDto {
+                    language: "ja-Latn".to_string(),
+                    title: "Nihongo".to_string(),
+                    traits: vec!["native".to_string()],
+                    is_primary: None,
+                    note: None,
+                },
+                MangaBakaTitleDto {
+                    language: "zh".to_string(),
+                    title: "简体名".to_string(),
+                    traits: vec![],
+                    is_primary: None,
+                    note: None,
+                },
             ]),
             source: MangaBakaSourceDto::default(),
         };
+        // 无偏好：native 优先（ja 命中，ja-Latn 虽也 native 但排后）。
         assert_eq!(primary_title(&series, None), "日本語");
+        // 完全匹配：zh 只命中 zh（zh-Hant 排在 zh 前也不会误选）。
         assert_eq!(primary_title(&series, Some("en")), "English Title");
-        assert_eq!(primary_title(&series, Some("zh")), "日本語");
+        assert_eq!(primary_title(&series, Some("zh")), "简体名");
+        assert_eq!(primary_title(&series, Some("zh-Hant")), "繁體名");
+        // -Latn 归一为 -ro 后完全匹配（与主标题 choose_series_title 口径一致）。
+        assert_eq!(primary_title(&series, Some("ja")), "日本語");
+        assert_eq!(primary_title(&series, Some("ja-ro")), "Nihongo");
+        // 完全匹配未命中回落 native。
+        assert_eq!(primary_title(&series, Some("ko")), "日本語");
+    }
+
+    #[test]
+    fn primary_title_exact_then_prefix_fallback() {
+        let make = |language: &str, title: &str, traits: Vec<String>| MangaBakaTitleDto {
+            language: language.to_string(),
+            title: title.to_string(),
+            traits,
+            is_primary: Some(true),
+            note: None,
+        };
+        let series = MangaBakaSeriesDto {
+            id: 1,
+            artists: None,
+            authors: None,
+            canonical_url: "https://mangabaka.org/1".to_string(),
+            cover: MangaBakaCoverDto::default(),
+            description: None,
+            final_volume: None,
+            publishers: None,
+            rating: None,
+            status: MangaBakaStatusDto::Releasing,
+            r#type: MangaBakaTypeDto::Manga,
+            links_v2: None,
+            published: None,
+            tags_v2: None,
+            has_anime: false,
+            anime: None,
+            source: MangaBakaSourceDto::default(),
+            titles: Some(vec![
+                make("zh-Hant", "繁體名", vec![]),
+                make("ko", "한글", vec![]),
+            ]),
+        };
+        // 无完全匹配 zh → 前缀匹配命中 zh-Hant。
+        assert_eq!(primary_title(&series, Some("zh")), "繁體名");
+        // ja 配置：无 ja/ja-Latn 前缀 → fallback first。
+        assert_eq!(primary_title(&series, Some("ja")), "繁體名");
+
+        // ja-Latn 不被 ja 前缀命中（排除 -Latn），fallback native（ja-Latn 本身是 native）。
+        let series2 = MangaBakaSeriesDto {
+            titles: Some(vec![make("ja-Latn", "Nihongo", vec!["native".to_string()])]),
+            ..series.clone()
+        };
+        assert_eq!(primary_title(&series2, Some("ja")), "Nihongo");
     }
 
     #[test]
