@@ -106,7 +106,7 @@ impl MetadataMerger {
     /// 对应单书 `mergeBookMetadata`。
     ///
     /// 对齐 Kotlin：book tags 恒 `old.ifEmpty { new }`（不受 mergeTags 控制）；
-    /// links 为 old + new 拼接；storyArcs 不参与合并（结果恒 None）。
+    /// links 为 distinctBy { label } 去重（Rust 扩展）；storyArcs 不参与合并（结果恒 None）。
     fn merge_book_metadata_fields(&self, original: &BookMetadata, new: &BookMetadata) -> BookMetadata {
         BookMetadata {
             title: original.title.clone().or_else(|| new.title.clone()),
@@ -125,12 +125,16 @@ impl MetadataMerger {
                 original.tags.clone()
             },
             isbn: original.isbn.clone().or_else(|| new.isbn.clone()),
-            links: original
-                .links
-                .iter()
-                .chain(new.links.iter())
-                .cloned()
-                .collect(),
+            // Rust 扩展：对齐系列 links 的 distinctBy { label } 去重
+            // （Kotlin 原版为简单拼接，聚合下同名同源链接会重复写入）。
+            links: distinct_by_label(
+                original
+                    .links
+                    .iter()
+                    .chain(new.links.iter())
+                    .cloned()
+                    .collect(),
+            ),
             chapters: if original.chapters.is_empty() {
                 new.chapters.clone()
             } else {

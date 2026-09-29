@@ -321,7 +321,7 @@ impl MetadataPostProcessor {
     }
 }
 
-fn distinct_name(title: &str) -> String {
+pub(crate) fn distinct_name(title: &str) -> String {
     replace_fullwidth_chars(&strip_accents(&title.replace(' ', ""))).to_lowercase()
 }
 

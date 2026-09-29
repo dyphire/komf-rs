@@ -318,6 +318,7 @@ impl MetadataService {
             else {
                 continue;
             };
+            let core_provider = provider.provider_name();
             let _ = tx.send(MetadataJobEvent::ProviderSeries {
                 provider: provider_name,
             });
@@ -332,6 +333,11 @@ impl MetadataService {
                         SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata)
                             .with_oneshots(books);
                     new.excluded_alt_titles = excluded;
+                    // 逐 provider 翻译标签（非 bangumi/ehentai），merge 前处理，
+                    // 保证聚合结果中非 bangumi/ehentai 来源的标签仍被翻译。
+                    let new = self
+                        .metadata_update_service
+                        .translate_metadata(&new, Some(core_provider));
                     match result.take() {
                         Some(base) => {
                             // 多 provider 合并：与 aggregate_metadata_from_providers
@@ -422,8 +428,29 @@ impl MetadataService {
                 .into_iter()
                 .filter(|p| p.provider_name() != provider_name)
                 .collect();
-            self.aggregate_metadata_from_providers(&series, &books, provider_metadata.metadata, book_metadata, excluded, providers, edition, &tx)
-                .await
+            // 聚合前先按主 provider 翻译其标签（非 bangumi/ehentai 时），
+            // 保证合并结果中主 provider 的英文标签仍被翻译；其余 provider 的
+            // 标签在 aggregate_metadata_from_providers 内 merge 前逐 provider 处理。
+            let mut primary = SeriesAndBookMetadata::new(
+                provider_metadata.metadata,
+                book_metadata.clone(),
+            )
+            .with_oneshots(&books);
+            primary.excluded_alt_titles = excluded;
+            let primary = self
+                .metadata_update_service
+                .translate_metadata(&primary, Some(provider_name));
+            self.aggregate_metadata_from_providers(
+                &series,
+                &books,
+                primary.series_metadata,
+                primary.book_metadata,
+                primary.excluded_alt_titles,
+                providers,
+                edition,
+                &tx,
+            )
+            .await
         } else {
             // Kotlin key 为 MediaServerBook（内嵌 oneshot），Rust 以 book_oneshots 等价承载。
             let mut manual =
@@ -1108,7 +1135,12 @@ impl MetadataService {
                 .await;
             let _ = tx.send(MetadataJobEvent::ProviderCompleted { provider: provider.provider_name() });
             if let Some(new_metadata) = matched {
-                current = self.merge_metadata(current, new_metadata);
+                // 逐 provider 翻译标签（非 bangumi/ehentai），保证聚合结果中
+                // 非 bangumi/ehentai 来源的标签仍被翻译、bangumi/ehentai 原样。
+                let translated = self
+                    .metadata_update_service
+                    .translate_metadata(&new_metadata, Some(provider.provider_name()));
+                current = self.merge_metadata(current, translated);
             }
         }
         current
@@ -1119,9 +1151,24 @@ impl MetadataService {
         original: SeriesAndBookMetadata,
         new: SeriesAndBookMetadata,
     ) -> SeriesAndBookMetadata {
+        // alternativeTitles=false 的 provider（如 aggregate 下的 anilist）：其 excluded
+        // 名单中的标题名先从自身 titles 剔除（不参与合并）。否则名单在并集后会被
+        // 后处理用于剔除备选，误删其他 provider 的同名备选标题（aggregate 下
+        // bangumi+anilist：bangumi 的 Berserk/ベルセルク 会被 anilist 名单误删）。
+        let mut new_series_metadata = new.series_metadata.clone();
+        if !new.excluded_alt_titles.is_empty() {
+            let excluded: std::collections::HashSet<String> = new
+                .excluded_alt_titles
+                .iter()
+                .map(|n| crate::metadata_post_processor::distinct_name(n))
+                .collect();
+            new_series_metadata
+                .titles
+                .retain(|t| !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name)));
+        }
         let merged_series = self
             .metadata_merger
-            .merge_series_metadata(&original.series_metadata, &new.series_metadata);
+            .merge_series_metadata(&original.series_metadata, &new_series_metadata);
 
         let original_map: HashMap<String, Option<BookMetadata>> = original
             .book_metadata
@@ -1146,13 +1193,9 @@ impl MetadataService {
             .collect();
 
         // Kotlin mergeMetadata 的 key 为 MediaServerBook（保留 original 的 oneshot 信息）。
-        // excluded 备选名单取双方并集（任一来源禁用即最终不写；同名去重）。
-        let mut excluded_alt_titles = original.excluded_alt_titles;
-        for name in new.excluded_alt_titles {
-            if !excluded_alt_titles.iter().any(|n| n == &name) {
-                excluded_alt_titles.push(name);
-            }
-        }
+        // excluded 名单只保留 original（主 provider）的：new 的名单已随其标题剔除完成
+        // 使命，并入会误伤其他 provider 的同名备选标题（见上）。
+        let excluded_alt_titles = original.excluded_alt_titles;
         let mut merged_meta =
             SeriesAndBookMetadata::new(merged_series, merged_books).with_book_oneshots(original.book_oneshots);
         merged_meta.excluded_alt_titles = excluded_alt_titles;

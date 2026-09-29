@@ -86,17 +86,7 @@ impl MetadataUpdater {
         metadata: &SeriesAndBookMetadata,
         provider: Option<CoreProviders>,
     ) -> Result<(), MediaServerError> {
-        let translated = match &self.tag_translator {
-            Some(tr)
-                if !matches!(
-                    provider,
-                    Some(CoreProviders::Bangumi) | Some(CoreProviders::EHentai)
-                ) =>
-            {
-                translate_tags(metadata, tr)
-            }
-            _ => metadata.clone(),
-        };
+        let translated = self.translate_metadata(metadata, provider);
         let processed = self.post_processor.process(&translated);
         self.update_series_metadata(series, &processed.series_metadata).await?;
         self.update_book_metadata(series, &translated, &processed).await?;
@@ -111,6 +101,28 @@ impl MetadataUpdater {
                 .await?;
         }
         Ok(())
+    }
+
+    /// 按 provider 决定是否应用标签翻译：bangumi/ehentai 不翻译（自身产出中文
+    /// 标签/标签体系不适用）；其余 provider 翻译。aggregate 聚合路径在 merge
+    /// 前逐 provider 调用本方法，保证聚合结果中非 bangumi/ehentai 来源的英文
+    /// 标签仍被翻译、bangumi/ehentai 来源的标签保持原样。
+    pub fn translate_metadata(
+        &self,
+        metadata: &SeriesAndBookMetadata,
+        provider: Option<CoreProviders>,
+    ) -> SeriesAndBookMetadata {
+        match &self.tag_translator {
+            Some(tr)
+                if !matches!(
+                    provider,
+                    Some(CoreProviders::Bangumi) | Some(CoreProviders::EHentai)
+                ) =>
+            {
+                translate_tags(metadata, tr)
+            }
+            _ => metadata.clone(),
+        }
     }
 
     /// 对应 `resetLibraryMetadata`。
