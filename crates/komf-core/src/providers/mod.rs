@@ -35,6 +35,30 @@ pub(crate) fn client_with_default_headers(headers: reqwest::header::HeaderMap) -
         .expect("failed to build http client")
 }
 
+/// komf 自有 metadata provider 对应的站点域名白名单（host 小写，含子域尾匹配）。
+/// 用于 MangaBaka/MangaDex 等聚合站点的外部链接过滤：只写入 komf 已有 provider 的链接。
+pub fn is_komf_provider_domain(host: &str) -> bool {
+    const DOMAINS: &[&str] = &[
+        "anilist.co",
+        "myanimelist.net",
+        "bgm.tv",
+        "bangumi.tv",
+        "bangumi.moe",
+        "chii.in",
+        "mangadex.org",
+        "mangaupdates.com",
+        "mangabaka.org",
+        "bookwalker.jp",
+        "comicvine.gamespot.com",
+        "e-hentai.org",
+        "exhentai.org",
+    ];
+    let host = host.trim().to_ascii_lowercase();
+    DOMAINS
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
 /// provider 名称 —— 对应 `CoreProviders.kt` 枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoreProviders {

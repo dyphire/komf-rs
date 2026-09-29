@@ -741,9 +741,21 @@ fn build_links(manga: &MangaDexManga, filter: &[crate::config::MangaDexLink]) ->
             tagged.push((lk, WebLink { label, url }));
         }
     }
-    // Kotlin: filter 非空时仅保留过滤项；否则全部
+    // 默认（filter 空）仅保留 komf 自有 provider 对应的链接（MangaDex 自身 +
+    // AniList/BookWalker/MangaUpdates/MyAnimeList）；filter 非空时按显式过滤项。
+    const KOMF_PROVIDER_LINKS: &[L] = &[
+        L::MangaDex,
+        L::Anilist,
+        L::BookwalkerJp,
+        L::MangaUpdates,
+        L::MyAnimeList,
+    ];
     if filter.is_empty() {
-        tagged.into_iter().map(|(_, w)| w).collect()
+        tagged
+            .into_iter()
+            .filter(|(k, _)| KOMF_PROVIDER_LINKS.contains(k))
+            .map(|(_, w)| w)
+            .collect()
     } else {
         tagged
             .into_iter()

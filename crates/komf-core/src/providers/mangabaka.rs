@@ -767,13 +767,17 @@ impl MangaBakaMetadataMapper {
             Vec::new()
         };
 
-        // 链接：官方链接（links_v2，按 label 排序）+ 来源链接
+        // 链接：官方链接（links_v2，仅保留 komf 自有 provider 域名，按 label 排序）+ 来源链接
         let official_links: Vec<WebLink> = if cfg.links {
             let mut links: Vec<WebLink> = series
                 .links_v2
                 .iter()
                 .flatten()
                 .filter_map(|link| {
+                    let host = url::Url::parse(&link.url).ok()?.host_str()?.to_string();
+                    if !crate::providers::is_komf_provider_domain(&host) {
+                        return None;
+                    }
                     official_link_url(&link.url).map(|url| WebLink {
                         label: link.name_display.clone(),
                         url,
@@ -798,38 +802,10 @@ impl MangaBakaMetadataMapper {
                     url: format!("https://anilist.co/manga/{id}"),
                 });
             }
-            if let Some(id) = source
-                .anime_news_network
-                .as_ref()
-                .and_then(|s| s.id_string())
-            {
-                links.push(WebLink {
-                    label: "AnimeNewsNetwork".to_string(),
-                    url: format!("https://www.animenewsnetwork.com/encyclopedia/manga.php?id={id}"),
-                });
-            }
-            if let Some(id) = source.anime_planet.as_ref().and_then(|s| s.id_string()) {
-                links.push(WebLink {
-                    label: "AnimePlanet".to_string(),
-                    url: format!("https://www.anime-planet.com/manga/{id}"),
-                });
-            }
-            if let Some(id) = source.kitsu.as_ref().and_then(|s| s.id_string()) {
-                links.push(WebLink {
-                    label: "Kitsu".to_string(),
-                    url: format!("https://kitsu.app/manga/{id}"),
-                });
-            }
             if let Some(id) = source.manga_updates.as_ref().and_then(|s| s.id_string()) {
                 links.push(WebLink {
                     label: "MangaUpdates".to_string(),
                     url: format!("https://www.mangaupdates.com/series/{id}"),
-                });
-            }
-            if let Some(id) = source.shikimori.as_ref().and_then(|s| s.id_string()) {
-                links.push(WebLink {
-                    label: "Shikimori".to_string(),
-                    url: format!("https://shikimori.one/mangas/{id}"),
                 });
             }
             if let Some(id) = source.my_anime_list.as_ref().and_then(|s| s.id_string()) {
@@ -3154,6 +3130,14 @@ mod tests {
                 make("zh-Hant", "繁體名", vec![]),
                 make("ko", "한글", vec![]),
             ]),
+            content_rating: None,
+            is_licensed: false,
+            last_updated_at: None,
+            merged_with: None,
+            original_language: None,
+            state: None,
+            total_chapters: None,
+            relationships_v2: None,
         };
         // 无完全匹配 zh → 前缀匹配命中 zh-Hant。
         assert_eq!(primary_title(&series, Some("zh")), "繁體名");
