@@ -463,13 +463,22 @@ pub struct MangaBakaLinkedSeriesDto {
 
 const BASE_URL: &str = "https://api.mangabaka.org";
 
+/// MangaBaka API 限流 —— 对齐 komf 原版 Kotlin `HttpRequestRateLimiter`
+/// （interval=2s、eventsPerInterval=1、allowBurst=false）：每个请求间隔约 2 秒。
+const MANGA_BAKA_RATE_LIMIT: (u32, std::time::Duration) = (1, std::time::Duration::from_secs(2));
+
 pub struct MangaBakaApiClient {
     pub http: reqwest::Client,
+    limiter: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl MangaBakaApiClient {
     fn new(http: reqwest::Client) -> Self {
-        Self { http }
+        let (events, interval) = MANGA_BAKA_RATE_LIMIT;
+        Self {
+            http,
+            limiter: crate::rate_limiter::ThroughputLimiter::new(events, interval),
+        }
     }
 
     async fn search(
@@ -478,6 +487,7 @@ impl MangaBakaApiClient {
         types: &[MangaBakaTypeDto],
         types_not: &[MangaBakaTypeDto],
     ) -> Result<Vec<MangaBakaSeriesDto>, ProviderError> {
+        self.limiter.acquire().await;
         let mut request = self
             .http
             .get(format!("{BASE_URL}/v1/series/search"))
@@ -503,6 +513,7 @@ impl MangaBakaApiClient {
     }
 
     async fn get_series(&self, id: i64) -> Result<MangaBakaSeriesDto, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{BASE_URL}/v1/series/{id}"))

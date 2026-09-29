@@ -9,6 +9,7 @@ pub mod config;
 pub mod model;
 pub mod oauth;
 pub mod providers;
+pub mod rate_limiter;
 pub mod trackers;
 pub mod util;
 
