@@ -747,8 +747,9 @@ pub fn to_series_update_request(
         title: patch(update.title.as_ref().map(|t| t.name.clone())),
         title_sort: patch(update.title_sort.as_ref().map(|t| t.name.clone())),
         alternate_titles: patch(update.alternative_titles.as_ref().map(|titles| {
-            // 对应 Kotlin：ROMAJI/NATIVE 用类型标签，LOCALIZED 用语言（缺省回退类型标签），
-            // null 类型且无语言 → 过滤；再按 title 去重（distinctBy { it.title }，保留首个）。
+            // 对应 Kotlin：ROMAJI/NATIVE 用类型标签；LOCALIZED 优先语言（缺省回退
+            // alternateTitleLabels.localized，再回退类型标签）；null 类型且无语言 → 过滤；
+            // 再按 title 去重（distinctBy { it.title }，保留首个）。
             let mut seen = std::collections::HashSet::new();
             titles
                 .iter()
@@ -767,14 +768,12 @@ pub fn to_series_update_request(
                                 .unwrap_or_else(|| TitleType::Native.label().to_string()),
                         ),
                         Some(TitleType::Localized) => Some(
-                            alternate_title_labels
-                                .localized
-                                .clone()
-                                .unwrap_or_else(|| {
-                                    language
-                                        .clone()
-                                        .unwrap_or_else(|| TitleType::Localized.label().to_string())
-                                }),
+                            language.clone().unwrap_or_else(|| {
+                                alternate_title_labels
+                                    .localized
+                                    .clone()
+                                    .unwrap_or_else(|| TitleType::Localized.label().to_string())
+                            }),
                         ),
                         None => language.clone(),
                     }?;
@@ -1740,6 +1739,7 @@ mod tests {
                 ("soredemo".to_string(), Some(TitleType::Romaji), None),
                 ("それでも".to_string(), Some(TitleType::Native), None),
                 ("Soredemo".to_string(), Some(TitleType::Localized), Some("en".to_string())),
+                ("無言語".to_string(), Some(TitleType::Localized), None),
             ]),
             ..series_update_base()
         };
@@ -1754,7 +1754,10 @@ mod tests {
             vec![
                 ("罗马音".to_string(), "soredemo".to_string()),
                 ("原名".to_string(), "それでも".to_string()),
-                ("别名".to_string(), "Soredemo".to_string()),
+                // LOCALIZED 优先语言（对齐 Kotlin language ?: type.label），
+                // 配置的 localized 标签仅在语言缺失时兜底
+                ("en".to_string(), "Soredemo".to_string()),
+                ("别名".to_string(), "無言語".to_string()),
             ]
         );
     }
