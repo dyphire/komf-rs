@@ -371,6 +371,7 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             author_roles: Some(config.manga_baka.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
             artist_roles: Some(config.manga_baka.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
             mode: Some(to_manga_baka_mode_dto(config.manga_baka.mode)),
+            cover_languages: Some(config.manga_baka.cover_languages.clone()),
         }),
         book_walker: Some(to_provider_dto(&config.book_walker)),
         manga_dex: Some(MangaDexConfigDto {
@@ -1289,6 +1290,15 @@ fn from_manga_baka_dto(dto: &MangaBakaConfigDto, base: &komf_core::config::Manga
             .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
             .unwrap_or_else(|| base.artist_roles.clone()),
         mode: dto.mode.map(from_manga_baka_mode_dto).unwrap_or(base.mode),
+        book_metadata: dto
+            .book_metadata
+            .as_ref()
+            .map(|d| from_book_metadata_dto(d, &base.book_metadata))
+            .unwrap_or_else(|| base.book_metadata.clone()),
+        cover_languages: dto
+            .cover_languages
+            .clone()
+            .unwrap_or_else(|| base.cover_languages.clone()),
     }
 }
 

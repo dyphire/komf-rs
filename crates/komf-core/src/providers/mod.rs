@@ -444,6 +444,7 @@ fn create_metadata_providers(
         http_client,
         manga_baka_db.as_deref(),
         series_title_language.clone(),
+        config.manga_baka.cover_languages.clone(),
     ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),

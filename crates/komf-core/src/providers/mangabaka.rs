@@ -47,6 +47,39 @@ pub struct MangaBakaTagsResponse {
     pub data: Vec<MangaBakaSeriesTagDto>,
 }
 
+/// `GET /v1/series/{id}/images` 响应：`{ "data": [...], "pagination": {...} }`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MangaBakaSeriesImagesResponse {
+    pub data: Vec<MangaBakaSeriesImageDto>,
+    pub pagination: MangaBakaSeriesImagesPagination,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MangaBakaSeriesImagesPagination {
+    pub count: i64,
+    pub next: Option<String>,
+}
+
+/// 多语言卷封面 —— 对应 `V1_Series_Cover_Image`（`type=volume` 过滤后）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MangaBakaSeriesImageDto {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub index: Option<String>,
+    #[serde(default)]
+    pub index_numeric: Option<f64>,
+    /// 封面类型（`type=volume` 过滤后基本为 volume）。
+    #[serde(rename = "type", default)]
+    pub r#type: String,
+    /// 封面语言（`V1_TitleLanguage`，如 en/ja/ko/pt）。
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub image: MangaBakaCoverDto,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MangaBakaSeriesDto {
@@ -531,6 +564,44 @@ impl MangaBakaApiClient {
         let parsed: MangaBakaSeriesResponse = response.json().await?;
         Ok(parsed.data)
     }
+
+    /// 拉取多语言卷封面列表（`GET /v1/series/{id}/images?type=volume`，分页直至取完）。
+    async fn get_series_images(
+        &self,
+        id: i64,
+    ) -> Result<Vec<MangaBakaSeriesImageDto>, ProviderError> {
+        let mut all = Vec::new();
+        let mut page = 1u32;
+        loop {
+            self.limiter.acquire().await;
+            let response = self
+                .http
+                .get(format!("{BASE_URL}/v1/series/{id}/images"))
+                .query(&[
+                    ("type", "volume"),
+                    ("limit", "50"),
+                    ("page", page.to_string().as_str()),
+                ])
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(ProviderError::Status(
+                    CoreProviders::MangaBaka,
+                    status,
+                    body,
+                ));
+            }
+            let parsed: MangaBakaSeriesImagesResponse = response.json().await?;
+            all.extend(parsed.data);
+            if parsed.pagination.next.is_none() || all.len() as i64 >= parsed.pagination.count {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +635,8 @@ impl MangaBakaMetadataMapper {
         &self,
         series: &MangaBakaSeriesDto,
         thumbnail: Option<Image>,
+        images: &[MangaBakaSeriesImageDto],
+        cover_languages: &[String],
     ) -> ProviderSeriesMetadata {
         let cfg = &self.metadata_config;
 
@@ -844,8 +917,9 @@ impl MangaBakaMetadataMapper {
             thumbnail,
         };
 
+        // 多语言卷封面按 coverLanguages 过滤/排序/按卷分组（对齐 MangaDex books）。
         let books = if cfg.books {
-            Vec::<SeriesBook>::new()
+            build_books_from_images(images, cover_languages)
         } else {
             Vec::new()
         };
@@ -1141,6 +1215,14 @@ pub struct MangaBakaMetadataProvider {
     pub type_excludes: Vec<MangaBakaTypeDto>,
     /// 对应 Kotlin cache4k expireAfterWrite(30.minutes)（无 maximumSize）
     pub cache: TtlCache<i64, MangaBakaSeriesDto>,
+    /// 书籍封面下载客户端（`bookMetadata.thumbnail` 开关）。
+    pub book_cover_fetch_client: Option<reqwest::Client>,
+    /// 书籍封面语言偏好（默认 en/ja，对齐 MangaDex coverLanguages）。
+    pub cover_languages: Vec<String>,
+    /// series_metadata.books 开关（决定是否拉取/组装书籍列表）。
+    pub books_enabled: bool,
+    /// 多语言卷封面缓存（30 分钟，与 series cache 同策略）。
+    pub images_cache: TtlCache<i64, Vec<MangaBakaSeriesImageDto>>,
 }
 
 pub fn create_provider(
@@ -1149,6 +1231,7 @@ pub fn create_provider(
     http_client: &reqwest::Client,
     database_file: Option<&std::path::Path>,
     series_title_language: Option<String>,
+    cover_languages: Vec<String>,
 ) -> Option<MangaBakaMetadataProvider> {
     if !config.enabled {
         return None;
@@ -1202,6 +1285,13 @@ pub fn create_provider(
         type_includes,
         type_excludes,
         cache: TtlCache::new(Duration::from_secs(30 * 60)),
+        book_cover_fetch_client: config
+            .book_metadata
+            .thumbnail
+            .then(|| http_client.clone()),
+        cover_languages,
+        books_enabled: config.series_metadata.books,
+        images_cache: TtlCache::new(Duration::from_secs(30 * 60)),
     })
 }
 
@@ -1221,6 +1311,53 @@ impl MangaBakaMetadataProvider {
         let bytes = response.bytes().await.ok()?.to_vec();
         Some(Image::new(bytes, mime))
     }
+
+    /// 多语言卷封面（30 分钟缓存 + API 分页拉取；离线库无 images 数据，返回空）。
+    async fn fetch_series_images(
+        &self,
+        series_id: i64,
+    ) -> Result<Vec<MangaBakaSeriesImageDto>, ProviderError> {
+        let MangaBakaDataSource::Api(client) = &self.data_source else {
+            // 离线库 series 表仅存单封面，无多语言卷封面数据，books 无法组装。
+            return Ok(Vec::new());
+        };
+        self.images_cache
+            .get_or_load(series_id, || client.get_series_images(series_id))
+            .await
+    }
+}
+
+/// 对应 Kotlin books：多语言卷封面按 coverLanguages 过滤、排序、按卷分组取首个。
+/// 与 MangaDex `build_books_from_covers` 语义一致。
+fn build_books_from_images(
+    images: &[MangaBakaSeriesImageDto],
+    cover_languages: &[String],
+) -> Vec<SeriesBook> {
+    let mut filtered: Vec<&MangaBakaSeriesImageDto> = images
+        .iter()
+        .filter(|i| cover_languages.iter().any(|cl| cl == &i.language))
+        .collect();
+    filtered.sort_by(|a, b| {
+        let idx = |i: &MangaBakaSeriesImageDto| -> usize {
+            cover_languages
+                .iter()
+                .position(|cl| cl == &i.language)
+                .unwrap_or(usize::MAX)
+        };
+        idx(a).cmp(&idx(b))
+    });
+    let mut seen = std::collections::HashSet::new();
+    filtered
+        .into_iter()
+        .filter(|i| seen.insert(i.index.clone()))
+        .map(|i| SeriesBook {
+            id: ProviderBookId(i.id.map(|id| id.to_string()).unwrap_or_default()),
+            number: i.index_numeric.map(crate::model::BookRange::single),
+            name: i.index.clone(),
+            r#type: None,
+            edition: None,
+        })
+        .collect()
 }
 
 /// 对应 Kotlin `.toSet()`：按 (name,type,languageTag) 去重，保留首次出现顺序。
@@ -1266,7 +1403,14 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         })?;
         let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
         let cover = self.fetch_cover(&series).await;
-        Ok(self.metadata_mapper.to_series_metadata(&series, cover))
+        let images = if self.books_enabled {
+            self.fetch_series_images(id).await?
+        } else {
+            Vec::new()
+        };
+        Ok(self
+            .metadata_mapper
+            .to_series_metadata(&series, cover, &images, &self.cover_languages))
     }
 
     async fn get_series_cover(
@@ -1282,11 +1426,51 @@ impl MetadataProvider for MangaBakaMetadataProvider {
 
     async fn get_book_metadata(
         &self,
-        _series_id: &ProviderSeriesId,
-        _book_id: &ProviderBookId,
+        series_id: &ProviderSeriesId,
+        book_id: &ProviderBookId,
     ) -> Result<ProviderBookMetadata, ProviderError> {
-        // 对应 Kotlin `TODO("Not yet implemented")`
-        Err(ProviderError::NotImplemented(CoreProviders::MangaBaka))
+        // book_id = 卷封面 image id → 从 images 缓存找 x350.x1 → 下载缩略图。
+        let cover = if let Some(client) = self.book_cover_fetch_client.as_ref() {
+            let id: i64 = series_id.0.parse().map_err(|_| {
+                ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
+            })?;
+            let images = self.fetch_series_images(id).await?;
+            let book_id_i64: Option<i64> = book_id.0.parse().ok();
+            let url = images
+                .iter()
+                .find(|i| i.id == book_id_i64)
+                .and_then(|i| i.image.x350.as_ref())
+                .and_then(|s| s.x1.clone());
+            match url {
+                Some(url) => {
+                    let response = client.get(url).send().await?;
+                    if !response.status().is_success() {
+                        return Ok(ProviderBookMetadata {
+                            id: Some(book_id.clone()),
+                            series_id: Some(series_id.clone()),
+                            metadata: crate::model::BookMetadata::default(),
+                        });
+                    }
+                    let mime = response
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .map(|ct| ct.to_str().unwrap_or("").to_string());
+                    let bytes = response.bytes().await?.to_vec();
+                    Some(Image::new(bytes, mime))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok(ProviderBookMetadata {
+            id: Some(book_id.clone()),
+            series_id: Some(series_id.clone()),
+            metadata: crate::model::BookMetadata {
+                thumbnail: cover,
+                ..Default::default()
+            },
+        })
     }
 
     async fn search_series(
@@ -1339,7 +1523,17 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         match matched {
             Some(series) => {
                 let cover = self.fetch_cover(series).await;
-                Ok(Some(self.metadata_mapper.to_series_metadata(series, cover)))
+                let images = if self.books_enabled {
+                    self.fetch_series_images(series.id).await?
+                } else {
+                    Vec::new()
+                };
+                Ok(Some(self.metadata_mapper.to_series_metadata(
+                    series,
+                    cover,
+                    &images,
+                    &self.cover_languages,
+                )))
             }
             None => Ok(None),
         }
@@ -3019,5 +3213,36 @@ mod tests {
         assert!(tags[0].is_genre);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn books_filtered_sorted_by_cover_languages() {
+        let img = |id: i64, lang: &str, vol: f64| MangaBakaSeriesImageDto {
+            id: Some(id),
+            index: Some(vol.to_string()),
+            index_numeric: Some(vol),
+            r#type: "volume".to_string(),
+            language: lang.to_string(),
+            image: MangaBakaCoverDto::default(),
+        };
+        let images = vec![
+            img(1, "en", 1.0),
+            img(2, "ja", 1.0),
+            img(3, "pt", 1.0),
+            img(4, "ja", 2.0),
+            img(5, "en", 2.0),
+        ];
+        let books = build_books_from_images(&images, &["en".to_string(), "ja".to_string()]);
+        assert_eq!(books.len(), 2, "one book per volume");
+        assert_eq!(books[0].id.0, "1", "en preferred for volume 1");
+        assert_eq!(books[0].name.as_deref(), Some("1"));
+        assert_eq!(books[0].number, Some(crate::model::BookRange::single(1.0)));
+        assert_eq!(books[1].id.0, "5", "en preferred for volume 2");
+        let ja_only = build_books_from_images(&images, &["ja".to_string()]);
+        assert_eq!(ja_only.len(), 2);
+        assert_eq!(ja_only[0].id.0, "2");
+        assert_eq!(ja_only[1].id.0, "4");
+        let no_match = build_books_from_images(&images, &["zh".to_string()]);
+        assert!(no_match.is_empty());
     }
 }

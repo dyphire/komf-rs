@@ -434,6 +434,7 @@ pub struct MangaBakaConfigDto {
     pub author_roles: Option<Vec<KomfAuthorRole>>,
     pub artist_roles: Option<Vec<KomfAuthorRole>>,
     pub mode: Option<MangaBakaMode>,
+    pub cover_languages: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -442,6 +442,11 @@ pub struct MangaBakaConfig {
     pub artist_roles: Vec<AuthorRole>,
     #[serde(default)]
     pub mode: MangaBakaMode,
+    #[serde(default)]
+    pub book_metadata: BookMetadataConfig,
+    /// 书籍封面语言偏好（默认 en/ja，对齐 MangaDex coverLanguages）。
+    #[serde(default = "default_cover_languages")]
+    pub cover_languages: Vec<String>,
 }
 
 impl Default for MangaBakaConfig {
@@ -455,6 +460,8 @@ impl Default for MangaBakaConfig {
             author_roles: default_writer_roles(),
             artist_roles: default_artist_roles(),
             mode: MangaBakaMode::Api,
+            book_metadata: BookMetadataConfig::default(),
+            cover_languages: default_cover_languages(),
         }
     }
 }

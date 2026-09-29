@@ -153,6 +153,7 @@ async fn main() {
             &http,
             None,
             None,
+            vec!["en".to_string(), "ja".to_string()],
         );
         run(&p, "MangaBaka(API)").await;
     }
