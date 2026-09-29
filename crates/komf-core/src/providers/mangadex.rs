@@ -329,8 +329,11 @@ impl MangaDexMetadataMapper {
 
         // Kotlin: 主标题 + altTitles 合并为 titles 列表，按语言代码分类
         // （originalLanguage→Native，ja-/ko-/zh-ro→Romaji，其余→Localized）。
+        // 与 Kotlin 不同：Kotlin Map 保持 JSON 键顺序、entries.first() 稳定取首键；
+        // Rust HashMap 迭代无序，仅取首项会随机丢语言（如主 title map 的 zh 被丢弃），
+        // 导致 seriesTitleLanguage 完全匹配失效。故遍历全部键值对，每个语言均入候选。
         let mut built_titles: Vec<SeriesTitle> = Vec::new();
-        if let Some((main_lang, main_name)) = manga.attributes.title.iter().next() {
+        for (main_lang, main_name) in manga.attributes.title.iter() {
             built_titles.push(classify_title(
                 main_name,
                 Some(main_lang.as_str()),
@@ -338,7 +341,7 @@ impl MangaDexMetadataMapper {
             ));
         }
         for alt in manga.attributes.alt_titles.iter() {
-            if let Some((lang, name)) = alt.iter().next() {
+            for (lang, name) in alt.iter() {
                 built_titles.push(classify_title(
                     name,
                     Some(lang.as_str()),

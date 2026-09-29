@@ -978,12 +978,26 @@ fn map_status(status: &MangaBakaStatusDto) -> SeriesStatus {
     }
 }
 
-/// 非 genre 标签按 series_count 降序取前 15 —— 对齐原版 komf 对 mangaupdates
-/// categories（按票数降序取前 15）的处理；避免大系列数百个细分标签全量写入。
+/// 非 genre 标签中仅保留 Themes/Activities/Sexual Content 分类（按 name_path
+/// 前缀，排除 Locations/Occupations/Character Types/Demographics 等噪音分类），
+/// 并丢弃剧透（is_spoiler）标签；再按 series_count 降序取前 15 —— 对齐原版
+/// komf 对 mangaupdates categories（按票数降序取前 15）的处理；避免大系列
+/// 数百个细分标签全量写入。
 fn top_series_tags<'a>(tags: impl IntoIterator<Item = &'a MangaBakaSeriesTagDto>) -> Vec<String> {
-    let mut tags: Vec<&MangaBakaSeriesTagDto> = tags.into_iter().filter(|t| !t.is_genre).collect();
+    let mut tags: Vec<&MangaBakaSeriesTagDto> = tags
+        .into_iter()
+        .filter(|t| {
+            if t.is_genre || t.is_spoiler.unwrap_or(false) {
+                return false;
+            }
+            let path = t.name_path.trim();
+            path.starts_with("Themes")
+                || path.starts_with("Activities")
+                || path.starts_with("Sexual Content")
+        })
+        .collect();
     tags.sort_by(|a, b| b.series_count.cmp(&a.series_count));
-    tags.iter().take(15).map(|t| t.name.clone()).collect()
+    tags.iter().take(20).map(|t| t.name.clone()).collect()
 }
 
 /// 解析 `YYYY-MM-DD`。
@@ -3197,41 +3211,56 @@ mod tests {
     }
 
     #[test]
-    fn top_series_tags_limits_to_15_highest_frequency() {
-        let make =
-            |name: &str, is_genre: bool, series_count: i32| -> MangaBakaSeriesTagDto {
-                serde_json::from_value(serde_json::json!({
-                    "name": name,
-                    "is_genre": is_genre,
-                    "series_count": series_count,
-                }))
-                .unwrap()
-            };
+    fn top_series_tags_limits_to_20_highest_frequency() {
+        let make = |name: &str,
+                    is_genre: bool,
+                    series_count: i32,
+                    name_path: &str,
+                    is_spoiler: bool| {
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "name_path": name_path,
+                "is_genre": is_genre,
+                "is_spoiler": is_spoiler,
+                "series_count": series_count,
+            }))
+            .unwrap()
+        };
 
-        // 20 个非 genre 标签，series_count 递减：应只保留最高频 15 个且降序。
+        // 20 个 Themes 分类标签，series_count 递减：应只保留最高频 15 个且降序。
         let tags: Vec<MangaBakaSeriesTagDto> = (1..=20)
             .rev()
-            .map(|i| make(&format!("Tag{i}"), false, i))
+            .map(|i| make(&format!("Tag{i}"), false, i, "Themes > Sub", false))
             .collect();
         let top = top_series_tags(tags.iter());
-        assert_eq!(top.len(), 15);
+        assert_eq!(top.len(), 20);
         assert_eq!(top.first().map(String::as_str), Some("Tag20"));
-        assert_eq!(top.last().map(String::as_str), Some("Tag6"));
-        assert!(!top.iter().any(|t| t == "Tag5"), "低频标签应被丢弃");
+        assert_eq!(top.last().map(String::as_str), Some("Tag1"));
+        assert!(!top.iter().any(|t| t == "Tag0"), "低频标签应被丢弃");
 
-        // genre 标签不参与排序/截断。
+        // genre 不参与；非 Themes/Activities/Sexual Content 分类被过滤；剧透标签被丢弃。
         let mixed = vec![
-            make("Action", true, 99999),
-            make("Nudity", false, 1),
-            make("Crimes", false, 50),
+            make("Action", true, 99999, "Genres > Action", false),
+            make("Nudity", false, 1, "Themes > Nudity", false),
+            make("Crimes", false, 50, "Activities > Crimes", false),
+            make("Japan", false, 9999, "Locations > Japan", false),
+            make("Plot Twist", false, 7000, "Themes > Plot Twist", true),
+            make("Sex", false, 5000, "Sexual Content > Sex", false),
         ];
         assert_eq!(
             top_series_tags(mixed.iter()),
-            vec!["Crimes".to_string(), "Nudity".to_string()]
+            vec![
+                "Sex".to_string(),
+                "Crimes".to_string(),
+                "Nudity".to_string()
+            ]
         );
 
-        // 少于 15 个时全量返回（保序）。
-        let few = vec![make("A", false, 3), make("B", false, 1)];
+        // 少于 20 个时全量返回（保序）。
+        let few = vec![
+            make("A", false, 3, "Themes > A", false),
+            make("B", false, 1, "Activities > B", false),
+        ];
         assert_eq!(
             top_series_tags(few.iter()),
             vec!["A".to_string(), "B".to_string()]
