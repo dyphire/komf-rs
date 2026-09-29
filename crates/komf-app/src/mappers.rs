@@ -1,7 +1,7 @@
 //! 配置 DTO 映射 —— 对应 `AppConfigMapper.kt` / `AppConfigUpdateMapper.kt`。
 use komf_api_models::common::*;
 use komf_api_models::config::*;
-use komf_core::config::{BangumiConfig, EHentaiArchiveConfig, EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
+use komf_core::config::{BangumiConfig, BookWalkerConfig, EHentaiArchiveConfig, EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
 use komf_core::model::{AuthorRole, MediaType, ReadingDirection, UpdateMode};
 use komf_core::util::NameSimilarityMatcher;
 use komf_mediaserver::config::{
@@ -372,8 +372,9 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             artist_roles: Some(config.manga_baka.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
             mode: Some(to_manga_baka_mode_dto(config.manga_baka.mode)),
             cover_languages: Some(config.manga_baka.cover_languages.clone()),
+            update_interval_hours: Some(config.manga_baka.update_interval_hours),
         }),
-        book_walker: Some(to_provider_dto(&config.book_walker)),
+        book_walker: Some(to_book_walker_dto(&config.book_walker)),
         manga_dex: Some(MangaDexConfigDto {
             priority: Some(config.manga_dex.priority),
             enabled: Some(config.manga_dex.enabled),
@@ -523,6 +524,22 @@ fn to_provider_dto(config: &ProviderConfig) -> ProviderConfigDto {
 }
 
 /// EHentai 独立 DTO（含 preferredLanguages）；tagWhitelist 输出空数组（脚本兼容）。
+fn to_book_walker_dto(config: &BookWalkerConfig) -> BookWalkerConfigDto {
+    BookWalkerConfigDto {
+        priority: Some(config.priority),
+        enabled: Some(config.enabled),
+        series_metadata: Some(to_series_metadata_dto(&config.series_metadata)),
+        book_metadata: Some(to_book_metadata_dto(&config.book_metadata)),
+        name_matching_mode: config.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+        media_type: Some(to_media_type_dto(config.media_type)),
+        author_roles: Some(config.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+        artist_roles: Some(config.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+        tag_whitelist: Some(config.tag_whitelist.clone()),
+        tag_whitelist_file: config.tag_whitelist_file.clone(),
+        update_interval_hours: Some(config.update_interval_hours),
+    }
+}
+
 fn to_ehentai_dto(config: &EHentaiConfig) -> EHentaiConfigDto {
     EHentaiConfigDto {
         priority: Some(config.priority),
@@ -986,7 +1003,7 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
         book_walker: dto
             .book_walker
             .as_ref()
-            .map(|d| from_provider_dto(d, &base.book_walker))
+            .map(|d| from_book_walker_dto(d, &base.book_walker))
             .unwrap_or_else(|| base.book_walker.clone()),
         manga_dex: dto
             .manga_dex
@@ -1106,6 +1123,52 @@ fn from_provider_dto(dto: &ProviderConfigDto, base: &ProviderConfig) -> Provider
             .unwrap_or_else(|| base.artist_roles.clone()),
         tag_whitelist: dto.tag_whitelist.clone().unwrap_or_else(|| base.tag_whitelist.clone()),
         tag_whitelist_file: dto.tag_whitelist_file.clone().or_else(|| base.tag_whitelist_file.clone()),
+    }
+}
+
+fn from_book_walker_dto(
+    dto: &BookWalkerConfigDto,
+    base: &BookWalkerConfig,
+) -> BookWalkerConfig {
+    BookWalkerConfig {
+        priority: dto.priority.unwrap_or(base.priority),
+        enabled: dto.enabled.unwrap_or(base.enabled),
+        series_metadata: dto
+            .series_metadata
+            .as_ref()
+            .map(|d| from_series_metadata_dto(d, &base.series_metadata))
+            .unwrap_or_else(|| base.series_metadata.clone()),
+        book_metadata: dto
+            .book_metadata
+            .as_ref()
+            .map(|d| from_book_metadata_dto(d, &base.book_metadata))
+            .unwrap_or_else(|| base.book_metadata.clone()),
+        name_matching_mode: match &dto.name_matching_mode {
+            Some(v) => v.map(from_name_matching_mode_dto),
+            None => base.name_matching_mode,
+        },
+        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        author_roles: dto
+            .author_roles
+            .as_ref()
+            .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
+            .unwrap_or_else(|| base.author_roles.clone()),
+        artist_roles: dto
+            .artist_roles
+            .as_ref()
+            .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
+            .unwrap_or_else(|| base.artist_roles.clone()),
+        tag_whitelist: dto
+            .tag_whitelist
+            .clone()
+            .unwrap_or_else(|| base.tag_whitelist.clone()),
+        tag_whitelist_file: dto
+            .tag_whitelist_file
+            .clone()
+            .or_else(|| base.tag_whitelist_file.clone()),
+        update_interval_hours: dto
+            .update_interval_hours
+            .unwrap_or(base.update_interval_hours),
     }
 }
 
@@ -1299,6 +1362,9 @@ fn from_manga_baka_dto(dto: &MangaBakaConfigDto, base: &komf_core::config::Manga
             .cover_languages
             .clone()
             .unwrap_or_else(|| base.cover_languages.clone()),
+        update_interval_hours: dto
+            .update_interval_hours
+            .unwrap_or(base.update_interval_hours),
     }
 }
 

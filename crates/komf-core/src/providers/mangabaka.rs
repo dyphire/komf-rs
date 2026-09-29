@@ -2260,6 +2260,11 @@ impl MangaBakaDbDownloader {
             let this = self.clone();
             tokio::spawn(async move {
                 let result = this.do_download(&sender).await;
+                // 容错：失败残留的临时文件清理（成功路径已 rename，此清理无害）
+                let _ = std::fs::remove_file(PathBuf::from(format!(
+                    "{}.tmp",
+                    this.database_file.display()
+                )));
                 this.download_in_progress
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 let _ = result;
@@ -2271,6 +2276,43 @@ impl MangaBakaDbDownloader {
             }
         }
         receiver
+    }
+
+    /// 后台定时更新（对齐 bangumi/ehentai archive）：
+    /// - 库缺失/元数据无效：启动即自动下载；
+    /// - 周期（interval_hours）检查 checksum，有变化才重下（do_download 内部跳过一致）；
+    /// - 下载失败：15 分钟快速重试（不删旧库，provider 保持可用）。
+    /// interval_hours == 0 时不启动（仅手动下载）。
+    pub fn start_auto_update(&self, interval_hours: u64) {
+        if interval_hours == 0 {
+            return;
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let _ = std::fs::create_dir_all(&this.work_dir);
+            let interval = std::time::Duration::from_secs(interval_hours * 3600);
+            let retry = std::time::Duration::from_secs(15 * 60);
+            loop {
+                let ok = Self::wait_download(&this).await;
+                tokio::time::sleep(if ok { interval } else { retry }).await;
+            }
+        });
+    }
+
+    /// 启动（或复用）下载并等待 Finished/Error 事件；返回是否成功。
+    async fn wait_download(d: &MangaBakaDbDownloader) -> bool {
+        let mut rx = d.launch_download();
+        loop {
+            // watch channel：事件变化后 changed() Ok；sender 全部 drop 后 Err（防悬挂）
+            if rx.changed().await.is_err() {
+                return false;
+            }
+            match rx.borrow().as_ref() {
+                Some(DownloadProgress::FinishedEvent) => return true,
+                Some(DownloadProgress::ErrorEvent { .. }) => return false,
+                _ => {}
+            }
+        }
     }
 
     async fn do_download(
@@ -2312,12 +2354,10 @@ impl MangaBakaDbDownloader {
                 return Ok(());
             }
         }
-        // 元数据/旧库清理
-        let _ = std::fs::remove_file(self.work_dir.join("timestamp"));
-        let _ = std::fs::remove_file(self.work_dir.join("checksum.sha1"));
-        let _ = std::fs::remove_file(&self.database_file);
-        let _ = std::fs::remove_file(&self.database_archive);
+        // 容错：保留旧库与元数据；下载/解压/建索引写临时文件，成功后再原子替换，
+        // 失败时旧库仍可用（provider 不因一次失败下载而失效）。
         let _ = std::fs::create_dir_all(&self.work_dir);
+        let tmp_file = PathBuf::from(format!("{}.tmp", self.database_file.display()));
 
         // 2. 下载压缩包
         emit(
@@ -2394,7 +2434,7 @@ impl MangaBakaDbDownloader {
                 .next()
                 .ok_or_else(|| "TarException: empty archive".to_string())?
                 .map_err(|e| format!("TarException: {e}"))?;
-            let output = std::fs::File::create(&self.database_file)
+            let output = std::fs::File::create(&tmp_file)
                 .map_err(|e| format!("FileSystemException: {e}"))?;
             let mut output = std::io::BufWriter::new(output);
             use std::io::Read;
@@ -2417,7 +2457,7 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let conn = rusqlite::Connection::open(&self.database_file)
+            let conn = rusqlite::Connection::open(&tmp_file)
                 .map_err(|e| format!("SQLiteException: {e}"))?;
             conn.execute_batch(
                 "DROP TABLE IF EXISTS titles_fts;
@@ -2546,7 +2586,7 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let conn = rusqlite::Connection::open(&self.database_file)
+            let conn = rusqlite::Connection::open(&tmp_file)
                 .map_err(|e| format!("SQLiteException: {e}"))?;
             conn.execute_batch(
                 "CREATE VIRTUAL TABLE titles_fts USING fts5
@@ -2562,7 +2602,9 @@ impl MangaBakaDbDownloader {
             .map_err(|e| format!("SQLiteException: {e}"))?;
         }
 
-        // 5. 写元数据 + 清理压缩包
+        // 5. 原子替换 + 写元数据 + 清理压缩包
+        std::fs::rename(&tmp_file, &self.database_file)
+            .map_err(|e| format!("FileSystemException: rename failed: {e}"))?;
         let now = chrono::Utc::now();
         let ts = now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         std::fs::write(self.work_dir.join("timestamp"), ts)

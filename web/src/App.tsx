@@ -393,6 +393,7 @@ function ProviderList(props: {
                     <>
                       <Field label="mode"><select value={cur.mode ?? 'API'} onChange={(e) => upd([...base, 'mode'], e.target.value)}><option value="API">API</option><option value="DATABASE">DATABASE</option></select></Field>
                       <Field label={t('f.coverLanguages')}><CommaField value={cur.coverLanguages} onChange={(v) => upd([...base, 'coverLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
+                      <Field label="updateIntervalHours"><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
                     </>
                   )}
                   {key === 'bangumi' && (
@@ -400,6 +401,9 @@ function ProviderList(props: {
                       <Field label={t('f.tagWhitelist')}><CommaField value={cur.tagWhitelist} onChange={(v) => upd([...base, 'tagWhitelist'], v)} /></Field>
                       <SwitchField label="archive.enabled" value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
                     </>
+                  )}
+                  {key === 'bookWalker' && (
+                    <Field label="updateIntervalHours"><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
                   )}
                   {key === 'eHentai' && (
                     <>

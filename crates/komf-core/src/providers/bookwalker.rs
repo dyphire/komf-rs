@@ -8,7 +8,7 @@
 //! `db/BookWalkerDbDownloader.kt`、`db/BookWalkerSeriesRepository.kt`、
 //! `db/tables/*.kt`、`model/*.kt`。
 
-use crate::config::{BookMetadataConfig, ProviderConfig, SeriesMetadataConfig};
+use crate::config::{BookMetadataConfig, BookWalkerConfig, SeriesMetadataConfig};
 use crate::model::{
     Author, AuthorRole, BookMetadata, BookRange, Image, MatchQuery, ProviderBookId,
     ProviderBookMetadata, ProviderSeriesId, ProviderSeriesMetadata, ReleaseDate, SeriesBook,
@@ -1148,7 +1148,7 @@ fn category_media_type(category: BookWalkerContentType) -> Option<crate::model::
 }
 
 pub fn create_provider(
-    config: &ProviderConfig,
+    config: &BookWalkerConfig,
     database_file: Option<&Path>,
     default_name_matcher: NameSimilarityMatcher,
     http_client: &reqwest::Client,
@@ -1258,6 +1258,11 @@ impl BookWalkerDbDownloader {
             let this = self.clone();
             tokio::spawn(async move {
                 let result = this.do_download(&sender).await;
+                // 容错：失败残留的临时文件清理（成功路径已 rename，此清理无害）
+                let _ = std::fs::remove_file(PathBuf::from(format!(
+                    "{}.tmp",
+                    this.database_file.display()
+                )));
                 this.download_in_progress
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 let _ = result;
@@ -1287,12 +1292,88 @@ impl BookWalkerDbDownloader {
             .await
         {
             tracing::error!("BookWalker database download failed: {e}");
+            // 容错：保留旧库（失败不删），仅清理压缩包与临时文件。
             let _ = std::fs::remove_file(self.work_dir.join("bkwk-db.sqlite.zst"));
-            let _ = std::fs::remove_file(&self.database_file);
+            let _ = std::fs::remove_file(PathBuf::from(format!(
+                "{}.tmp",
+                self.database_file.display()
+            )));
             emit(sender, DownloadProgress::ErrorEvent { message: e.clone() });
             return Err(e);
         }
         Ok(())
+    }
+
+    /// 后台定时更新（对齐 bangumi/ehentai archive）：
+    /// - 库缺失：启动即自动下载；
+    /// - 周期（interval_hours）：HEAD 检查 last-modified，变化才重下（省流量）；
+    /// - 下载失败：15 分钟快速重试（不删旧库，provider 保持可用）。
+    /// interval_hours == 0 时不启动（仅手动下载）。
+    pub fn start_auto_update(&self, interval_hours: u64) {
+        if interval_hours == 0 {
+            return;
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let _ = std::fs::create_dir_all(&this.work_dir);
+            let interval = std::time::Duration::from_secs(interval_hours * 3600);
+            let retry = std::time::Duration::from_secs(15 * 60);
+            loop {
+                let mut ok = true;
+                if !this.database_file.exists() {
+                    ok = Self::wait_download(&this).await;
+                } else {
+                    match this.db_changed().await {
+                        Ok(true) => ok = Self::wait_download(&this).await,
+                        Ok(false) => {}
+                        Err(e) => {
+                            ok = false;
+                            tracing::warn!("BookWalker db update check failed: {e}");
+                        }
+                    }
+                }
+                tokio::time::sleep(if ok { interval } else { retry }).await;
+            }
+        });
+    }
+
+    /// HEAD 检查 last-modified 是否变化；无法判断（无响应头）视为未变化。
+    async fn db_changed(&self) -> Result<bool, String> {
+        let response = self
+            .http
+            .head(DATABASE_URL)
+            .send()
+            .await
+            .map_err(|e| format!("HttpRequestException: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("ResponseException: {}", response.status()));
+        }
+        let Some(new_lm) = response
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+        else {
+            return Ok(false);
+        };
+        let stored = std::fs::read_to_string(self.work_dir.join("last_modified"))
+            .ok()
+            .map(|s| s.trim().to_string());
+        Ok(stored.as_deref() != Some(new_lm))
+    }
+
+    /// 启动（或复用）下载并等待 Finished/Error 事件；返回是否成功。
+    async fn wait_download(d: &BookWalkerDbDownloader) -> bool {
+        let mut rx = d.launch_download();
+        loop {
+            if rx.changed().await.is_err() {
+                return false;
+            }
+            match rx.borrow().as_ref() {
+                Some(DownloadProgress::FinishedEvent) => return true,
+                Some(DownloadProgress::ErrorEvent { .. }) => return false,
+                _ => {}
+            }
+        }
     }
 
     async fn download_and_extract(
@@ -1309,7 +1390,8 @@ impl BookWalkerDbDownloader {
                 info: Some(url.to_string()),
             },
         );
-        let _ = std::fs::remove_file(&self.database_file);
+        // 容错：保留旧库；解压写临时文件，成功后再原子替换。
+        let tmp_file = PathBuf::from(format!("{}.tmp", self.database_file.display()));
 
         let archive = self.work_dir.join("bkwk-db.sqlite.zst");
         if let Some(parent) = self.work_dir.parent() {
@@ -1336,6 +1418,13 @@ impl BookWalkerDbDownloader {
                 info: Some(url.to_string()),
             },
         );
+
+        // 提前记录 last-modified（response 被 bytes_stream 消费后无法再读响应头）
+        let last_modified = response
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         let mut stream = response.bytes_stream();
         let mut file = tokio::fs::File::create(&archive)
@@ -1375,7 +1464,7 @@ impl BookWalkerDbDownloader {
         );
         let input =
             std::fs::File::open(&archive).map_err(|e| format!("FileSystemException: {e}"))?;
-        let output = std::fs::File::create(&self.database_file)
+        let output = std::fs::File::create(&tmp_file)
             .map_err(|e| format!("FileSystemException: {e}"))?;
         zstd::stream::copy_decode(input, output).map_err(|e| format!("ZstdException: {e}"))?;
 
@@ -1388,21 +1477,26 @@ impl BookWalkerDbDownloader {
                 info: Some("creating search index".to_string()),
             },
         );
-        self.create_search_index()?;
+        self.create_search_index_on(&tmp_file)?;
 
-        // 4. 写 timestamp + 清理压缩包
+        // 4. 原子替换 + 写 timestamp/last-modified + 清理压缩包
+        std::fs::rename(&tmp_file, &self.database_file)
+            .map_err(|e| format!("FileSystemException: rename failed: {e}"))?;
         let now = chrono::Utc::now();
         let ts = now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         std::fs::write(self.work_dir.join("timestamp"), ts)
             .map_err(|e| format!("FileSystemException: {e}"))?;
+        if let Some(lm) = last_modified {
+            let _ = std::fs::write(self.work_dir.join("last_modified"), lm);
+        }
         let _ = std::fs::remove_file(archive);
 
         emit(sender, DownloadProgress::FinishedEvent);
         Ok(())
     }
 
-    fn create_search_index(&self) -> Result<(), String> {
-        let conn = rusqlite::Connection::open(&self.database_file)
+    fn create_search_index_on(&self, db_file: &std::path::Path) -> Result<(), String> {
+        let conn = rusqlite::Connection::open(db_file)
             .map_err(|e| format!("SQLiteException: {e}"))?;
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS series_fts USING fts5 \
@@ -1878,7 +1972,7 @@ mod tests {
 
         let http = reqwest::Client::new();
         let downloader = BookWalkerDbDownloader::new(&dir, http);
-        downloader.create_search_index().unwrap();
+        downloader.create_search_index_on(&db_path).unwrap();
 
         let repo = BookWalkerSeriesRepository::new(&db_path);
         let hits = repo

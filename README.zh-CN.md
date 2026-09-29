@@ -16,7 +16,7 @@
 - 用户脚本兼容的配置界面
 - 内置 WebUI 工作台：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi）、离线 DB 下载、明暗主题
 - **MAL / AniList / Bangumi OAuth 登录**：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
-- **阅读进度同步（Tracker，仅 Rust）**：AniList / MyAnimeList / Bangumi 阅读状态同步，含 WebUI 页面与 `/api/tracker/*` 接口——支持标题或平台链接搜索、tracked 标记、状态读取与状态/评分/进度推送
+- **阅读状态同步（Tracker，仅 Rust）**：AniList / MyAnimeList / Bangumi 阅读状态同步，含 WebUI 页面与 `/api/tracker/*` 接口——支持标题或平台链接搜索、tracked 标记、状态读取与状态/评分/进度推送
 
 ## 元数据 provider
 
@@ -175,7 +175,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ### 离线数据库下载
 
-- `POST /api/update-manga-baka-db`、`POST /api/update-book-walker-db` —— 触发离线 DB 下载；以 NDJSON 流输出进度事件（`ProgressEvent` / `FinishedEvent` / `ErrorEvent`）直到断流。仅手动触发：这两个 DB 没有周期自动更新（本地库 checksum 一致时跳过）
+- `POST /api/update-manga-baka-db`、`POST /api/update-book-walker-db` —— 触发离线 DB 下载；以 NDJSON 流输出进度事件（`ProgressEvent` / `FinishedEvent` / `ErrorEvent`）直到断流。支持手动触发；此外各 provider 的 `updateIntervalHours`（默认 24，0 = 仅手动）开启后台定时更新：MangaBaka 比较官方 sha1 checksum（本地库 checksum 一致时跳过），BookWalker 通过 HEAD 请求比较 `Last-Modified`。下载为原子操作（临时文件 + rename），失败时保留旧库并 15 分钟后快速重试。
 
 ### 任务
 
@@ -214,6 +214,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 - `GET /api/cover/redirect?url=<encoded>` —— `302` + `Referrer-Policy: no-referrer` 跳转到目标封面 URL。WebUI 用它展示搜索结果封面：MangaDex 等封面 CDN 对白名单外 `Referer`（自部署域名、局域网 IP 等）返回占位横幅，无 `Referer` 时放行真实封面——重定向让浏览器丢弃 Referer 后直连加载真封面。目标 host 经 provider 封面域名白名单校验（防开放重定向 / SSRF），白名单外返回 `400`。搜索 API 的 `imageUrl` 保持直链，第三方服务端消费者不受影响，也可按需使用本端点。
 
+
 ### OAuth 登录（`{provider}` = `anilist`、`mal` 或 `bangumi`）
 
 元数据 provider 的服务端 OAuth2 登录，采用**共享 client + 官方中转页**方案（无需按实例注册回调）。机制、client_secret 注入与部署说明见 [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md)。
@@ -223,11 +224,11 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 - `GET /api/oauth/{provider}/status` —— `200` JSON `{"logged_in":bool,"username":string|null}`
 - `POST /api/oauth/{provider}/logout` —— `204`，清除已存 token
 
-登录后该 provider 的请求以 OAuth bearer token 鉴权（优先于手动 `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`）；token 过期后若有 refresh token 则自动刷新，否则清除登录态并回退匿名请求。WebUI Provider 页显示各平台登录状态并提供登录/退出入口。
+登录后该 provider 的请求以 OAuth bearer token 鉴权（优先于手动 `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`）；token 过期后若有 refresh token 则自动刷新，否则清除登录态并回退匿名请求。tracker 相关接口在请求时发现登录态已失效（过期且无法刷新、未注入 secret、刷新被拒、或源站以 `401` 拒绝该 token——同时清除已存登录态）时返回 `401`，避免阅读状态同步静默地以无用户态运行。WebUI Provider 页显示各平台登录状态并提供登录/退出入口。
 
-### 阅读追踪（Tracker）（`{provider}` = `anilist`、`mal` 或 `bangumi`；需先 OAuth 登录）
+### 阅读状态（Tracker）（`{provider}` = `anilist`、`mal` 或 `bangumi`；需先 OAuth 登录）
 
-三平台阅读进度同步，基于上述 OAuth 登录。
+三平台阅读列表同步，基于上述 OAuth 登录。
 
 - `GET /api/tracker/{provider}/search?name=...&nsfw=...` —— 搜索平台条目；每条带 `tracked`（是否已在用户列表中）。`nsfw` 缺省 `true`，仅在 `false` 时过滤成人内容。`name` 也支持平台条目链接——`anilist.co/manga/{id}`、`myanimelist.net/manga/{id}`、`bgm.tv`/`bangumi.tv/subject/{id}`——后端直接解析为单条结果。
 - `GET /api/tracker/{provider}/state?trackId=...` —— 当前列表条目（`status`、`score`、已读卷/话、开始/完成日期、总量）；未入列表返回空状态。

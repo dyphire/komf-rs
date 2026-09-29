@@ -164,7 +164,7 @@ async fn main() {
         match &db {
             Some(path) if std::path::Path::new(path).exists() => {
                 let p = komf_core::providers::bookwalker::create_provider(
-                    &ProviderConfig {
+                    &komf_core::config::BookWalkerConfig {
                         priority: 8,
                         enabled: true,
                         ..Default::default()

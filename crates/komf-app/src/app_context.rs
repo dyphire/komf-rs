@@ -121,6 +121,9 @@ fn build_state(
         db_work_dir.clone(),
         http_client.clone(),
     ));
+    // 定时更新：库缺失自动下载 + 周期 checksum 检查（失败保留旧库 + 15min 快速重试）。
+    manga_baka_db_downloader
+        .start_auto_update(config.metadata_providers.default_providers.manga_baka.update_interval_hours);
     // MangaBaka 管理 API 仓储：数据库文件存在时启用（link/unlink/tags/系列详情）。
     let manga_baka_repository = {
         let database_file = db_work_dir.join("mangabaka.sqlite");
@@ -134,6 +137,9 @@ fn build_state(
         work_dir.join("bookwalker"),
         http_client.clone(),
     ));
+    // 定时更新：库缺失自动下载 + 周期 HEAD last-modified 检查（失败保留旧库 + 15min 快速重试）。
+    book_walker_db_downloader
+        .start_auto_update(config.metadata_providers.default_providers.book_walker.update_interval_hours);
     let tracker_services = Arc::new(komf_core::trackers::TrackerServices::new(
         http_client.clone(),
         Some(oauth_manager.clone()),

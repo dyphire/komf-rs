@@ -48,7 +48,7 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub manga_baka: MangaBakaConfig,
     #[serde(default)]
-    pub book_walker: ProviderConfig,
+    pub book_walker: BookWalkerConfig,
     #[serde(default)]
     pub manga_dex: MangaDexConfig,
     #[serde(default)]
@@ -75,7 +75,7 @@ impl Default for ProvidersConfig {
     fn default() -> Self {
         Self {
             manga_baka: MangaBakaConfig::default(),
-            book_walker: ProviderConfig::default(),
+            book_walker: BookWalkerConfig::default(),
             manga_dex: MangaDexConfig::default(),
             manga_updates: ProviderConfig {
                 priority: 10,
@@ -447,6 +447,9 @@ pub struct MangaBakaConfig {
     /// 书籍封面语言偏好（默认 en/ja，对齐 MangaDex coverLanguages）。
     #[serde(default = "default_cover_languages")]
     pub cover_languages: Vec<String>,
+    /// 本地数据库定时更新间隔（小时）；0 = 仅手动下载（默认 24）。
+    #[serde(default = "default_db_update_interval")]
+    pub update_interval_hours: u64,
 }
 
 impl Default for MangaBakaConfig {
@@ -462,6 +465,59 @@ impl Default for MangaBakaConfig {
             mode: MangaBakaMode::Api,
             book_metadata: BookMetadataConfig::default(),
             cover_languages: default_cover_languages(),
+            update_interval_hours: default_db_update_interval(),
+        }
+    }
+}
+
+/// 数据库定时更新间隔默认值（小时）：24，对齐 ehentai archive 节奏（比 bangumi 7 天更频繁）。
+fn default_db_update_interval() -> u64 {
+    24
+}
+
+/// BookWalker 配置（独立结构，含本地数据库定时更新间隔）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookWalkerConfig {
+    #[serde(default = "default_priority")]
+    pub priority: i32,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub series_metadata: SeriesMetadataConfig,
+    #[serde(default)]
+    pub book_metadata: BookMetadataConfig,
+    #[serde(default)]
+    pub name_matching_mode: Option<NameSimilarityMatcher>,
+    #[serde(default)]
+    pub media_type: MediaType,
+    #[serde(default = "default_writer_roles")]
+    pub author_roles: Vec<AuthorRole>,
+    #[serde(default = "default_artist_roles")]
+    pub artist_roles: Vec<AuthorRole>,
+    #[serde(default)]
+    pub tag_whitelist: Vec<String>,
+    #[serde(default)]
+    pub tag_whitelist_file: Option<String>,
+    /// 本地数据库定时更新间隔（小时）；0 = 仅手动下载（默认 24）。
+    #[serde(default = "default_db_update_interval")]
+    pub update_interval_hours: u64,
+}
+
+impl Default for BookWalkerConfig {
+    fn default() -> Self {
+        Self {
+            priority: default_priority(),
+            enabled: false,
+            series_metadata: SeriesMetadataConfig::default(),
+            book_metadata: BookMetadataConfig::default(),
+            name_matching_mode: None,
+            media_type: MediaType::Manga,
+            author_roles: default_writer_roles(),
+            artist_roles: default_artist_roles(),
+            tag_whitelist: Vec::new(),
+            tag_whitelist_file: None,
+            update_interval_hours: default_db_update_interval(),
         }
     }
 }

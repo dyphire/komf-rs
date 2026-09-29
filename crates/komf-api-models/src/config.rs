@@ -269,7 +269,7 @@ pub struct MangaBakaDatabaseDto {
 #[serde(rename_all = "camelCase", default)]
 pub struct ProvidersConfigDto {
     pub manga_baka: Option<MangaBakaConfigDto>,
-    pub book_walker: Option<ProviderConfigDto>,
+    pub book_walker: Option<BookWalkerConfigDto>,
     pub manga_dex: Option<MangaDexConfigDto>,
     pub manga_updates: Option<ProviderConfigDto>,
     pub ani_list: Option<AniListConfigDto>,
@@ -300,6 +300,24 @@ pub struct ProviderConfigDto {
     pub artist_roles: Option<Vec<KomfAuthorRole>>,
     pub tag_whitelist: Option<Vec<String>>,
     pub tag_whitelist_file: Option<String>,
+}
+
+/// BookWalker 独立 DTO（含数据库定时更新间隔）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BookWalkerConfigDto {
+    pub priority: Option<i32>,
+    pub enabled: Option<bool>,
+    pub series_metadata: Option<SeriesMetadataConfigDto>,
+    pub book_metadata: Option<BookMetadataConfigDto>,
+    #[serde(default, deserialize_with = "deserialize_tri_state")]
+    pub name_matching_mode: Option<Option<KomfNameMatchingMode>>,
+    pub media_type: Option<KomfMediaType>,
+    pub author_roles: Option<Vec<KomfAuthorRole>>,
+    pub artist_roles: Option<Vec<KomfAuthorRole>>,
+    pub tag_whitelist: Option<Vec<String>>,
+    pub tag_whitelist_file: Option<String>,
+    pub update_interval_hours: Option<u64>,
 }
 
 /// 对应 Kotlin `EHentaiConfigDto`（ProviderConf 独立实现，含 preferredLanguages）。
@@ -435,6 +453,7 @@ pub struct MangaBakaConfigDto {
     pub artist_roles: Option<Vec<KomfAuthorRole>>,
     pub mode: Option<MangaBakaMode>,
     pub cover_languages: Option<Vec<String>>,
+    pub update_interval_hours: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
