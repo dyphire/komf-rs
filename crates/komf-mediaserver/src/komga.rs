@@ -308,6 +308,8 @@ pub struct KomgaClient {
     session: Arc<tokio::sync::Mutex<KomgaSession>>,
     thumbnail_size_limit: u64,
     alternate_title_labels: AlternateTitleLabelsConfig,
+    /// postProcessing.alternativeSeriesTitleLanguages：备用标题存在语言时仅写入配置内语言。
+    alternative_title_languages: Vec<String>,
 }
 
 /// Komga 服务端会话：每次响应回来刷新（`store_from_headers`），后续请求复用。
@@ -375,6 +377,7 @@ impl KomgaClient {
         api_key: &str,
         thumbnail_size_limit: u64,
         alternate_title_labels: AlternateTitleLabelsConfig,
+        alternative_title_languages: Vec<String>,
     ) -> Result<Self, MediaServerError> {
         let base_uri = base_uri.trim_end_matches('/').to_string();
         let mut headers = reqwest::header::HeaderMap::new();
@@ -395,6 +398,7 @@ impl KomgaClient {
             session: Arc::new(tokio::sync::Mutex::new(KomgaSession::default())),
             thumbnail_size_limit,
             alternate_title_labels,
+            alternative_title_languages,
         })
     }
 
@@ -732,6 +736,7 @@ pub fn book_metadata_reset_request(
 pub fn to_series_update_request(
     update: &MediaServerSeriesMetadataUpdate,
     alternate_title_labels: &AlternateTitleLabelsConfig,
+    alternative_title_languages: &[String],
 ) -> KomgaSeriesMetadataUpdateRequest {
     fn patch<T>(value: Option<T>) -> PatchValue<T> {
         value.map(Some)
@@ -750,10 +755,20 @@ pub fn to_series_update_request(
             // 对应 Kotlin：ROMAJI/NATIVE 用类型标签；LOCALIZED 优先语言（缺省回退
             // alternateTitleLabels.localized，再回退类型标签）；null 类型且无语言 → 过滤；
             // 再按 title 去重（distinctBy { it.title }，保留首个）。
+            // 增强：备用标题存在语言时尊重 alternativeSeriesTitleLanguages 配置
+            //（大小写不敏感），仅写入配置内语言；缺失语言的备用标题无条件写入。
             let mut seen = std::collections::HashSet::new();
             titles
                 .iter()
                 .filter_map(|(name, title_type, language)| {
+                    if let Some(lang) = language {
+                        if !alternative_title_languages
+                            .iter()
+                            .any(|l| l.eq_ignore_ascii_case(lang))
+                        {
+                            return None;
+                        }
+                    }
                     let label = match title_type {
                         Some(TitleType::Romaji) => Some(
                             alternate_title_labels
@@ -1139,7 +1154,11 @@ impl MediaServerClient for KomgaClient {
         series_id: &MediaServerSeriesId,
         metadata: &MediaServerSeriesMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let request = to_series_update_request(metadata, &self.alternate_title_labels);
+        let request = to_series_update_request(
+            metadata,
+            &self.alternate_title_labels,
+            &self.alternative_title_languages,
+        );
         let response = self
             .send(
                 self.http
@@ -1552,7 +1571,11 @@ mod tests {
     }
 
     fn update_request(update: &MediaServerSeriesMetadataUpdate) -> KomgaSeriesMetadataUpdateRequest {
-        to_series_update_request(update, &AlternateTitleLabelsConfig::default())
+        to_series_update_request(
+            update,
+            &AlternateTitleLabelsConfig::default(),
+            &["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+        )
     }
 
     fn series_update_base() -> MediaServerSeriesMetadataUpdate {
@@ -1740,10 +1763,15 @@ mod tests {
                 ("それでも".to_string(), Some(TitleType::Native), None),
                 ("Soredemo".to_string(), Some(TitleType::Localized), Some("en".to_string())),
                 ("無言語".to_string(), Some(TitleType::Localized), None),
+                ("中文名".to_string(), Some(TitleType::Localized), Some("zh".to_string())),
             ]),
             ..series_update_base()
         };
-        let v = json(&to_series_update_request(&update, &labels));
+        let v = json(&to_series_update_request(
+            &update,
+            &labels,
+            &["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+        ));
         let titles = v["alternateTitles"].as_array().unwrap();
         let pairs: Vec<(String, String)> = titles
             .iter()
@@ -1808,13 +1836,16 @@ mod tests {
     #[test]
     fn alternate_titles_mapping_matches_kotlin() {
         // ROMAJI/NATIVE → type.label；LOCALIZED → language 或 type.label；null 类型无语言 → 过滤；按 title 去重
+        // 语言过滤：有语言的备用标题仅写入 alternativeSeriesTitleLanguages（en/ja/ja-ro）内的
+        //（"dropped-language" fr 不在配置内 → 过滤；"kept-with-language" ja 在配置内 → 保留）。
         let update = MediaServerSeriesMetadataUpdate {
             alternative_titles: Some(vec![
                 ("soredemo".to_string(), Some(TitleType::Romaji), None),
                 ("Soredemo".to_string(), Some(TitleType::Localized), Some("en".to_string())),
                 ("それでも".to_string(), Some(TitleType::Native), None),
                 ("dropped-no-language".to_string(), None, None),
-                ("kept-with-language".to_string(), None, Some("fr".to_string())),
+                ("kept-with-language".to_string(), None, Some("ja".to_string())),
+                ("dropped-language".to_string(), None, Some("fr".to_string())),
                 ("soredemo".to_string(), Some(TitleType::Romaji), None), // 与第一条 title 相同 → 去重
             ]),
             ..series_update_base()
@@ -1831,7 +1862,7 @@ mod tests {
                 ("Romaji".to_string(), "soredemo".to_string()),
                 ("en".to_string(), "Soredemo".to_string()),
                 ("Native".to_string(), "それでも".to_string()),
-                ("fr".to_string(), "kept-with-language".to_string()),
+                ("ja".to_string(), "kept-with-language".to_string()),
             ]
         );
     }
@@ -1941,6 +1972,7 @@ mod tests {
             api_key,
             1024,
             AlternateTitleLabelsConfig::default(),
+            vec!["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
         )
         .expect("test client")
     }

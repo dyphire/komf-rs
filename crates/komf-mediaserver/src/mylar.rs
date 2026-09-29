@@ -76,7 +76,12 @@ pub struct MylarAlternateTitle {
 
 /// 由 post-processing 后的系列元数据构造 mylar series.json。
 /// total_issues：元数据未提供总卷数/章数（totalBookCount）时设为 0。
-pub fn mylar_series_json_from_metadata(series: &SeriesMetadata) -> MylarSeriesJson {
+/// 备用标题存在语言时尊重 alternativeSeriesTitleLanguages 配置（大小写不敏感），
+/// 仅写入配置内语言；缺失语言的备用标题无条件写入。
+pub fn mylar_series_json_from_metadata(
+    series: &SeriesMetadata,
+    alternative_title_languages: &[String],
+) -> MylarSeriesJson {
     // 对齐 py：name = metadata.title or series.name；Rust 侧 title 为处理后主标题。
     let name = series.title_name().unwrap_or_default();
     // 对齐 py：year 初始占位 2001，releaseDate 前 4 位为数字时覆盖。
@@ -97,6 +102,16 @@ pub fn mylar_series_json_from_metadata(series: &SeriesMetadata) -> MylarSeriesJs
                 None => true,
             })
             .filter_map(|t| {
+                // 有语言的备用标题仅在 alternativeSeriesTitleLanguages 配置内才写入；
+                // 缺失语言的无条件写入。
+                if let Some(lang) = t.language.as_deref() {
+                    if !alternative_title_languages
+                        .iter()
+                        .any(|l| l.eq_ignore_ascii_case(lang))
+                    {
+                        return None;
+                    }
+                }
                 let label = title_label(t.r#type, t.language.as_deref())?;
                 seen.insert(t.name.clone()).then_some(MylarAlternateTitle {
                     label,
@@ -391,7 +406,10 @@ mod tests {
 
     #[test]
     fn mylar_json_structure_matches_py() {
-        let json = mylar_series_json_from_metadata(&sample_series());
+        let json = mylar_series_json_from_metadata(
+            &sample_series(),
+            &["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+        );
         assert_eq!(json.version, "1.0.2");
         let m = &json.metadata;
         assert_eq!(m.r#type, "comicSeries");
@@ -433,7 +451,10 @@ mod tests {
         let mut s = sample_series();
         s.release_date = None;
         s.total_book_count = None;
-        let json = mylar_series_json_from_metadata(&s);
+        let json = mylar_series_json_from_metadata(
+            &s,
+            &["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+        );
         assert_eq!(json.metadata.year, 2001); // 占位
         // 元数据未提供总卷数/章数 → total_issues 设为 0（不回退 booksCount）
         assert_eq!(json.metadata.total_issues, 0);
@@ -530,7 +551,10 @@ mod tests {
     fn write_series_json_names() {
         let dir = std::env::temp_dir().join(format!("komf-mylar-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let json = mylar_series_json_from_metadata(&sample_series());
+        let json = mylar_series_json_from_metadata(
+            &sample_series(),
+            &["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+        );
         let p1 = write_series_json(&dir, "Series A", false, &json).unwrap();
         assert_eq!(p1.file_name().unwrap().to_str().unwrap(), "series.json");
         let p2 = write_series_json(&dir, "Series B", true, &json).unwrap();

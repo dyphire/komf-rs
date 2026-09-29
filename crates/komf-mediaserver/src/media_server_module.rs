@@ -84,6 +84,12 @@ impl MediaServerModule {
                     .post_processing
                     .alternate_title_labels
                     .clone(),
+                komga_config
+                    .metadata_update
+                    .default
+                    .post_processing
+                    .alternative_series_title_languages
+                    .clone(),
             )
             .expect("failed to create komga client"),
         );

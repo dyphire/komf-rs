@@ -221,6 +221,11 @@ impl MetadataPostProcessor {
         self.order_books
     }
 
+    /// alternativeSeriesTitleLanguages 配置（mylar 导出等按语言过滤备用标题用）。
+    pub fn alternative_series_title_languages(&self) -> &[String] {
+        &self.alternative_series_title_languages
+    }
+
     fn choose_series_title(&self, series: &SeriesMetadata) -> Option<SeriesTitle> {
         let chosen = match &self.series_title_language {
             Some(lang) => {
