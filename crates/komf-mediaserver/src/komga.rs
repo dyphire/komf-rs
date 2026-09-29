@@ -953,6 +953,7 @@ impl MediaServerClient for KomgaClient {
                 series_id: MediaServerSeriesId(t.series_id.unwrap_or_else(|| series_id.0.clone())),
                 r#type: t.r#type,
                 selected: t.selected,
+                file_size: t.file_size,
             })
             .collect())
     }
@@ -1350,6 +1351,7 @@ impl MediaServerClient for KomgaClient {
                 series_id: MediaServerSeriesId(dto.series_id.unwrap_or_else(|| series_id.0.clone())),
                 r#type: dto.r#type,
                 selected: dto.selected,
+                file_size: dto.file_size,
             }));
         }
         unreachable!("upload loop always returns")

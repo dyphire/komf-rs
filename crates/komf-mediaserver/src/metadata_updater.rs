@@ -406,9 +406,25 @@ impl MetadataUpdater {
 
         let uploaded = match thumbnail {
             Some(thumbnail) => {
-                self.media_server_client
-                    .upload_series_thumbnail(series_id, thumbnail, select_thumbnail, self.lock_covers)
-                    .await?
+                // 与 replace_book_thumbnail 一致：已有 USER_UPLOADED 且 file_size 相同的
+                // 系列封面视为已最新，跳过重传（override_existing_covers=true 时也适用）。
+                let existing_same = thumbnails.iter().find(|t| {
+                    t.r#type == "USER_UPLOADED" && t.file_size == Some(thumbnail.bytes.len() as i64)
+                });
+                match existing_same {
+                    Some(existing) => Some(crate::model::MediaServerSeriesThumbnail {
+                        id: existing.id.clone(),
+                        series_id: series_id.clone(),
+                        r#type: existing.r#type.clone(),
+                        selected: existing.selected,
+                        file_size: existing.file_size,
+                    }),
+                    None => {
+                        self.media_server_client
+                            .upload_series_thumbnail(series_id, thumbnail, select_thumbnail, self.lock_covers)
+                            .await?
+                    }
+                }
             }
             None => None,
         };

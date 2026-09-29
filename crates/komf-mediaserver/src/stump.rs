@@ -1361,6 +1361,7 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
                 series_id: series_id.clone(),
                 r#type: "USER_UPLOADED".to_string(),
                 selected: true,
+                file_size: None,
             }]
         } else {
             Vec::new()
@@ -1521,6 +1522,7 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
             series_id: series_id.clone(),
             r#type: "thumbnail".to_string(),
             selected: true,
+            file_size: None,
         }))
     }
 

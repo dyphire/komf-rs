@@ -83,6 +83,8 @@ pub struct MediaServerSeriesThumbnail {
     pub series_id: MediaServerSeriesId,
     pub r#type: String,
     pub selected: bool,
+    /// 缩略图文件字节数（komga 返回；用于「相同大小跳过」判断）。
+    pub file_size: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
