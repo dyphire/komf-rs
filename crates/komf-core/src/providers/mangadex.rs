@@ -506,6 +506,7 @@ impl MangaDexMetadataMapper {
             &manga.attributes.alt_titles,
             self.series_title_language.as_deref(),
         );
+        // 搜索结果显示用 .512 缩略图；更新写入的封面走 `get_cover_url`（原始文件，最大尺寸）。
         let image_url = manga
             .relationships
             .iter()
@@ -513,8 +514,9 @@ impl MangaDexMetadataMapper {
             .and_then(|r| r.attributes.as_ref())
             .and_then(|a| a.file_name.clone())
             .map(|f| {
+                let base = f.rsplit_once('.').map(|(b, _)| b).unwrap_or(&f);
                 format!(
-                    "https://uploads.mangadex.org/covers/{}/{f}",
+                    "https://uploads.mangadex.org/covers/{}/{base}.512.jpg",
                     manga.id
                 )
             });

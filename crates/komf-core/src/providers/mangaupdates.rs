@@ -536,11 +536,12 @@ impl MangaUpdatesMetadataMapper {
     pub fn to_series_search_result(&self, record: &SeriesRecord) -> SeriesSearchResult {
         SeriesSearchResult {
             url: Some(record.url.clone()),
+            // 搜索结果显示用 thumb（轻量）；更新写入的封面走 get_thumbnail 的 original。
             image_url: record
                 .image
                 .as_ref()
                 .and_then(|i| i.url.as_ref())
-                .and_then(|u| u.original.clone()),
+                .and_then(|u| u.thumb.clone().or_else(|| u.original.clone())),
             title: record.title.clone(),
             provider: CoreProviders::MangaUpdates.as_str().to_string(),
             result_id: record.series_id.to_string(),
@@ -1061,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn search_result_uses_original_image() {
+    fn search_result_uses_thumb_image() {
         let mut record = SeriesRecord::default();
         record.image = Some(SeriesImage {
             url: Some(ImageUrl {
@@ -1072,7 +1073,8 @@ mod tests {
         });
         let result = test_mapper(crate::config::SeriesMetadataConfig::default())
             .to_series_search_result(&record);
-        assert_eq!(result.image_url.as_deref(), Some("orig"));
+        // 搜索结果显示轻量 thumb；更新写入走 get_thumbnail 的 original。
+        assert_eq!(result.image_url.as_deref(), Some("thumb"));
     }
 
     #[test]

@@ -203,8 +203,13 @@ impl MalClient {
 
     pub async fn get_thumbnail(&self, manga: &MalManga) -> Result<Option<Image>, ProviderError> {
         self.limiter.acquire().await;
-        // Kotlin: series.mainPicture?.medium（不回退 pictures[].large）。
-        let Some(url) = manga.main_picture.as_ref().and_then(|p| p.medium.clone()) else {
+        // 更新写入封面优先最大尺寸：main_picture.large，medium 兜底
+        // （Kotlin 原实现只用 medium；搜索结果显示仍走 medium，见 to_series_search_result）。
+        let Some(url) = manga
+            .main_picture
+            .as_ref()
+            .and_then(|p| p.large.clone().or_else(|| p.medium.clone()))
+        else {
             return Ok(None);
         };
         let response = self.http.get(&url).send().await?;

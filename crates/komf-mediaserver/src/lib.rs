@@ -5,6 +5,7 @@ pub mod client;
 pub mod comic_info;
 pub mod config;
 pub mod event_listener;
+pub mod image_utils;
 pub mod jobs;
 pub mod kavita;
 pub mod kavita_signalr;

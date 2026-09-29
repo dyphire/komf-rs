@@ -519,10 +519,11 @@ impl AniListMetadataMapper {
         };
         SeriesSearchResult {
             url: Some(format!("https://anilist.co/manga/{}", media.id)),
+            // 搜索结果显示用 large（轻量）；更新写入的封面走 get_series_thumbnail 的 extraLarge。
             image_url: media
                 .cover_image
                 .as_ref()
-                .and_then(|c| c.extra_large.clone()),
+                .and_then(|c| c.large.clone().or_else(|| c.extra_large.clone())),
             title,
             provider: CoreProviders::Anilist.as_str().to_string(),
             result_id: media.id.to_string(),

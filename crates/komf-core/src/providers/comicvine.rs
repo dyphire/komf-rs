@@ -1094,13 +1094,14 @@ fn remove_parentheses(series_name: &str) -> String {
 }
 
 impl ComicVineMetadataProvider {
-    /// 对应 `getCover`：mediumUrl ?: smallUrl ?: originalUrl，404 时忽略返回 null。
+    /// 对应 `getCover`：originalUrl ?: mediumUrl ?: smallUrl，404 时忽略返回 null。
+    /// 更新写入封面优先最大尺寸；搜索结果显示走 medium_url（见 to_series_search_result）。
     async fn get_cover(&self, image: &ComicVineImage) -> Result<Option<Image>, ProviderError> {
         let Some(url) = image
-            .medium_url
+            .original_url
             .clone()
+            .or_else(|| image.medium_url.clone())
             .or_else(|| image.small_url.clone())
-            .or_else(|| image.original_url.clone())
         else {
             return Ok(None);
         };

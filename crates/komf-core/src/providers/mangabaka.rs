@@ -1298,7 +1298,13 @@ pub fn create_provider(
 impl MangaBakaMetadataProvider {
     async fn fetch_cover(&self, series: &MangaBakaSeriesDto) -> Option<Image> {
         let client = self.cover_fetch_client.as_ref()?;
-        let url = series.cover.x350.as_ref()?.x1.as_ref()?;
+        // 更新写入封面优先最大尺寸（raw 原图），x350 兜底；搜索结果显示走 x350（见 to_series_search_result）。
+        let url = series
+            .cover
+            .raw
+            .as_ref()
+            .and_then(|r| r.url.clone())
+            .or_else(|| series.cover.x350.as_ref().and_then(|s| s.x1.clone()))?;
         let response = client.get(url).send().await.ok()?;
         if !response.status().is_success() {
             return None;

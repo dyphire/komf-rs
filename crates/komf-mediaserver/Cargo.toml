@@ -22,6 +22,7 @@ uuid = { workspace = true }
 zip = { workspace = true }
 bytes = { workspace = true }
 mime_guess = { workspace = true }
+image = { workspace = true }
 async-trait = "0.1"
 tokio-tungstenite = { workspace = true }
 komf-core = { workspace = true }
