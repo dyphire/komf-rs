@@ -447,6 +447,8 @@ pub struct WebtoonsClient {
     base_headers: reqwest::header::HeaderMap,
     mobile_headers: reqwest::header::HeaderMap,
     parser: WebtoonsParser,
+    /// 匀速限流（对齐原版 rateLimiter(1, 1s)，即 1 秒/许可）。
+    limiter: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl WebtoonsClient {
@@ -466,6 +468,7 @@ impl WebtoonsClient {
             base_headers,
             mobile_headers,
             parser: WebtoonsParser,
+            limiter: crate::rate_limiter::ThroughputLimiter::new(1, std::time::Duration::from_secs(1)),
         }
     }
 
@@ -495,6 +498,7 @@ impl WebtoonsClient {
         name: &str,
         search_type: &str,
     ) -> Result<SearchApiResponse, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{MOBILE_BASE_URL}/undefined/search/result"))
@@ -511,6 +515,7 @@ impl WebtoonsClient {
     }
 
     pub async fn get_series(&self, id: &WebtoonsSeriesId) -> Result<WebtoonsSeries, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{BASE_URL}{}", id.0))
@@ -527,6 +532,7 @@ impl WebtoonsClient {
     }
 
     pub async fn get_chapters(&self, id: &WebtoonsSeriesId) -> Result<Vec<Episode>, ProviderError> {
+        self.limiter.acquire().await;
         let chapters_path = if id.0.contains("/canvas/") {
             "canvas"
         } else {
@@ -572,6 +578,7 @@ impl WebtoonsClient {
         &self,
         series: &WebtoonsSeries,
     ) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         let Some(url_raw) = series.thumbnail_url.as_deref() else {
             return Ok(None);
         };
@@ -591,6 +598,7 @@ impl WebtoonsClient {
     }
 
     pub async fn get_chapter_thumbnail(&self, chapter: &Episode) -> Result<Image, ProviderError> {
+        self.limiter.acquire().await;
         let url_raw = format!("{IMAGE_BASE_URL}{}", chapter.thumbnail);
         let url = remove_query_param(&url_raw, "type");
         let response = self

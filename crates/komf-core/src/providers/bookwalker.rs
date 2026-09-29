@@ -971,6 +971,8 @@ pub struct BookWalkerMetadataProvider {
     fetch_book_covers: bool,
     http_client: Option<reqwest::Client>,
     category: BookWalkerContentType,
+    /// 封面抓取匀速限流（对齐原版 bookWalkerCoverClient rateLimiter(2, 1s)，即 500ms/许可）。
+    cover_limiter: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl BookWalkerMetadataProvider {
@@ -985,6 +987,7 @@ impl BookWalkerMetadataProvider {
     }
     async fn fetch_cover(&self, image: &BookWalkerImage) -> Option<Image> {
         let client = self.http_client.as_ref()?;
+        self.cover_limiter.acquire().await;
         let response = client.get(image.url600()).send().await.ok()?;
         if !response.status().is_success() {
             return None;
@@ -1188,6 +1191,7 @@ pub fn create_provider(
         http_client: (config.series_metadata.thumbnail || config.book_metadata.thumbnail)
             .then(|| http_client.clone()),
         category,
+        cover_limiter: crate::rate_limiter::ThroughputLimiter::new(2, std::time::Duration::from_secs(1)),
     })
 }
 

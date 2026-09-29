@@ -127,6 +127,8 @@ pub struct MalClient {
     http: reqwest::Client,
     /// OAuth 登录态（登录后请求附加 `Authorization: Bearer`，优先于 X-MAL-CLIENT-ID）。
     oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    /// 匀速限流（对齐原版 rateLimiter(10, 10s)，即 1 请求/秒）。
+    limiter: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl MalClient {
@@ -134,7 +136,11 @@ impl MalClient {
         http: reqwest::Client,
         oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
     ) -> Self {
-        Self { http, oauth }
+        Self {
+            http,
+            oauth,
+            limiter: crate::rate_limiter::ThroughputLimiter::new(10, std::time::Duration::from_secs(10)),
+        }
     }
 
     /// 已登录时附加 OAuth Bearer；未登录返回原请求（依赖 X-MAL-CLIENT-ID）。
@@ -151,6 +157,7 @@ impl MalClient {
     }
 
     pub async fn search(&self, name: &str) -> Result<Vec<MalManga>, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .authorized(
                 self.http
@@ -176,6 +183,7 @@ impl MalClient {
     }
 
     pub async fn get(&self, id: u64) -> Result<MalManga, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .authorized(
                 self.http
@@ -194,6 +202,7 @@ impl MalClient {
     }
 
     pub async fn get_thumbnail(&self, manga: &MalManga) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         // Kotlin: series.mainPicture?.medium（不回退 pictures[].large）。
         let Some(url) = manga.main_picture.as_ref().and_then(|p| p.medium.clone()) else {
             return Ok(None);

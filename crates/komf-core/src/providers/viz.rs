@@ -389,6 +389,8 @@ fn parse_release_date_string(raw: &Option<String>) -> Option<String> {
 pub struct VizClient {
     http: reqwest::Client,
     parser: VizParser,
+    /// 匀速限流（对齐原版 rateLimiter(5, 10s)，即 2 秒/许可）。
+    limiter: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl VizClient {
@@ -396,10 +398,12 @@ impl VizClient {
         Self {
             http,
             parser: VizParser::new(),
+            limiter: crate::rate_limiter::ThroughputLimiter::new(5, std::time::Duration::from_secs(10)),
         }
     }
 
     pub async fn search_series(&self, name: &str) -> Result<Vec<VizSeriesBook>, ProviderError> {
+        self.limiter.acquire().await;
         let search_query = format!("{name}, Vol. 1");
         let response = self
             .http
@@ -420,6 +424,7 @@ impl VizClient {
         &self,
         id: &VizAllBooksId,
     ) -> Result<Vec<VizSeriesBook>, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{VIZ_BASE_URL}/manga-books/manga/{}/all", id.0))
@@ -439,6 +444,7 @@ impl VizClient {
         book_id: &VizBookId,
         r#type: VizBookReleaseType,
     ) -> Result<VizBook, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!(
@@ -458,6 +464,7 @@ impl VizClient {
     }
 
     pub async fn get_thumbnail(&self, url: &str) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         let response = self.http.get(url).send().await?;
         let status = response.status();
         if status == reqwest::StatusCode::FORBIDDEN {

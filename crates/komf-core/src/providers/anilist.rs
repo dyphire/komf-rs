@@ -208,6 +208,8 @@ pub struct AniListClient {
     http: reqwest::Client,
     /// OAuth 登录态（登录后请求附加 `Authorization: Bearer`；None = 未接入）。
     oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    /// 滑动窗口突发限流（对齐原版 intervalLimiter(15, 10s)）。
+    limiter: crate::rate_limiter::IntervalLimiter,
 }
 
 impl AniListClient {
@@ -215,7 +217,11 @@ impl AniListClient {
         http: reqwest::Client,
         oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
     ) -> Self {
-        Self { http, oauth }
+        Self {
+            http,
+            oauth,
+            limiter: crate::rate_limiter::IntervalLimiter::new(15, std::time::Duration::from_secs(10)),
+        }
     }
 
     async fn execute(
@@ -223,6 +229,7 @@ impl AniListClient {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
+        self.limiter.acquire().await;
         let mut request = self.http.post(GRAPHQL_URL);
         let token = match &self.oauth {
             Some(o) => o.access_token(crate::oauth::OAuthProvider::Anilist).await,
@@ -300,6 +307,7 @@ impl AniListClient {
         &self,
         media: &AniListMedia,
     ) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         let Some(url) = media
             .cover_image
             .as_ref()

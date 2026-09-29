@@ -106,11 +106,16 @@ pub struct MangaDexChapterAttributes {
 
 pub struct MangaDexClient {
     http: reqwest::Client,
+    /// 滑动窗口突发限流（对齐原版 intervalLimiter(15, 10s)）。
+    limiter: crate::rate_limiter::IntervalLimiter,
 }
 
 impl MangaDexClient {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+        Self {
+            http,
+            limiter: crate::rate_limiter::IntervalLimiter::new(15, std::time::Duration::from_secs(10)),
+        }
     }
 
     pub async fn search_series(
@@ -118,6 +123,7 @@ impl MangaDexClient {
         name: &str,
         limit: u32,
     ) -> Result<Vec<MangaDexManga>, ProviderError> {
+        self.limiter.acquire().await;
         // 对齐 Kotlin MangaDexClient.searchSeries：
         // order[relevance]=desc、contentRating[]=safe/suggestive/erotica/pornographic（不过滤成人内容）
         let response = self
@@ -147,6 +153,7 @@ impl MangaDexClient {
     }
 
     pub async fn get_series(&self, id: &str) -> Result<MangaDexManga, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{BASE_URL}/manga/{id}"))
@@ -171,6 +178,7 @@ impl MangaDexClient {
         manga_id: &str,
         translated_language: &str,
     ) -> Result<Vec<MangaDexChapter>, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{BASE_URL}/manga/{manga_id}/feed"))
@@ -211,6 +219,7 @@ impl MangaDexClient {
         limit: u32,
         offset: u32,
     ) -> Result<MangaDexResponse<Vec<MangaDexRelationship>>, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{BASE_URL}/cover"))
@@ -253,6 +262,7 @@ impl MangaDexClient {
     }
 
     pub async fn get_thumbnail(&self, url: &str) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         let response = self.http.get(url).send().await?;
         if !response.status().is_success() {
             return Ok(None);

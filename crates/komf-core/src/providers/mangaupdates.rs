@@ -165,11 +165,16 @@ struct SearchRequest {
 
 pub struct MangaUpdatesClient {
     http: reqwest::Client,
+    /// 滑动窗口突发限流（对齐原版 intervalLimiter(15, 10s)）。
+    limiter: crate::rate_limiter::IntervalLimiter,
 }
 
 impl MangaUpdatesClient {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+        Self {
+            http,
+            limiter: crate::rate_limiter::IntervalLimiter::new(15, std::time::Duration::from_secs(10)),
+        }
     }
 
     pub async fn search_series(
@@ -179,6 +184,7 @@ impl MangaUpdatesClient {
         page: u32,
         per_page: u32,
     ) -> Result<SearchResultPage, ProviderError> {
+        self.limiter.acquire().await;
         let request = SearchRequest {
             search: name.chars().take(400).collect(),
             page,
@@ -209,6 +215,7 @@ impl MangaUpdatesClient {
     }
 
     pub async fn get_series(&self, series_id: u64) -> Result<MangaUpdatesSeries, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{BASE_URL}/series/{series_id}"))
@@ -253,6 +260,7 @@ impl MangaUpdatesClient {
         &self,
         series: &MangaUpdatesSeries,
     ) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         let Some(url) = series
             .image
             .as_ref()

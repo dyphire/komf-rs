@@ -309,6 +309,8 @@ fn elem_text(el: &ElementRef) -> String {
 pub struct YenPressClient {
     http: reqwest::Client,
     search_key: std::sync::Mutex<String>,
+    /// 滑动窗口突发限流（对齐原版 intervalLimiter(10, 10s)）。
+    limiter: crate::rate_limiter::IntervalLimiter,
 }
 
 impl YenPressClient {
@@ -316,6 +318,7 @@ impl YenPressClient {
         Self {
             http,
             search_key: std::sync::Mutex::new("search-vhfh3tijxttuxhjjmzgajcd4".to_string()),
+            limiter: crate::rate_limiter::IntervalLimiter::new(10, std::time::Duration::from_secs(10)),
         }
     }
 
@@ -335,6 +338,7 @@ impl YenPressClient {
     }
 
     async fn search(&self, name: &str) -> Result<Vec<YenPressSearchResult>, ProviderError> {
+        self.limiter.acquire().await;
         let key = self.search_key.lock().unwrap().clone();
         let body = construct_query_payload(name);
         let response = self
@@ -384,6 +388,7 @@ impl YenPressClient {
         id: &YenPressSeriesId,
         next_ord: i32,
     ) -> Result<(Vec<YenPressBookShort>, Option<i32>), ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{YEN_PRESS_BASE_URL}series/get_more/{}", id.0))
@@ -401,6 +406,7 @@ impl YenPressClient {
     }
 
     pub async fn get_book(&self, book_id: &YenPressBookId) -> Result<YenPressBook, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{YEN_PRESS_BASE_URL}titles/{}", book_id.0))
@@ -422,6 +428,7 @@ impl YenPressClient {
         let Some(url) = book.image_url.as_deref() else {
             return Ok(None);
         };
+        self.limiter.acquire().await;
         let response = self.http.get(url).send().await?;
         let status = response.status();
         if !status.is_success() {
@@ -432,6 +439,7 @@ impl YenPressClient {
     }
 
     async fn fetch_search_key(&self) -> Result<String, ProviderError> {
+        self.limiter.acquire().await;
         let response = self
             .http
             .get(format!("{YEN_PRESS_BASE_URL}search"))

@@ -118,6 +118,8 @@ pub struct BangumiClient {
     http: reqwest::Client,
     /// OAuth 登录态（登录后请求附加 `Authorization: Bearer`，覆盖手动 token）。
     oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    /// 滑动窗口突发限流（对齐原版 intervalLimiter(10, 7s)）。
+    limiter: crate::rate_limiter::IntervalLimiter,
 }
 
 impl BangumiClient {
@@ -125,7 +127,11 @@ impl BangumiClient {
         http: reqwest::Client,
         oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
     ) -> Self {
-        Self { http, oauth }
+        Self {
+            http,
+            oauth,
+            limiter: crate::rate_limiter::IntervalLimiter::new(10, std::time::Duration::from_secs(7)),
+        }
     }
 
     /// 已登录时附加 OAuth Bearer（覆盖 default header 的手动 token）；未登录原样返回。
@@ -258,6 +264,7 @@ impl BangumiClient {
         min_size: u64,
         max_size: Option<u64>,
     ) -> Result<Option<Image>, ProviderError> {
+        self.limiter.acquire().await;
         let mut candidates: Vec<String> = Vec::new();
         if let Some(url) = subject.image.clone().filter(|u| !u.is_empty()) {
             candidates.push(url);
