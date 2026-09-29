@@ -95,10 +95,60 @@ const NOOP_EVENTS: &[&str] = &[
     "RerunMetadataMappingsProgress",
 ];
 
+/// 已上报章节去重集合 —— 对应 Kotlin `KavitaEventHandler.reportedChapters`
+/// （`LinkedHashSet<Int>`，上限 `maxReportedChapters = 20_000`）。
+///
+/// Kavita 只在单系列扫描（ScanSeries）发送 ScanProgress "started"，
+/// 库扫描（ScanLibrary）只发 "ended"，导致 `lastScan` 可能落后数小时/天；
+/// 仅靠 `createdUtc > lastScan` 过滤会在每次后续扫描结束时把期间创建的章节
+/// 反复上报（卷只要有 CoverUpdate 就会重新进入 volumesChanged）。
+/// 因此额外记住已上报章节，claim 失败（返回 false）即跳过；集合有上限，
+/// 超限时移除最早条目，且 lastScan 在每次启动时重置为 now，旧章节不会
+/// 在重启后再次命中。
+const MAX_REPORTED_CHAPTERS: usize = 20_000;
+
+struct ReportedChapters {
+    set: std::collections::HashSet<i32>,
+    order: std::collections::VecDeque<i32>,
+    max: usize,
+}
+
+impl ReportedChapters {
+    fn new(max: usize) -> Self {
+        Self {
+            set: std::collections::HashSet::new(),
+            order: std::collections::VecDeque::new(),
+            max,
+        }
+    }
+
+    /// 认领章节 id：返回 false 表示已上报过（对齐 Kotlin
+    /// `reportedChapters.add(it.id.value)` 的布尔语义）。
+    fn claim(&mut self, id: i32) -> bool {
+        if self.set.contains(&id) {
+            return false;
+        }
+        self.set.insert(id);
+        self.order.push_back(id);
+        true
+    }
+
+    /// 超出上限时移除最早认领的条目（对齐 Kotlin `trimReportedChapters`）。
+    fn trim(&mut self) {
+        while self.order.len() > self.max {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// 监听期间的共享状态（对应 Kotlin `lastScan` / `volumesChanged`）。
 struct SignalRState {
     last_scan: Option<DateTime<Utc>>,
     volumes_changed: Vec<i32>,
+    /// 已上报章节（跨 scan end 去重，内存上限见 `MAX_REPORTED_CHAPTERS`）。
+    reported_chapters: ReportedChapters,
 }
 
 impl SignalRState {
@@ -109,6 +159,7 @@ impl SignalRState {
         Self {
             last_scan: Some(Utc::now()),
             volumes_changed: Vec::new(),
+            reported_chapters: ReportedChapters::new(MAX_REPORTED_CHAPTERS),
         }
     }
 }
@@ -664,8 +715,10 @@ impl KavitaSignalREventHandler {
                 if let Some(last_scan) = last_scan {
                     let client = self.client.clone();
                     let listeners = self.listeners.clone();
+                    let state = state.clone();
                     tokio::spawn(async move {
-                        let events = collect_book_events(&client, volumes, last_scan).await;
+                        let events =
+                            collect_book_events(&client, volumes, last_scan, &state).await;
                         if !events.is_empty() {
                             for listener in &listeners {
                                 listener.on_books_added(&events).await;
@@ -685,20 +738,28 @@ async fn collect_book_events(
     client: &KavitaClient,
     volume_ids: Vec<i32>,
     last_scan: DateTime<Utc>,
+    state: &Arc<Mutex<SignalRState>>,
 ) -> Vec<BookEvent> {
     let mut book_events = Vec::new();
     let mut volume_chapters: Vec<(KavitaVolume, Vec<KavitaChapter>)> = Vec::new();
     for volume_id in volume_ids {
         match client.get_volume(volume_id).await {
             Ok(volume) => {
-                let new_chapters: Vec<KavitaChapter> = volume
-                    .chapters
-                    .iter()
-                    .filter(|chapter| {
-                        parse_kavita_datetime(&chapter.created_utc).is_some_and(|t| t > last_scan)
-                    })
-                    .cloned()
-                    .collect();
+                // 短临界区（chapters 已在内存，锁内不 await）：createdUtc 过滤 +
+                // 已上报去重（claim 返回 false 即跳过，对齐 Kotlin 修复）。
+                let new_chapters: Vec<KavitaChapter> = {
+                    let mut guard = state.lock().unwrap();
+                    volume
+                        .chapters
+                        .iter()
+                        .filter(|chapter| {
+                            parse_kavita_datetime(&chapter.created_utc)
+                                .is_some_and(|t| t > last_scan)
+                        })
+                        .filter(|chapter| guard.reported_chapters.claim(chapter.id))
+                        .cloned()
+                        .collect()
+                };
                 if !new_chapters.is_empty() {
                     volume_chapters.push((volume, new_chapters));
                 }
@@ -707,6 +768,8 @@ async fn collect_book_events(
             Err(error) => tracing::warn!("kavita signalr: failed to load volume {volume_id}: {error}"),
         }
     }
+    // 对齐 Kotlin `trimReportedChapters()`（每次处理后清理超限条目）。
+    state.lock().unwrap().reported_chapters.trim();
     // groupBy seriesId（保持 Kotlin 语义）
     let mut by_series: std::collections::BTreeMap<i32, Vec<(KavitaVolume, Vec<KavitaChapter>)>> =
         std::collections::BTreeMap::new();
@@ -859,6 +922,26 @@ mod tests {
             ),
             "wss://kavita.example.com:8443/hubs/messages?id=t&transport=WebSockets&access_token=j"
         );
+    }
+
+    /// reportedChapters：重复 id 拒绝认领；超过上限移除最早条目（对齐 Kotlin）。
+    #[test]
+    fn reported_chapters_dedup_and_trim() {
+        let mut rc = ReportedChapters::new(3);
+        assert!(rc.claim(1));
+        assert!(rc.claim(2));
+        assert!(!rc.claim(1), "duplicate chapter id must be rejected");
+        assert!(rc.claim(3));
+        rc.trim();
+        assert_eq!(rc.order.len(), 3);
+        assert!(rc.claim(4));
+        rc.trim();
+        assert_eq!(rc.order.len(), 3, "size stays capped");
+        assert!(!rc.set.contains(&1), "oldest reported chapter evicted");
+        assert!(rc.claim(1), "evicted id can be claimed again");
+        assert_eq!(rc.order.len(), 4, "claim after eviction appends (trim runs per cycle)");
+        rc.trim();
+        assert_eq!(rc.order.len(), 3);
     }
 
     /// 事件 → 状态转移：ScanProgress ended 取走卷列表（Kotlin 语义）。
