@@ -419,11 +419,22 @@ impl MediaServerModule {
                 .collect(),
         );
 
+        // 标签翻译：seriesTitleLanguage 为中文时构建（非 bangumi/ehentai provider
+        // 的最终写入 tags 做英文 → 中文映射，见 tag_translator.rs）。
+        let tag_translator = if crate::tag_translator::TagTranslator::is_chinese_language(
+            config.post_processing.series_title_language.as_deref(),
+        ) {
+            Some(crate::tag_translator::TagTranslator::builtin())
+        } else {
+            None
+        };
+
         Arc::new(MetadataUpdater::new(
             media_server_client,
             repository,
             media_server.as_str(),
             post_processor,
+            tag_translator,
             config.update_modes.clone(),
             config.override_existing_covers,
             config.book_covers,

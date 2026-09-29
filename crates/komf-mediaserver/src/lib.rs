@@ -20,6 +20,7 @@ pub mod metadata_updater;
 pub mod model;
 pub mod stump;
 pub mod stump_event;
+pub mod tag_translator;
 
 pub use client::{MediaServerClient, MediaServerError};
 pub use media_server_module::MediaServerModule;

@@ -266,7 +266,7 @@ impl MetadataService {
                     let metadata = self.apply_chinese_conversion(metadata);
                     let _ = tx.send(MetadataJobEvent::PostProcessingStart);
                     self.metadata_update_service
-                        .update_metadata(&series, &metadata)
+                        .update_metadata(&series, &metadata, Some(provider))
                         .await
                         .map_err(|e| (Some(provider), e.to_string()))?;
                     let _ = self.series_match_repository.save_series_match(&SeriesMatch {
@@ -436,7 +436,7 @@ impl MetadataService {
         let metadata = self.apply_chinese_conversion(metadata);
         let _ = tx.send(MetadataJobEvent::PostProcessingStart);
         self.metadata_update_service
-            .update_metadata(&series, &metadata)
+            .update_metadata(&series, &metadata, Some(provider_name))
             .await
             .map_err(|e| (None, e.to_string()))?;
 
@@ -838,7 +838,7 @@ impl MetadataService {
         let metadata = self.apply_chinese_conversion(metadata);
         let _ = tx.send(MetadataJobEvent::PostProcessingStart);
         self.metadata_update_service
-            .update_metadata(&series, &metadata)
+            .update_metadata(&series, &metadata, matched_provider)
             .await
             .map_err(|e| (None, e.to_string()))?;
         tracing::info!("finished metadata update of series \"{series_title}\" {}", series.id.0);

@@ -6,7 +6,9 @@ use crate::jobs::{BookThumbnail, KomfJobsRepository, SeriesThumbnail};
 use crate::metadata_mapper::{authors_to_comic_info_fields, MetadataMapper};
 use crate::metadata_post_processor::MetadataPostProcessor;
 use crate::model::*;
+use crate::tag_translator::TagTranslator;
 use komf_core::model::{BookMetadata, Image, SeriesMetadata, UpdateMode};
+use komf_core::providers::CoreProviders;
 use komf_core::util::{case_insensitive_nat_sort, BookNameParser};
 use std::sync::Arc;
 
@@ -16,6 +18,9 @@ pub struct MetadataUpdater {
     media_server: &'static str,
     metadata_update_mapper: MetadataMapper,
     post_processor: MetadataPostProcessor,
+    /// 标签翻译器：seriesTitleLanguage 为中文且 provider 非 bangumi/ehentai 时启用
+    /// （编译时嵌入 tag_translation.json，无运行时配置）。None = 不翻译。
+    tag_translator: Option<TagTranslator>,
     comic_info_writer: ComicInfoWriter,
     /// mylarCovers：导出 series.json 时同时下载系列封面（cover.jpg / {name}.cover.jpg）。
     mylar_covers: bool,
@@ -40,6 +45,7 @@ impl MetadataUpdater {
         repository: Arc<KomfJobsRepository>,
         media_server: &'static str,
         post_processor: MetadataPostProcessor,
+        tag_translator: Option<TagTranslator>,
         update_modes: Vec<UpdateMode>,
         override_existing_covers: bool,
         upload_book_covers: bool,
@@ -56,6 +62,7 @@ impl MetadataUpdater {
             media_server,
             metadata_update_mapper: MetadataMapper,
             post_processor,
+            tag_translator,
             comic_info_writer: ComicInfoWriter::new(override_comic_info),
             mylar_covers,
             mylar_output_dir,
@@ -70,14 +77,29 @@ impl MetadataUpdater {
     }
 
     /// 对应 `updateMetadata`。
+    /// `provider`：本次元数据来源的 provider；bangumi/ehentai 不翻译标签
+    /// （bangumi 自身产出中文标签、ehentai 标签体系不适用），None（无 provider）
+    /// 按可翻译处理——翻译只替换命中的英文标签，未命中/中文原样保留，无副作用。
     pub async fn update_metadata(
         &self,
         series: &MediaServerSeries,
         metadata: &SeriesAndBookMetadata,
+        provider: Option<CoreProviders>,
     ) -> Result<(), MediaServerError> {
-        let processed = self.post_processor.process(metadata);
+        let translated = match &self.tag_translator {
+            Some(tr)
+                if !matches!(
+                    provider,
+                    Some(CoreProviders::Bangumi) | Some(CoreProviders::EHentai)
+                ) =>
+            {
+                translate_tags(metadata, tr)
+            }
+            _ => metadata.clone(),
+        };
+        let processed = self.post_processor.process(&translated);
         self.update_series_metadata(series, &processed.series_metadata).await?;
-        self.update_book_metadata(series, metadata, &processed).await?;
+        self.update_book_metadata(series, &translated, &processed).await?;
 
         if self.update_modes.contains(&UpdateMode::MylarSeriesJson) {
             self.write_mylar_series_json(series, &processed.series_metadata).await?;
@@ -467,5 +489,74 @@ impl MetadataUpdater {
                 sorted.first().map(|b| b.id.clone())
             }
         })
+    }
+}
+
+/// 对系列（genres + tags）与书籍元数据（tags）做英文 → 中文翻译
+/// （精确匹配，未命中保留原文）。score/publisher 等合成标签由 post_processor
+/// 在翻译之后追加，天然不参与翻译。
+fn translate_tags(metadata: &SeriesAndBookMetadata, translator: &TagTranslator) -> SeriesAndBookMetadata {
+    let mut out = metadata.clone();
+    out.series_metadata.genres = metadata
+        .series_metadata
+        .genres
+        .iter()
+        .map(|g| translator.translate(g))
+        .collect();
+    out.series_metadata.tags = metadata
+        .series_metadata
+        .tags
+        .iter()
+        .map(|t| translator.translate(t))
+        .collect();
+    for (_id, meta) in out.book_metadata.iter_mut() {
+        if let Some(m) = meta.as_mut() {
+            m.tags = m.tags.iter().map(|t| translator.translate(t)).collect();
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use komf_core::model::{BookMetadata, SeriesMetadata, SeriesTitle};
+
+    fn translator() -> TagTranslator {
+        TagTranslator::builtin()
+    }
+
+    fn series_with(genres: Vec<String>, tags: Vec<String>) -> SeriesMetadata {
+        SeriesMetadata {
+            title: Some(SeriesTitle { name: "X".into(), r#type: None, language: None }),
+            genres,
+            tags,
+            ..Default::default()
+        }
+    }
+
+    /// series 的 genres 与 tags、book 的 tags 均被翻译；未命中保留原文。
+    #[test]
+    fn translate_tags_covers_genres_and_books() {
+        let tr = translator();
+        let series = series_with(
+            vec!["Action".into(), "Unknown Genre".into()],
+            vec!["Romance".into(), "Score: 8".into()],
+        );
+        let mut book_meta = BookMetadata::default();
+        book_meta.tags = vec!["Adventure".into(), "4-koma".into()];
+        let metadata = SeriesAndBookMetadata::new(series, {
+            let mut m = std::collections::HashMap::new();
+            m.insert(MediaServerBookId("b1".into()), Some(book_meta));
+            m
+        });
+
+        let out = translate_tags(&metadata, &tr);
+        assert_eq!(out.series_metadata.genres, vec!["动作", "Unknown Genre"]);
+        assert_eq!(out.series_metadata.tags, vec!["恋爱", "Score: 8"]);
+        let book = out.book_metadata.get(&MediaServerBookId("b1".into())).unwrap().as_ref().unwrap();
+        assert_eq!(book.tags, vec!["冒险", "四格漫画"]);
+        // 原对象不被修改（clone 语义）
+        assert_eq!(metadata.series_metadata.genres[0], "Action");
     }
 }

@@ -1,0 +1,2237 @@
+[
+  {
+    "key": "4-koma",
+    "displayEn": "4-koma",
+    "displayZh": "四格漫画"
+  },
+  {
+    "key": "achromatic",
+    "displayEn": "Achromatic",
+    "displayZh": "黑白"
+  },
+  {
+    "key": "achronological-order",
+    "displayEn": "Achronological Order",
+    "displayZh": "非线性叙事"
+  },
+  {
+    "key": "acrobatics",
+    "displayEn": "Acrobatics",
+    "displayZh": "杂技"
+  },
+  {
+    "key": "acting",
+    "displayEn": "Acting",
+    "displayZh": "演艺"
+  },
+  {
+    "key": "action",
+    "displayEn": "Action",
+    "displayZh": "动作"
+  },
+  {
+    "key": "adoption",
+    "displayEn": "Adoption",
+    "displayZh": "领养"
+  },
+  {
+    "key": "adventure",
+    "displayEn": "Adventure",
+    "displayZh": "冒险"
+  },
+  {
+    "key": "advertisement",
+    "displayEn": "Advertisement",
+    "displayZh": "广告"
+  },
+  {
+    "key": "afterlife",
+    "displayEn": "Afterlife",
+    "displayZh": "死后世界"
+  },
+  {
+    "key": "age-gap",
+    "displayEn": "Age Gap",
+    "displayZh": "年龄差"
+  },
+  {
+    "key": "age-regression",
+    "displayEn": "Age Regression",
+    "displayZh": "返老还童"
+  },
+  {
+    "key": "agender",
+    "displayEn": "Agender",
+    "displayZh": "无性别"
+  },
+  {
+    "key": "agriculture",
+    "displayEn": "Agriculture",
+    "displayZh": "农业"
+  },
+  {
+    "key": "ahegao",
+    "displayEn": "Ahegao",
+    "displayZh": "阿黑颜"
+  },
+  {
+    "key": "airsoft",
+    "displayEn": "Airsoft",
+    "displayZh": "生存游戏"
+  },
+  {
+    "key": "alchemy",
+    "displayEn": "Alchemy",
+    "displayZh": "炼金术"
+  },
+  {
+    "key": "aliens",
+    "displayEn": "Aliens",
+    "displayZh": "外星人"
+  },
+  {
+    "key": "alternate-universe",
+    "displayEn": "Alternate Universe",
+    "displayZh": "平行世界"
+  },
+  {
+    "key": "american-football",
+    "displayEn": "American Football",
+    "displayZh": "美式足球"
+  },
+  {
+    "key": "amnesia",
+    "displayEn": "Amnesia",
+    "displayZh": "失忆"
+  },
+  {
+    "key": "amputation",
+    "displayEn": "Amputation",
+    "displayZh": "截肢"
+  },
+  {
+    "key": "anachronism",
+    "displayEn": "Anachronism",
+    "displayZh": "时代错乱"
+  },
+  {
+    "key": "anal-sex",
+    "displayEn": "Anal Sex",
+    "displayZh": "肛交"
+  },
+  {
+    "key": "ancient-china",
+    "displayEn": "Ancient China",
+    "displayZh": "中国古代"
+  },
+  {
+    "key": "angels",
+    "displayEn": "Angels",
+    "displayZh": "天使"
+  },
+  {
+    "key": "animals",
+    "displayEn": "Animals",
+    "displayZh": "动物"
+  },
+  {
+    "key": "anthology",
+    "displayEn": "Anthology",
+    "displayZh": "短篇集"
+  },
+  {
+    "key": "anthropomorphism",
+    "displayEn": "Anthropomorphism",
+    "displayZh": "拟人化"
+  },
+  {
+    "key": "anti-hero",
+    "displayEn": "Anti-Hero",
+    "displayZh": "反英雄"
+  },
+  {
+    "key": "archery",
+    "displayEn": "Archery",
+    "displayZh": "弓道"
+  },
+  {
+    "key": "armpits",
+    "displayEn": "Armpits",
+    "displayZh": "腋"
+  },
+  {
+    "key": "aromantic",
+    "displayEn": "Aromantic",
+    "displayZh": "无浪漫倾向"
+  },
+  {
+    "key": "arranged-marriage",
+    "displayEn": "Arranged Marriage",
+    "displayZh": "包办婚姻"
+  },
+  {
+    "key": "artificial-intelligence",
+    "displayEn": "Artificial Intelligence",
+    "displayZh": "人工智能"
+  },
+  {
+    "key": "asexual",
+    "displayEn": "Asexual",
+    "displayZh": "无性恋"
+  },
+  {
+    "key": "ashikoki",
+    "displayEn": "Ashikoki",
+    "displayZh": "足交"
+  },
+  {
+    "key": "asphyxiation",
+    "displayEn": "Asphyxiation",
+    "displayZh": "窒息感"
+  },
+  {
+    "key": "assassins",
+    "displayEn": "Assassins",
+    "displayZh": "杀手"
+  },
+  {
+    "key": "astronomy",
+    "displayEn": "Astronomy",
+    "displayZh": "天文学"
+  },
+  {
+    "key": "athletics",
+    "displayEn": "Athletics",
+    "displayZh": "田径"
+  },
+  {
+    "key": "augmented-reality",
+    "displayEn": "Augmented Reality",
+    "displayZh": "增强现实"
+  },
+  {
+    "key": "autobiographical",
+    "displayEn": "Autobiographical",
+    "displayZh": "自传"
+  },
+  {
+    "key": "aviation",
+    "displayEn": "Aviation",
+    "displayZh": "航空"
+  },
+  {
+    "key": "badminton",
+    "displayEn": "Badminton",
+    "displayZh": "羽毛球"
+  },
+  {
+    "key": "ballet",
+    "displayEn": "Ballet",
+    "displayZh": "芭蕾"
+  },
+  {
+    "key": "band",
+    "displayEn": "Band",
+    "displayZh": "乐队"
+  },
+  {
+    "key": "bar",
+    "displayEn": "Bar",
+    "displayZh": "酒吧"
+  },
+  {
+    "key": "baseball",
+    "displayEn": "Baseball",
+    "displayZh": "棒球"
+  },
+  {
+    "key": "basketball",
+    "displayEn": "Basketball",
+    "displayZh": "篮球"
+  },
+  {
+    "key": "battle-royale",
+    "displayEn": "Battle Royale",
+    "displayZh": "大逃杀"
+  },
+  {
+    "key": "biographical",
+    "displayEn": "Biographical",
+    "displayZh": "传记"
+  },
+  {
+    "key": "bisexual",
+    "displayEn": "Bisexual",
+    "displayZh": "双性恋"
+  },
+  {
+    "key": "blackmail",
+    "displayEn": "Blackmail",
+    "displayZh": "勒索"
+  },
+  {
+    "key": "board-game",
+    "displayEn": "Board Game",
+    "displayZh": "桌游"
+  },
+  {
+    "key": "boarding-school",
+    "displayEn": "Boarding School",
+    "displayZh": "寄宿学校"
+  },
+  {
+    "key": "body-horror",
+    "displayEn": "Body Horror",
+    "displayZh": "身体恐怖"
+  },
+  {
+    "key": "body-image",
+    "displayEn": "Body Image",
+    "displayZh": "身材焦虑"
+  },
+  {
+    "key": "body-swapping",
+    "displayEn": "Body Swapping",
+    "displayZh": "灵魂互换"
+  },
+  {
+    "key": "bondage",
+    "displayEn": "Bondage",
+    "displayZh": "束缚"
+  },
+  {
+    "key": "boobjob",
+    "displayEn": "Boobjob",
+    "displayZh": "乳交"
+  },
+  {
+    "key": "bowling",
+    "displayEn": "Bowling",
+    "displayZh": "保龄球"
+  },
+  {
+    "key": "boxing",
+    "displayEn": "Boxing",
+    "displayZh": "拳击"
+  },
+  {
+    "key": "boys'-love",
+    "displayEn": "Boys' Love",
+    "displayZh": "耽美"
+  },
+  {
+    "key": "brainwashing",
+    "displayEn": "Brainwashing",
+    "displayZh": "洗脑"
+  },
+  {
+    "key": "bullying",
+    "displayEn": "Bullying",
+    "displayZh": "校园霸凌"
+  },
+  {
+    "key": "butler",
+    "displayEn": "Butler",
+    "displayZh": "管家"
+  },
+  {
+    "key": "calligraphy",
+    "displayEn": "Calligraphy",
+    "displayZh": "书法"
+  },
+  {
+    "key": "camping",
+    "displayEn": "Camping",
+    "displayZh": "露营"
+  },
+  {
+    "key": "cannibalism",
+    "displayEn": "Cannibalism",
+    "displayZh": "食人"
+  },
+  {
+    "key": "card-battle",
+    "displayEn": "Card Battle",
+    "displayZh": "卡牌对战"
+  },
+  {
+    "key": "cars",
+    "displayEn": "Cars",
+    "displayZh": "汽车"
+  },
+  {
+    "key": "centaur",
+    "displayEn": "Centaur",
+    "displayZh": "半人马"
+  },
+  {
+    "key": "cervix-penetration",
+    "displayEn": "Cervix Penetration",
+    "displayZh": "宫内射精"
+  },
+  {
+    "key": "cgi",
+    "displayEn": "CGI",
+    "displayZh": "CGI"
+  },
+  {
+    "key": "cheating",
+    "displayEn": "Cheating",
+    "displayZh": "出轨"
+  },
+  {
+    "key": "cheerleading",
+    "displayEn": "Cheerleading",
+    "displayZh": "啦啦队"
+  },
+  {
+    "key": "chibi",
+    "displayEn": "Chibi",
+    "displayZh": "Q版"
+  },
+  {
+    "key": "chimera",
+    "displayEn": "Chimera",
+    "displayZh": "奇美拉"
+  },
+  {
+    "key": "chuunibyou",
+    "displayEn": "Chuunibyou",
+    "displayZh": "中二病"
+  },
+  {
+    "key": "circus",
+    "displayEn": "Circus",
+    "displayZh": "马戏团"
+  },
+  {
+    "key": "class-struggle",
+    "displayEn": "Class Struggle",
+    "displayZh": "阶级斗争"
+  },
+  {
+    "key": "classic-literature",
+    "displayEn": "Classic Literature",
+    "displayZh": "经典文学"
+  },
+  {
+    "key": "classical-music",
+    "displayEn": "Classical Music",
+    "displayZh": "古典乐"
+  },
+  {
+    "key": "clone",
+    "displayEn": "Clone",
+    "displayZh": "克隆"
+  },
+  {
+    "key": "coastal",
+    "displayEn": "Coastal",
+    "displayZh": "海滨"
+  },
+  {
+    "key": "cohabitation",
+    "displayEn": "Cohabitation",
+    "displayZh": "同居"
+  },
+  {
+    "key": "college",
+    "displayEn": "College",
+    "displayZh": "大学"
+  },
+  {
+    "key": "comedy",
+    "displayEn": "Comedy",
+    "displayZh": "喜剧"
+  },
+  {
+    "key": "coming-of-age",
+    "displayEn": "Coming of Age",
+    "displayZh": "成长"
+  },
+  {
+    "key": "conspiracy",
+    "displayEn": "Conspiracy",
+    "displayZh": "阴谋"
+  },
+  {
+    "key": "cosmic-horror",
+    "displayEn": "Cosmic Horror",
+    "displayZh": "克苏鲁"
+  },
+  {
+    "key": "cosplay",
+    "displayEn": "Cosplay",
+    "displayZh": "Cosplay"
+  },
+  {
+    "key": "cowboys",
+    "displayEn": "Cowboys",
+    "displayZh": "牛仔"
+  },
+  {
+    "key": "creature-taming",
+    "displayEn": "Creature Taming",
+    "displayZh": "驯兽"
+  },
+  {
+    "key": "crime",
+    "displayEn": "Crime",
+    "displayZh": "犯罪"
+  },
+  {
+    "key": "criminal-organization",
+    "displayEn": "Criminal Organization",
+    "displayZh": "犯罪组织"
+  },
+  {
+    "key": "crossdressing",
+    "displayEn": "Crossdressing",
+    "displayZh": "女装"
+  },
+  {
+    "key": "crossover",
+    "displayEn": "Crossover",
+    "displayZh": "联动"
+  },
+  {
+    "key": "cult",
+    "displayEn": "Cult",
+    "displayZh": "邪教"
+  },
+  {
+    "key": "cultivation",
+    "displayEn": "Cultivation",
+    "displayZh": "修仙"
+  },
+  {
+    "key": "cumflation",
+    "displayEn": "Cumflation",
+    "displayZh": "精液填充"
+  },
+  {
+    "key": "cunnilingus",
+    "displayEn": "Cunnilingus",
+    "displayZh": "口交"
+  },
+  {
+    "key": "curses",
+    "displayEn": "Curses",
+    "displayZh": "诅咒"
+  },
+  {
+    "key": "cute-boys-doing-cute-things",
+    "displayEn": "Cute Boys Doing Cute Things",
+    "displayZh": "萌系男生"
+  },
+  {
+    "key": "cute-girls-doing-cute-things",
+    "displayEn": "Cute Girls Doing Cute Things",
+    "displayZh": "萌系少女"
+  },
+  {
+    "key": "cyberpunk",
+    "displayEn": "Cyberpunk",
+    "displayZh": "赛博朋克"
+  },
+  {
+    "key": "cyborg",
+    "displayEn": "Cyborg",
+    "displayZh": "改造人"
+  },
+  {
+    "key": "cycling",
+    "displayEn": "Cycling",
+    "displayZh": "自行车"
+  },
+  {
+    "key": "dancing",
+    "displayEn": "Dancing",
+    "displayZh": "舞蹈"
+  },
+  {
+    "key": "death-game",
+    "displayEn": "Death Game",
+    "displayZh": "死亡游戏"
+  },
+  {
+    "key": "deepthroat",
+    "displayEn": "Deepthroat",
+    "displayZh": "深喉"
+  },
+  {
+    "key": "defloration",
+    "displayEn": "Defloration",
+    "displayZh": "破处"
+  },
+  {
+    "key": "delinquents",
+    "displayEn": "Delinquents",
+    "displayZh": "不良少年"
+  },
+  {
+    "key": "demons",
+    "displayEn": "Demons",
+    "displayZh": "恶魔"
+  },
+  {
+    "key": "denpa",
+    "displayEn": "Denpa",
+    "displayZh": "电波系"
+  },
+  {
+    "key": "desert",
+    "displayEn": "Desert",
+    "displayZh": "沙漠"
+  },
+  {
+    "key": "detective",
+    "displayEn": "Detective",
+    "displayZh": "侦探"
+  },
+  {
+    "key": "dilf",
+    "displayEn": "DILF",
+    "displayZh": "大叔"
+  },
+  {
+    "key": "dinosaurs",
+    "displayEn": "Dinosaurs",
+    "displayZh": "恐龙"
+  },
+  {
+    "key": "disability",
+    "displayEn": "Disability",
+    "displayZh": "残疾"
+  },
+  {
+    "key": "dissociative-identities",
+    "displayEn": "Dissociative Identities",
+    "displayZh": "多重人格"
+  },
+  {
+    "key": "double-penetration",
+    "displayEn": "Double Penetration",
+    "displayZh": "双重进入"
+  },
+  {
+    "key": "dragons",
+    "displayEn": "Dragons",
+    "displayZh": "龙"
+  },
+  {
+    "key": "drama",
+    "displayEn": "Drama",
+    "displayZh": "剧情"
+  },
+  {
+    "key": "drawing",
+    "displayEn": "Drawing",
+    "displayZh": "绘画"
+  },
+  {
+    "key": "drugs",
+    "displayEn": "Drugs",
+    "displayZh": "药物"
+  },
+  {
+    "key": "dullahan",
+    "displayEn": "Dullahan",
+    "displayZh": "无头骑士"
+  },
+  {
+    "key": "dungeon",
+    "displayEn": "Dungeon",
+    "displayZh": "地下城"
+  },
+  {
+    "key": "dystopian",
+    "displayEn": "Dystopian",
+    "displayZh": "反乌托邦"
+  },
+  {
+    "key": "e-sports",
+    "displayEn": "E-Sports",
+    "displayZh": "电竞"
+  },
+  {
+    "key": "ecchi",
+    "displayEn": "Ecchi",
+    "displayZh": "福利"
+  },
+  {
+    "key": "eco-horror",
+    "displayEn": "Eco-Horror",
+    "displayZh": "生态恐怖"
+  },
+  {
+    "key": "economics",
+    "displayEn": "Economics",
+    "displayZh": "经济"
+  },
+  {
+    "key": "educational",
+    "displayEn": "Educational",
+    "displayZh": "教育"
+  },
+  {
+    "key": "elderly-protagonist",
+    "displayEn": "Elderly Protagonist",
+    "displayZh": "老年主角"
+  },
+  {
+    "key": "elf",
+    "displayEn": "Elf",
+    "displayZh": "精灵"
+  },
+  {
+    "key": "ensemble-cast",
+    "displayEn": "Ensemble Cast",
+    "displayZh": "群像剧"
+  },
+  {
+    "key": "environmental",
+    "displayEn": "Environmental",
+    "displayZh": "环境议题"
+  },
+  {
+    "key": "episodic",
+    "displayEn": "Episodic",
+    "displayZh": "单元剧"
+  },
+  {
+    "key": "ero-guro",
+    "displayEn": "Ero Guro",
+    "displayZh": "暗黑猎奇"
+  },
+  {
+    "key": "erotic-piercings",
+    "displayEn": "Erotic Piercings",
+    "displayZh": "私处穿环"
+  },
+  {
+    "key": "espionage",
+    "displayEn": "Espionage",
+    "displayZh": "谍战"
+  },
+  {
+    "key": "estranged-family",
+    "displayEn": "Estranged Family",
+    "displayZh": "疏离家庭"
+  },
+  {
+    "key": "exhibitionism",
+    "displayEn": "Exhibitionism",
+    "displayZh": "暴露癖"
+  },
+  {
+    "key": "exiled",
+    "displayEn": "Exiled",
+    "displayZh": "流放"
+  },
+  {
+    "key": "exorcism",
+    "displayEn": "Exorcism",
+    "displayZh": "除灵"
+  },
+  {
+    "key": "facial",
+    "displayEn": "Facial",
+    "displayZh": "颜射"
+  },
+  {
+    "key": "fairy",
+    "displayEn": "Fairy",
+    "displayZh": "妖精"
+  },
+  {
+    "key": "fairy-tale",
+    "displayEn": "Fairy Tale",
+    "displayZh": "童话"
+  },
+  {
+    "key": "fake-relationship",
+    "displayEn": "Fake Relationship",
+    "displayZh": "契约恋人"
+  },
+  {
+    "key": "family-life",
+    "displayEn": "Family Life",
+    "displayZh": "家庭生活"
+  },
+  {
+    "key": "fantasy",
+    "displayEn": "Fantasy",
+    "displayZh": "奇幻"
+  },
+  {
+    "key": "fashion",
+    "displayEn": "Fashion",
+    "displayZh": "时尚"
+  },
+  {
+    "key": "feet",
+    "displayEn": "Feet",
+    "displayZh": "足控"
+  },
+  {
+    "key": "fellatio",
+    "displayEn": "Fellatio",
+    "displayZh": "口交"
+  },
+  {
+    "key": "female-harem",
+    "displayEn": "Female Harem",
+    "displayZh": "后宫"
+  },
+  {
+    "key": "female-protagonist",
+    "displayEn": "Female Protagonist",
+    "displayZh": "女性主角"
+  },
+  {
+    "key": "femboy",
+    "displayEn": "Femboy",
+    "displayZh": "伪娘"
+  },
+  {
+    "key": "femdom",
+    "displayEn": "Femdom",
+    "displayZh": "女尊"
+  },
+  {
+    "key": "fencing",
+    "displayEn": "Fencing",
+    "displayZh": "击剑"
+  },
+  {
+    "key": "filmmaking",
+    "displayEn": "Filmmaking",
+    "displayZh": "电影制作"
+  },
+  {
+    "key": "fingering",
+    "displayEn": "Fingering",
+    "displayZh": "指交"
+  },
+  {
+    "key": "firefighters",
+    "displayEn": "Firefighters",
+    "displayZh": "消防员"
+  },
+  {
+    "key": "fishing",
+    "displayEn": "Fishing",
+    "displayZh": "钓鱼"
+  },
+  {
+    "key": "fisting",
+    "displayEn": "Fisting",
+    "displayZh": "拳交"
+  },
+  {
+    "key": "fitness",
+    "displayEn": "Fitness",
+    "displayZh": "健身"
+  },
+  {
+    "key": "flash",
+    "displayEn": "Flash",
+    "displayZh": "Flash动画"
+  },
+  {
+    "key": "flat-chest",
+    "displayEn": "Flat Chest",
+    "displayZh": "贫乳"
+  },
+  {
+    "key": "food",
+    "displayEn": "Food",
+    "displayZh": "美食"
+  },
+  {
+    "key": "football",
+    "displayEn": "Football",
+    "displayZh": "足球"
+  },
+  {
+    "key": "foreign",
+    "displayEn": "Foreign",
+    "displayZh": "异国背景"
+  },
+  {
+    "key": "found-family",
+    "displayEn": "Found Family",
+    "displayZh": "非血缘家庭"
+  },
+  {
+    "key": "fugitive",
+    "displayEn": "Fugitive",
+    "displayZh": "逃亡者"
+  },
+  {
+    "key": "full-cgi",
+    "displayEn": "Full CGI",
+    "displayZh": "全3D"
+  },
+  {
+    "key": "full-color",
+    "displayEn": "Full Color",
+    "displayZh": "全彩"
+  },
+  {
+    "key": "futanari",
+    "displayEn": "Futanari",
+    "displayZh": "扶他"
+  },
+  {
+    "key": "gambling",
+    "displayEn": "Gambling",
+    "displayZh": "赌博"
+  },
+  {
+    "key": "gangs",
+    "displayEn": "Gangs",
+    "displayZh": "黑帮"
+  },
+  {
+    "key": "gekiga",
+    "displayEn": "Gekiga",
+    "displayZh": "剧画"
+  },
+  {
+    "key": "gender-bending",
+    "displayEn": "Gender Bending",
+    "displayZh": "性别转换"
+  },
+  {
+    "key": "ghost",
+    "displayEn": "Ghost",
+    "displayZh": "幽灵"
+  },
+  {
+    "key": "go",
+    "displayEn": "Go",
+    "displayZh": "围棋"
+  },
+  {
+    "key": "goblin",
+    "displayEn": "Goblin",
+    "displayZh": "哥布林"
+  },
+  {
+    "key": "gods",
+    "displayEn": "Gods",
+    "displayZh": "神明"
+  },
+  {
+    "key": "golf",
+    "displayEn": "Golf",
+    "displayZh": "高尔夫"
+  },
+  {
+    "key": "gore",
+    "displayEn": "Gore",
+    "displayZh": "血腥"
+  },
+  {
+    "key": "graduation-project",
+    "displayEn": "Graduation Project",
+    "displayZh": "毕业制作"
+  },
+  {
+    "key": "group-sex",
+    "displayEn": "Group Sex",
+    "displayZh": "群交"
+  },
+  {
+    "key": "guns",
+    "displayEn": "Guns",
+    "displayZh": "枪械"
+  },
+  {
+    "key": "gyaru",
+    "displayEn": "Gyaru",
+    "displayZh": "辣妹"
+  },
+  {
+    "key": "hair-pulling",
+    "displayEn": "Hair Pulling",
+    "displayZh": "揪头发"
+  },
+  {
+    "key": "handball",
+    "displayEn": "Handball",
+    "displayZh": "手球"
+  },
+  {
+    "key": "handjob",
+    "displayEn": "Handjob",
+    "displayZh": "手淫"
+  },
+  {
+    "key": "henshin",
+    "displayEn": "Henshin",
+    "displayZh": "变身"
+  },
+  {
+    "key": "hentai",
+    "displayEn": "Hentai",
+    "displayZh": "成人"
+  },
+  {
+    "key": "heterosexual",
+    "displayEn": "Heterosexual",
+    "displayZh": "异性恋"
+  },
+  {
+    "key": "hikikomori",
+    "displayEn": "Hikikomori",
+    "displayZh": "家里蹲"
+  },
+  {
+    "key": "hip-hop-music",
+    "displayEn": "Hip-hop Music",
+    "displayZh": "嘻哈"
+  },
+  {
+    "key": "historical",
+    "displayEn": "Historical",
+    "displayZh": "历史"
+  },
+  {
+    "key": "homeless",
+    "displayEn": "Homeless",
+    "displayZh": "流浪者"
+  },
+  {
+    "key": "horror",
+    "displayEn": "Horror",
+    "displayZh": "恐怖"
+  },
+  {
+    "key": "horticulture",
+    "displayEn": "Horticulture",
+    "displayZh": "园艺"
+  },
+  {
+    "key": "human-experimentation",
+    "displayEn": "Human Experimentation",
+    "displayZh": "人体实验"
+  },
+  {
+    "key": "human-pet",
+    "displayEn": "Human Pet",
+    "displayZh": "人宠"
+  },
+  {
+    "key": "hypersexuality",
+    "displayEn": "Hypersexuality",
+    "displayZh": "性瘾"
+  },
+  {
+    "key": "ice-sports",
+    "displayEn": "Ice Sports",
+    "displayZh": "冰上运动"
+  },
+  {
+    "key": "idol",
+    "displayEn": "Idol",
+    "displayZh": "偶像"
+  },
+  {
+    "key": "incest",
+    "displayEn": "Incest",
+    "displayZh": "近亲相奸"
+  },
+  {
+    "key": "indigenous-cultures",
+    "displayEn": "Indigenous Cultures",
+    "displayZh": "原住民文化"
+  },
+  {
+    "key": "inn",
+    "displayEn": "Inn",
+    "displayZh": "旅馆"
+  },
+  {
+    "key": "inseki",
+    "displayEn": "Inseki",
+    "displayZh": "姻亲"
+  },
+  {
+    "key": "interspecies",
+    "displayEn": "Interspecies",
+    "displayZh": "异种族"
+  },
+  {
+    "key": "irrumatio",
+    "displayEn": "Irrumatio",
+    "displayZh": "强制口交"
+  },
+  {
+    "key": "isekai",
+    "displayEn": "Isekai",
+    "displayZh": "异世界"
+  },
+  {
+    "key": "iyashikei",
+    "displayEn": "Iyashikei",
+    "displayZh": "治愈系"
+  },
+  {
+    "key": "jazz-music",
+    "displayEn": "Jazz Music",
+    "displayZh": "爵士乐"
+  },
+  {
+    "key": "josei",
+    "displayEn": "Josei",
+    "displayZh": "女性向"
+  },
+  {
+    "key": "judo",
+    "displayEn": "Judo",
+    "displayZh": "柔道"
+  },
+  {
+    "key": "kabuki",
+    "displayEn": "Kabuki",
+    "displayZh": "歌舞伎"
+  },
+  {
+    "key": "kaiju",
+    "displayEn": "Kaiju",
+    "displayZh": "怪兽"
+  },
+  {
+    "key": "karuta",
+    "displayEn": "Karuta",
+    "displayZh": "歌牌"
+  },
+  {
+    "key": "kemonomimi",
+    "displayEn": "Kemonomimi",
+    "displayZh": "兽耳"
+  },
+  {
+    "key": "kids",
+    "displayEn": "Kids",
+    "displayZh": "儿童"
+  },
+  {
+    "key": "kingdom-management",
+    "displayEn": "Kingdom Management",
+    "displayZh": "王国经营"
+  },
+  {
+    "key": "konbini",
+    "displayEn": "Konbini",
+    "displayZh": "便利店"
+  },
+  {
+    "key": "kuudere",
+    "displayEn": "Kuudere",
+    "displayZh": "库德雷"
+  },
+  {
+    "key": "lacrosse",
+    "displayEn": "Lacrosse",
+    "displayZh": "长曲棍球"
+  },
+  {
+    "key": "lactation",
+    "displayEn": "Lactation",
+    "displayZh": "泌乳"
+  },
+  {
+    "key": "language-barrier",
+    "displayEn": "Language Barrier",
+    "displayZh": "语言障碍"
+  },
+  {
+    "key": "large-breasts",
+    "displayEn": "Large Breasts",
+    "displayZh": "巨乳"
+  },
+  {
+    "key": "lgbtq+-themes",
+    "displayEn": "LGBTQ+ Themes",
+    "displayZh": "LGBTQ+"
+  },
+  {
+    "key": "long-strip",
+    "displayEn": "Long Strip",
+    "displayZh": "条漫"
+  },
+  {
+    "key": "lost-civilization",
+    "displayEn": "Lost Civilization",
+    "displayZh": "失落文明"
+  },
+  {
+    "key": "love-triangle",
+    "displayEn": "Love Triangle",
+    "displayZh": "三角恋"
+  },
+  {
+    "key": "mafia",
+    "displayEn": "Mafia",
+    "displayZh": "黑手党"
+  },
+  {
+    "key": "magic",
+    "displayEn": "Magic",
+    "displayZh": "魔法"
+  },
+  {
+    "key": "mahjong",
+    "displayEn": "Mahjong",
+    "displayZh": "麻将"
+  },
+  {
+    "key": "mahou-shoujo",
+    "displayEn": "Mahou Shoujo",
+    "displayZh": "魔法少女"
+  },
+  {
+    "key": "maids",
+    "displayEn": "Maids",
+    "displayZh": "女仆"
+  },
+  {
+    "key": "makeup",
+    "displayEn": "Makeup",
+    "displayZh": "化妆"
+  },
+  {
+    "key": "male-harem",
+    "displayEn": "Male Harem",
+    "displayZh": "逆后宫"
+  },
+  {
+    "key": "male-pregnancy",
+    "displayEn": "Male Pregnancy",
+    "displayZh": "男体怀孕"
+  },
+  {
+    "key": "male-protagonist",
+    "displayEn": "Male Protagonist",
+    "displayZh": "男主角"
+  },
+  {
+    "key": "manzai",
+    "displayEn": "Manzai",
+    "displayZh": "漫才"
+  },
+  {
+    "key": "marriage",
+    "displayEn": "Marriage",
+    "displayZh": "婚姻"
+  },
+  {
+    "key": "martial-arts",
+    "displayEn": "Martial Arts",
+    "displayZh": "格斗"
+  },
+  {
+    "key": "masochism",
+    "displayEn": "Masochism",
+    "displayZh": "受虐"
+  },
+  {
+    "key": "masturbation",
+    "displayEn": "Masturbation",
+    "displayZh": "自慰"
+  },
+  {
+    "key": "matchmaking",
+    "displayEn": "Matchmaking",
+    "displayZh": "相亲"
+  },
+  {
+    "key": "mating-press",
+    "displayEn": "Mating Press",
+    "displayZh": "骑乘位"
+  },
+  {
+    "key": "matriarchy",
+    "displayEn": "Matriarchy",
+    "displayZh": "母权社会"
+  },
+  {
+    "key": "mecha",
+    "displayEn": "Mecha",
+    "displayZh": "机甲"
+  },
+  {
+    "key": "medicine",
+    "displayEn": "Medicine",
+    "displayZh": "医疗"
+  },
+  {
+    "key": "medieval",
+    "displayEn": "Medieval",
+    "displayZh": "中世纪"
+  },
+  {
+    "key": "memory-manipulation",
+    "displayEn": "Memory Manipulation",
+    "displayZh": "记忆操纵"
+  },
+  {
+    "key": "mermaid",
+    "displayEn": "Mermaid",
+    "displayZh": "人鱼"
+  },
+  {
+    "key": "meta",
+    "displayEn": "Meta",
+    "displayZh": "元叙事"
+  },
+  {
+    "key": "metal-music",
+    "displayEn": "Metal Music",
+    "displayZh": "金属乐"
+  },
+  {
+    "key": "middle-east",
+    "displayEn": "Middle east",
+    "displayZh": "中东"
+  },
+  {
+    "key": "milf",
+    "displayEn": "MILF",
+    "displayZh": "熟女"
+  },
+  {
+    "key": "military",
+    "displayEn": "Military",
+    "displayZh": "军事"
+  },
+  {
+    "key": "mixed-gender-harem",
+    "displayEn": "Mixed Gender Harem",
+    "displayZh": "后宫"
+  },
+  {
+    "key": "mixed-media",
+    "displayEn": "Mixed Media",
+    "displayZh": "混合媒介"
+  },
+  {
+    "key": "modeling",
+    "displayEn": "Modeling",
+    "displayZh": "模特"
+  },
+  {
+    "key": "monster-boy",
+    "displayEn": "Monster Boy",
+    "displayZh": "怪物男孩"
+  },
+  {
+    "key": "monster-girl",
+    "displayEn": "Monster Girl",
+    "displayZh": "怪物娘"
+  },
+  {
+    "key": "mopeds",
+    "displayEn": "Mopeds",
+    "displayZh": "轻便摩托"
+  },
+  {
+    "key": "motorcycles",
+    "displayEn": "Motorcycles",
+    "displayZh": "摩托车"
+  },
+  {
+    "key": "mountaineering",
+    "displayEn": "Mountaineering",
+    "displayZh": "登山"
+  },
+  {
+    "key": "music",
+    "displayEn": "Music",
+    "displayZh": "音乐"
+  },
+  {
+    "key": "musical-theater",
+    "displayEn": "Musical Theater",
+    "displayZh": "音乐剧"
+  },
+  {
+    "key": "mystery",
+    "displayEn": "Mystery",
+    "displayZh": "悬疑"
+  },
+  {
+    "key": "mythology",
+    "displayEn": "Mythology",
+    "displayZh": "神话"
+  },
+  {
+    "key": "nakadashi",
+    "displayEn": "Nakadashi",
+    "displayZh": "中出"
+  },
+  {
+    "key": "natural-disaster",
+    "displayEn": "Natural Disaster",
+    "displayZh": "自然灾害"
+  },
+  {
+    "key": "necromancy",
+    "displayEn": "Necromancy",
+    "displayZh": "死灵术"
+  },
+  {
+    "key": "nekomimi",
+    "displayEn": "Nekomimi",
+    "displayZh": "猫耳"
+  },
+  {
+    "key": "netorare",
+    "displayEn": "Netorare",
+    "displayZh": "NTR"
+  },
+  {
+    "key": "netorase",
+    "displayEn": "Netorase",
+    "displayZh": "NTS"
+  },
+  {
+    "key": "netori",
+    "displayEn": "Netori",
+    "displayZh": "NTL"
+  },
+  {
+    "key": "ninja",
+    "displayEn": "Ninja",
+    "displayZh": "忍者"
+  },
+  {
+    "key": "no-dialogue",
+    "displayEn": "No Dialogue",
+    "displayZh": "无台词"
+  },
+  {
+    "key": "noir",
+    "displayEn": "Noir",
+    "displayZh": "黑色电影"
+  },
+  {
+    "key": "non-fiction",
+    "displayEn": "Non-fiction",
+    "displayZh": "非虚构"
+  },
+  {
+    "key": "nudity",
+    "displayEn": "Nudity",
+    "displayZh": "裸露"
+  },
+  {
+    "key": "nun",
+    "displayEn": "Nun",
+    "displayZh": "修女"
+  },
+  {
+    "key": "office",
+    "displayEn": "Office",
+    "displayZh": "职场"
+  },
+  {
+    "key": "office-lady",
+    "displayEn": "Office Lady",
+    "displayZh": "OL"
+  },
+  {
+    "key": "oiran",
+    "displayEn": "Oiran",
+    "displayZh": "花魁"
+  },
+  {
+    "key": "ojou-sama",
+    "displayEn": "Ojou-sama",
+    "displayZh": "大小姐"
+  },
+  {
+    "key": "omegaverse",
+    "displayEn": "Omegaverse",
+    "displayZh": "欧米伽宇宙"
+  },
+  {
+    "key": "orphan",
+    "displayEn": "Orphan",
+    "displayZh": "孤儿"
+  },
+  {
+    "key": "otaku-culture",
+    "displayEn": "Otaku Culture",
+    "displayZh": "御宅文化"
+  },
+  {
+    "key": "outdoor-activities",
+    "displayEn": "Outdoor Activities",
+    "displayZh": "户外活动"
+  },
+  {
+    "key": "oyakodon",
+    "displayEn": "Oyakodon",
+    "displayZh": "母女丼"
+  },
+  {
+    "key": "pandemic",
+    "displayEn": "Pandemic",
+    "displayZh": "瘟疫"
+  },
+  {
+    "key": "parenthood",
+    "displayEn": "Parenthood",
+    "displayZh": "育儿"
+  },
+  {
+    "key": "parkour",
+    "displayEn": "Parkour",
+    "displayZh": "跑酷"
+  },
+  {
+    "key": "parody",
+    "displayEn": "Parody",
+    "displayZh": "恶搞"
+  },
+  {
+    "key": "pet-play",
+    "displayEn": "Pet Play",
+    "displayZh": "宠物扮演"
+  },
+  {
+    "key": "philosophy",
+    "displayEn": "Philosophy",
+    "displayZh": "哲学"
+  },
+  {
+    "key": "photography",
+    "displayEn": "Photography",
+    "displayZh": "摄影"
+  },
+  {
+    "key": "pirates",
+    "displayEn": "Pirates",
+    "displayZh": "海盗"
+  },
+  {
+    "key": "poker",
+    "displayEn": "Poker",
+    "displayZh": "扑克"
+  },
+  {
+    "key": "police",
+    "displayEn": "Police",
+    "displayZh": "警察"
+  },
+  {
+    "key": "politics",
+    "displayEn": "Politics",
+    "displayZh": "政治"
+  },
+  {
+    "key": "polyamorous",
+    "displayEn": "Polyamorous",
+    "displayZh": "多角恋"
+  },
+  {
+    "key": "post-apocalyptic",
+    "displayEn": "Post-Apocalyptic",
+    "displayZh": "废土"
+  },
+  {
+    "key": "pov",
+    "displayEn": "POV",
+    "displayZh": "第一人称视角"
+  },
+  {
+    "key": "pregnancy",
+    "displayEn": "Pregnancy",
+    "displayZh": "怀孕"
+  },
+  {
+    "key": "primarily-adult-cast",
+    "displayEn": "Primarily Adult Cast",
+    "displayZh": "成人主角"
+  },
+  {
+    "key": "primarily-animal-cast",
+    "displayEn": "Primarily Animal Cast",
+    "displayZh": "动物主角"
+  },
+  {
+    "key": "primarily-child-cast",
+    "displayEn": "Primarily Child Cast",
+    "displayZh": "幼年主角"
+  },
+  {
+    "key": "primarily-female-cast",
+    "displayEn": "Primarily Female Cast",
+    "displayZh": "女性主角"
+  },
+  {
+    "key": "primarily-male-cast",
+    "displayEn": "Primarily Male Cast",
+    "displayZh": "男性主角"
+  },
+  {
+    "key": "primarily-teen-cast",
+    "displayEn": "Primarily Teen Cast",
+    "displayZh": "少年主角"
+  },
+  {
+    "key": "prison",
+    "displayEn": "Prison",
+    "displayZh": "监狱"
+  },
+  {
+    "key": "prophecy",
+    "displayEn": "Prophecy",
+    "displayZh": "预言"
+  },
+  {
+    "key": "prostitution",
+    "displayEn": "Prostitution",
+    "displayZh": "卖淫"
+  },
+  {
+    "key": "proxy-battle",
+    "displayEn": "Proxy Battle",
+    "displayZh": "代理战斗"
+  },
+  {
+    "key": "psychological",
+    "displayEn": "Psychological",
+    "displayZh": "心理"
+  },
+  {
+    "key": "psychosexual",
+    "displayEn": "Psychosexual",
+    "displayZh": "心理性爱"
+  },
+  {
+    "key": "public-sex",
+    "displayEn": "Public Sex",
+    "displayZh": "野外露出"
+  },
+  {
+    "key": "puppetry",
+    "displayEn": "Puppetry",
+    "displayZh": "木偶戏"
+  },
+  {
+    "key": "rakugo",
+    "displayEn": "Rakugo",
+    "displayZh": "落语"
+  },
+  {
+    "key": "rape",
+    "displayEn": "Rape",
+    "displayZh": "强奸"
+  },
+  {
+    "key": "real-robot",
+    "displayEn": "Real Robot",
+    "displayZh": "写实机甲"
+  },
+  {
+    "key": "rehabilitation",
+    "displayEn": "Rehabilitation",
+    "displayZh": "康复"
+  },
+  {
+    "key": "reincarnation",
+    "displayEn": "Reincarnation",
+    "displayZh": "转生"
+  },
+  {
+    "key": "religion",
+    "displayEn": "Religion",
+    "displayZh": "宗教"
+  },
+  {
+    "key": "rescue",
+    "displayEn": "Rescue",
+    "displayZh": "救援"
+  },
+  {
+    "key": "restaurant",
+    "displayEn": "Restaurant",
+    "displayZh": "餐厅"
+  },
+  {
+    "key": "revenge",
+    "displayEn": "Revenge",
+    "displayZh": "复仇"
+  },
+  {
+    "key": "reverse-isekai",
+    "displayEn": "Reverse Isekai",
+    "displayZh": "逆异世界"
+  },
+  {
+    "key": "rimjob",
+    "displayEn": "Rimjob",
+    "displayZh": "肛交"
+  },
+  {
+    "key": "robots",
+    "displayEn": "Robots",
+    "displayZh": "机器人"
+  },
+  {
+    "key": "rock-music",
+    "displayEn": "Rock Music",
+    "displayZh": "摇滚乐"
+  },
+  {
+    "key": "romance",
+    "displayEn": "Romance",
+    "displayZh": "恋爱"
+  },
+  {
+    "key": "rotoscoping",
+    "displayEn": "Rotoscoping",
+    "displayZh": "转描"
+  },
+  {
+    "key": "royal-affairs",
+    "displayEn": "Royal Affairs",
+    "displayZh": "宫廷权谋"
+  },
+  {
+    "key": "rugby",
+    "displayEn": "Rugby",
+    "displayZh": "橄榄球"
+  },
+  {
+    "key": "rural",
+    "displayEn": "Rural",
+    "displayZh": "乡村"
+  },
+  {
+    "key": "sadism",
+    "displayEn": "Sadism",
+    "displayZh": "施虐"
+  },
+  {
+    "key": "samurai",
+    "displayEn": "Samurai",
+    "displayZh": "武士"
+  },
+  {
+    "key": "satire",
+    "displayEn": "Satire",
+    "displayZh": "讽刺"
+  },
+  {
+    "key": "scat",
+    "displayEn": "Scat",
+    "displayZh": "排泄"
+  },
+  {
+    "key": "school",
+    "displayEn": "School",
+    "displayZh": "校园"
+  },
+  {
+    "key": "school-club",
+    "displayEn": "School Club",
+    "displayZh": "社团"
+  },
+  {
+    "key": "sci-fi",
+    "displayEn": "Sci-Fi",
+    "displayZh": "科幻"
+  },
+  {
+    "key": "scissoring",
+    "displayEn": "Scissoring",
+    "displayZh": "摩擦"
+  },
+  {
+    "key": "scuba-diving",
+    "displayEn": "Scuba Diving",
+    "displayZh": "潜水"
+  },
+  {
+    "key": "seinen",
+    "displayEn": "Seinen",
+    "displayZh": "青年"
+  },
+  {
+    "key": "sex-toys",
+    "displayEn": "Sex Toys",
+    "displayZh": "性玩具"
+  },
+  {
+    "key": "shapeshifting",
+    "displayEn": "Shapeshifting",
+    "displayZh": "变身"
+  },
+  {
+    "key": "shimaidon",
+    "displayEn": "Shimaidon",
+    "displayZh": "姐妹丼"
+  },
+  {
+    "key": "ships",
+    "displayEn": "Ships",
+    "displayZh": "船只"
+  },
+  {
+    "key": "shogi",
+    "displayEn": "Shogi",
+    "displayZh": "将棋"
+  },
+  {
+    "key": "short-form-chapter",
+    "displayEn": "Short-Form Chapter",
+    "displayZh": "短篇"
+  },
+  {
+    "key": "shoujo",
+    "displayEn": "Shoujo",
+    "displayZh": "少女"
+  },
+  {
+    "key": "shounen",
+    "displayEn": "Shounen",
+    "displayZh": "少年"
+  },
+  {
+    "key": "shrine-maiden",
+    "displayEn": "Shrine Maiden",
+    "displayZh": "巫女"
+  },
+  {
+    "key": "sixty-nine",
+    "displayEn": "Sixty-nine",
+    "displayZh": "69式"
+  },
+  {
+    "key": "skateboarding",
+    "displayEn": "Skateboarding",
+    "displayZh": "滑板"
+  },
+  {
+    "key": "skeleton",
+    "displayEn": "Skeleton",
+    "displayZh": "骷髅"
+  },
+  {
+    "key": "slapstick",
+    "displayEn": "Slapstick",
+    "displayZh": "闹剧"
+  },
+  {
+    "key": "slavery",
+    "displayEn": "Slavery",
+    "displayZh": "奴隶"
+  },
+  {
+    "key": "slice-of-life",
+    "displayEn": "Slice of Life",
+    "displayZh": "日常"
+  },
+  {
+    "key": "snowscape",
+    "displayEn": "Snowscape",
+    "displayZh": "雪景"
+  },
+  {
+    "key": "software-development",
+    "displayEn": "Software Development",
+    "displayZh": "软件开发"
+  },
+  {
+    "key": "space",
+    "displayEn": "Space",
+    "displayZh": "太空"
+  },
+  {
+    "key": "space-opera",
+    "displayEn": "Space Opera",
+    "displayZh": "太空歌剧"
+  },
+  {
+    "key": "spearplay",
+    "displayEn": "Spearplay",
+    "displayZh": "枪术"
+  },
+  {
+    "key": "sports",
+    "displayEn": "Sports",
+    "displayZh": "运动"
+  },
+  {
+    "key": "squirting",
+    "displayEn": "Squirting",
+    "displayZh": "潮吹"
+  },
+  {
+    "key": "steampunk",
+    "displayEn": "Steampunk",
+    "displayZh": "蒸汽朋克"
+  },
+  {
+    "key": "stop-motion",
+    "displayEn": "Stop Motion",
+    "displayZh": "定格动画"
+  },
+  {
+    "key": "strap-on",
+    "displayEn": "Strap-on",
+    "displayZh": "穿戴式假阳具"
+  },
+  {
+    "key": "succubus",
+    "displayEn": "Succubus",
+    "displayZh": "魅魔"
+  },
+  {
+    "key": "suicide",
+    "displayEn": "Suicide",
+    "displayZh": "自杀"
+  },
+  {
+    "key": "sumata",
+    "displayEn": "Sumata",
+    "displayZh": "股间摩擦"
+  },
+  {
+    "key": "sumo",
+    "displayEn": "Sumo",
+    "displayZh": "相扑"
+  },
+  {
+    "key": "super-power",
+    "displayEn": "Super Power",
+    "displayZh": "超能力"
+  },
+  {
+    "key": "super-robot",
+    "displayEn": "Super Robot",
+    "displayZh": "超级机器人"
+  },
+  {
+    "key": "superhero",
+    "displayEn": "Superhero",
+    "displayZh": "超级英雄"
+  },
+  {
+    "key": "supernatural",
+    "displayEn": "Supernatural",
+    "displayZh": "超自然"
+  },
+  {
+    "key": "surfing",
+    "displayEn": "Surfing",
+    "displayZh": "冲浪"
+  },
+  {
+    "key": "surreal-comedy",
+    "displayEn": "Surreal Comedy",
+    "displayZh": "超现实喜剧"
+  },
+  {
+    "key": "survival",
+    "displayEn": "Survival",
+    "displayZh": "生存"
+  },
+  {
+    "key": "swapping",
+    "displayEn": "Swapping",
+    "displayZh": "交换伴侣"
+  },
+  {
+    "key": "sweat",
+    "displayEn": "Sweat",
+    "displayZh": "出汗"
+  },
+  {
+    "key": "swimming",
+    "displayEn": "Swimming",
+    "displayZh": "游泳"
+  },
+  {
+    "key": "swordplay",
+    "displayEn": "Swordplay",
+    "displayZh": "剑术"
+  },
+  {
+    "key": "table-tennis",
+    "displayEn": "Table Tennis",
+    "displayZh": "乒乓球"
+  },
+  {
+    "key": "tanks",
+    "displayEn": "Tanks",
+    "displayZh": "坦克"
+  },
+  {
+    "key": "tanned-skin",
+    "displayEn": "Tanned Skin",
+    "displayZh": "晒痕"
+  },
+  {
+    "key": "teacher",
+    "displayEn": "Teacher",
+    "displayZh": "教师"
+  },
+  {
+    "key": "teens'-love",
+    "displayEn": "Teens' Love",
+    "displayZh": "少女爱"
+  },
+  {
+    "key": "tennis",
+    "displayEn": "Tennis",
+    "displayZh": "网球"
+  },
+  {
+    "key": "tentacles",
+    "displayEn": "Tentacles",
+    "displayZh": "触手"
+  },
+  {
+    "key": "terrorism",
+    "displayEn": "Terrorism",
+    "displayZh": "恐怖主义"
+  },
+  {
+    "key": "threesome",
+    "displayEn": "Threesome",
+    "displayZh": "3P"
+  },
+  {
+    "key": "thriller",
+    "displayEn": "Thriller",
+    "displayZh": "惊悚"
+  },
+  {
+    "key": "time-loop",
+    "displayEn": "Time Loop",
+    "displayZh": "时间循环"
+  },
+  {
+    "key": "time-manipulation",
+    "displayEn": "Time Manipulation",
+    "displayZh": "时间操作"
+  },
+  {
+    "key": "time-skip",
+    "displayEn": "Time Skip",
+    "displayZh": "时间跳跃"
+  },
+  {
+    "key": "tokusatsu",
+    "displayEn": "Tokusatsu",
+    "displayZh": "特摄"
+  },
+  {
+    "key": "tomboy",
+    "displayEn": "Tomboy",
+    "displayZh": "假小子"
+  },
+  {
+    "key": "torture",
+    "displayEn": "Torture",
+    "displayZh": "拷问"
+  },
+  {
+    "key": "tragedy",
+    "displayEn": "Tragedy",
+    "displayZh": "悲剧"
+  },
+  {
+    "key": "trains",
+    "displayEn": "Trains",
+    "displayZh": "铁路"
+  },
+  {
+    "key": "transgender",
+    "displayEn": "Transgender",
+    "displayZh": "跨性别"
+  },
+  {
+    "key": "travel",
+    "displayEn": "Travel",
+    "displayZh": "旅行"
+  },
+  {
+    "key": "triads",
+    "displayEn": "Triads",
+    "displayZh": "三合会"
+  },
+  {
+    "key": "tsundere",
+    "displayEn": "Tsundere",
+    "displayZh": "傲娇"
+  },
+  {
+    "key": "twins",
+    "displayEn": "Twins",
+    "displayZh": "双胞胎"
+  },
+  {
+    "key": "unrequited-love",
+    "displayEn": "Unrequited Love",
+    "displayZh": "单恋"
+  },
+  {
+    "key": "urban",
+    "displayEn": "Urban",
+    "displayZh": "都市"
+  },
+  {
+    "key": "urban-fantasy",
+    "displayEn": "Urban Fantasy",
+    "displayZh": "都市奇幻"
+  },
+  {
+    "key": "vampire",
+    "displayEn": "Vampire",
+    "displayZh": "吸血鬼"
+  },
+  {
+    "key": "vertical-video",
+    "displayEn": "Vertical Video",
+    "displayZh": "竖屏动画"
+  },
+  {
+    "key": "veterinarian",
+    "displayEn": "Veterinarian",
+    "displayZh": "兽医"
+  },
+  {
+    "key": "video-games",
+    "displayEn": "Video Games",
+    "displayZh": "电子游戏"
+  },
+  {
+    "key": "vikings",
+    "displayEn": "Vikings",
+    "displayZh": "维京人"
+  },
+  {
+    "key": "villainess",
+    "displayEn": "Villainess",
+    "displayZh": "恶役千金"
+  },
+  {
+    "key": "virginity",
+    "displayEn": "Virginity",
+    "displayZh": "处男"
+  },
+  {
+    "key": "virtual-world",
+    "displayEn": "Virtual World",
+    "displayZh": "虚拟世界"
+  },
+  {
+    "key": "vocal-synth",
+    "displayEn": "Vocal Synth",
+    "displayZh": "语音合成"
+  },
+  {
+    "key": "volleyball",
+    "displayEn": "Volleyball",
+    "displayZh": "排球"
+  },
+  {
+    "key": "vore",
+    "displayEn": "Vore",
+    "displayZh": "吞食"
+  },
+  {
+    "key": "voyeur",
+    "displayEn": "Voyeur",
+    "displayZh": "偷窥"
+  },
+  {
+    "key": "vtuber",
+    "displayEn": "VTuber",
+    "displayZh": "虚拟主播"
+  },
+  {
+    "key": "war",
+    "displayEn": "War",
+    "displayZh": "战争"
+  },
+  {
+    "key": "watersports",
+    "displayEn": "Watersports",
+    "displayZh": "排泄"
+  },
+  {
+    "key": "werewolf",
+    "displayEn": "Werewolf",
+    "displayZh": "狼人"
+  },
+  {
+    "key": "wilderness",
+    "displayEn": "Wilderness",
+    "displayZh": "荒野"
+  },
+  {
+    "key": "witch",
+    "displayEn": "Witch",
+    "displayZh": "魔女"
+  },
+  {
+    "key": "work",
+    "displayEn": "Work",
+    "displayZh": "职场"
+  },
+  {
+    "key": "wrestling",
+    "displayEn": "Wrestling",
+    "displayZh": "摔跤"
+  },
+  {
+    "key": "writing",
+    "displayEn": "Writing",
+    "displayZh": "写作"
+  },
+  {
+    "key": "wuxia",
+    "displayEn": "Wuxia",
+    "displayZh": "武侠"
+  },
+  {
+    "key": "yakuza",
+    "displayEn": "Yakuza",
+    "displayZh": "极道"
+  },
+  {
+    "key": "yandere",
+    "displayEn": "Yandere",
+    "displayZh": "病娇"
+  },
+  {
+    "key": "youkai",
+    "displayEn": "Youkai",
+    "displayZh": "妖怪"
+  },
+  {
+    "key": "yuri",
+    "displayEn": "Yuri",
+    "displayZh": "百合"
+  },
+  {
+    "key": "zombie",
+    "displayEn": "Zombie",
+    "displayZh": "丧尸"
+  },
+  {
+    "key": "zoophilia",
+    "displayEn": "Zoophilia",
+    "displayZh": "人兽"
+  }
+]
