@@ -78,6 +78,57 @@ pub enum MetadataJobEvent {
     Completed,
 }
 
+/// 全局 job 事件（firehose）：每帧必带 `job_id` + `series_id`，供 `GET /jobs/events` 消费。
+///
+/// - `Created`：job 注册时发出，客户端可据此渲染“全部 komf 活动”无需轮询；
+/// - `Event`：透传原 per-job 进度事件（`Completed` 除外，终态由 `Finished` 承载）；
+/// - `Finished`：job 终态（COMPLETED / FAILED），全局流不因单个 job 结束而断开。
+#[derive(Debug, Clone)]
+pub struct GlobalJobEvent {
+    pub job_id: MetadataJobId,
+    pub series_id: MediaServerSeriesId,
+    pub kind: GlobalJobEventKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum GlobalJobEventKind {
+    Created { started_at: DateTime<Utc> },
+    Event(MetadataJobEvent),
+    Finished {
+        status: MetadataJobStatus,
+        message: Option<String>,
+        finished_at: DateTime<Utc>,
+    },
+}
+
+/// job 事件发送器 —— `register_job` 返回的句柄，同时写入 per-job 通道与全局总线。
+///
+/// 调用方沿用 `let _ = tx.send(event)` 写法即可自动进入全局流，保证同一 job
+/// 的事件在全局通道中保序（同一任务顺序 `send`，无转发任务竞态）。
+#[derive(Debug, Clone)]
+pub struct JobEventSender {
+    job_id: MetadataJobId,
+    series_id: MediaServerSeriesId,
+    local: tokio::sync::broadcast::Sender<MetadataJobEvent>,
+    global: tokio::sync::broadcast::Sender<GlobalJobEvent>,
+}
+
+impl JobEventSender {
+    /// 发送事件：先写 per-job 通道，再写全局总线（`Completed` 仅走 per-job，
+    /// 全局终态由 `complete_job` / `fail_job` 的 `Finished` 承载，避免重复终态）。
+    pub fn send(&self, event: MetadataJobEvent) -> Result<usize, ()> {
+        let local_ok = self.local.send(event.clone()).map(|_| 0).map_err(|_| ());
+        if !matches!(event, MetadataJobEvent::Completed) {
+            let _ = self.global.send(GlobalJobEvent {
+                job_id: self.job_id.clone(),
+                series_id: self.series_id.clone(),
+                kind: GlobalJobEventKind::Event(event),
+            });
+        }
+        local_ok
+    }
+}
+
 /// 任务记录表 —— 对应 `KomfJobRecord`。
 #[derive(Debug, Clone)]
 pub struct KomfJobRecord {
@@ -447,10 +498,12 @@ fn parse_status(status: &str) -> MetadataJobStatus {
 
 /// 内存任务追踪器 —— 对应 `KomfJobTracker.kt`。
 ///
-/// 维护 job 状态与每个 job 的事件广播通道（供 SSE 消费）。
+/// 维护 job 状态与每个 job 的事件广播通道（供 SSE 消费），另有一条全局
+/// firehose 总线（`GET /jobs/events` 消费，容量 1024，慢客户端丢弃追赶）。
 pub struct KomfJobTracker {
     repository: Arc<KomfJobsRepository>,
     jobs: RwLock<HashMap<MetadataJobId, JobState>>,
+    global_tx: tokio::sync::broadcast::Sender<GlobalJobEvent>,
 }
 
 struct JobState {
@@ -473,10 +526,11 @@ impl KomfJobTracker {
         Self {
             repository,
             jobs: RwLock::new(HashMap::new()),
+            global_tx: tokio::sync::broadcast::channel(1024).0,
         }
     }
 
-    pub async fn register_job(&self, series_id: MediaServerSeriesId) -> (MetadataJobId, tokio::sync::broadcast::Sender<MetadataJobEvent>) {
+    pub async fn register_job(&self, series_id: MediaServerSeriesId) -> (MetadataJobId, JobEventSender) {
         let job = MetadataJob::new(series_id);
         let (tx, _rx) = tokio::sync::broadcast::channel(256);
         let record = KomfJobRecord {
@@ -488,6 +542,12 @@ impl KomfJobTracker {
             finished_at: None,
         };
         let _ = self.repository.insert_job(&record);
+        let sender = JobEventSender {
+            job_id: job.id.clone(),
+            series_id: job.series_id.clone(),
+            local: tx.clone(),
+            global: self.global_tx.clone(),
+        };
         self.jobs.write().await.insert(
             job.id.clone(),
             JobState {
@@ -495,7 +555,15 @@ impl KomfJobTracker {
                 broadcast: tx.clone(),
             },
         );
-        (job.id, tx)
+        // 全局生命周期：Created（含 started_at，客户端无需先轮询 /jobs）。
+        let _ = self.global_tx.send(GlobalJobEvent {
+            job_id: job.id.clone(),
+            series_id: job.series_id.clone(),
+            kind: GlobalJobEventKind::Created {
+                started_at: job.started_at,
+            },
+        });
+        (job.id, sender)
     }
 
     pub async fn get_job(&self, id: &MetadataJobId) -> Option<KomfJobRecord> {
@@ -516,6 +584,7 @@ impl KomfJobTracker {
     pub async fn complete_job(&self, id: &MetadataJobId) {
         // 对齐 Kotlin listener：CompletionEvent -> activeJobs.remove + complete。
         // 终态后移出内存 map，后续 subscribe 返回 None（SSE 发 EventStreamNotFoundEvent）。
+        // 全局流不断开，另发 Finished 终态帧。
         if let Some(mut state) = self.jobs.write().await.remove(id) {
             state.record.status = MetadataJobStatus::Completed;
             state.record.finished_at = Some(Utc::now());
@@ -523,6 +592,15 @@ impl KomfJobTracker {
                 .repository
                 .update_job_status(id, MetadataJobStatus::Completed, None);
             let _ = state.broadcast.send(MetadataJobEvent::Completed);
+            let _ = self.global_tx.send(GlobalJobEvent {
+                job_id: id.clone(),
+                series_id: state.record.series_id.clone(),
+                kind: GlobalJobEventKind::Finished {
+                    status: MetadataJobStatus::Completed,
+                    message: None,
+                    finished_at: state.record.finished_at.unwrap_or_else(Utc::now),
+                },
+            });
         }
     }
 
@@ -537,20 +615,134 @@ impl KomfJobTracker {
                 .repository
                 .update_job_status(id, MetadataJobStatus::Failed, Some(message.clone()));
             if emit_error {
-                let _ = state.broadcast.send(MetadataJobEvent::ProcessingError { message });
+                // 保持 per-job 原语义（finish_job 已先经 tx 发过一次，这里再发一次，
+                // 共两帧 ProcessingErrorEvent）；全局仅保留 tx 那一次，避免重复。
+                let _ = state.broadcast.send(MetadataJobEvent::ProcessingError { message: message.clone() });
             }
             let _ = state.broadcast.send(MetadataJobEvent::Completed);
+            let _ = self.global_tx.send(GlobalJobEvent {
+                job_id: id.clone(),
+                series_id: state.record.series_id.clone(),
+                kind: GlobalJobEventKind::Finished {
+                    status: MetadataJobStatus::Failed,
+                    message: Some(message),
+                    finished_at: state.record.finished_at.unwrap_or_else(Utc::now),
+                },
+            });
         }
     }
 
     pub async fn emit(&self, id: &MetadataJobId, event: MetadataJobEvent) {
+        // 兼容保留：同时写入 per-job 与全局（Completed 仅 per-job）。
         if let Some(state) = self.jobs.read().await.get(id) {
-            let _ = state.broadcast.send(event);
+            let _ = state.broadcast.send(event.clone());
+            if !matches!(event, MetadataJobEvent::Completed) {
+                let _ = self.global_tx.send(GlobalJobEvent {
+                    job_id: id.clone(),
+                    series_id: state.record.series_id.clone(),
+                    kind: GlobalJobEventKind::Event(event),
+                });
+            }
         }
     }
 
     /// 订阅某个 job 的事件流（返回 None 表示 job 不存在）。
     pub async fn subscribe(&self, id: &MetadataJobId) -> Option<tokio::sync::broadcast::Receiver<MetadataJobEvent>> {
         self.jobs.read().await.get(id).map(|s| s.broadcast.subscribe())
+    }
+
+    /// 订阅全局 job 事件流（firehose，不过滤）。
+    pub fn subscribe_all(&self) -> tokio::sync::broadcast::Receiver<GlobalJobEvent> {
+        self.global_tx.subscribe()
+    }
+
+    /// 当前内存中的 RUNNING job 快照（供全局流连接时回放 Created，避免订阅竞态漏 job）。
+    pub async fn running_jobs(&self) -> Vec<KomfJobRecord> {
+        let jobs = self.jobs.read().await;
+        let mut records: Vec<KomfJobRecord> =
+            jobs.values().map(|s| s.record.clone()).collect();
+        records.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        records
+    }
+}
+
+#[cfg(test)]
+mod global_stream_tests {
+    use super::*;
+    use crate::model::MediaServerSeriesId;
+
+    fn test_tracker() -> KomfJobTracker {
+        let dir = std::env::temp_dir().join(format!("komf-job-global-{}-{}", std::process::id(), rand_suffix()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Arc::new(KomfJobsRepository::open(&dir.join("jobs.sqlite")).unwrap());
+        KomfJobTracker::new(repo, "komga")
+    }
+
+    fn rand_suffix() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        format!("{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos())
+    }
+
+    #[tokio::test]
+    async fn register_emits_created_and_sender_forwards_progress() {
+        let tracker = test_tracker();
+        let mut global = tracker.subscribe_all();
+        let (job_id, tx) = tracker.register_job(MediaServerSeriesId("s1".into())).await;
+
+        match global.recv().await.unwrap().kind {
+            GlobalJobEventKind::Created { .. } => {}
+            other => panic!("expected Created, got {other:?}"),
+        }
+
+        let _ = tx.send(MetadataJobEvent::ProviderSeries {
+            provider: CoreProviders::MangaUpdates,
+        });
+        let forwarded = global.recv().await.unwrap();
+        assert_eq!(forwarded.job_id, job_id);
+        assert_eq!(forwarded.series_id.0, "s1");
+        assert!(matches!(
+            forwarded.kind,
+            GlobalJobEventKind::Event(MetadataJobEvent::ProviderSeries { .. })
+        ));
+
+        // 快照包含该 RUNNING job。
+        assert!(tracker.running_jobs().await.iter().any(|r| r.id == job_id));
+    }
+
+    #[tokio::test]
+    async fn complete_emits_finished_not_event_completed() {
+        let tracker = test_tracker();
+        let mut global = tracker.subscribe_all();
+        let (job_id, tx) = tracker.register_job(MediaServerSeriesId("s2".into())).await;
+        let _ = global.recv().await.unwrap(); // Created
+        // 经 sender 发 Completed：per-job 可收到，全局不转发为 Event。
+        let _ = tx.send(MetadataJobEvent::Completed);
+        tracker.complete_job(&job_id).await;
+        let finished = global.recv().await.unwrap();
+        assert!(matches!(
+            finished.kind,
+            GlobalJobEventKind::Finished { status: MetadataJobStatus::Completed, .. }
+        ));
+        // per-job 终态后订阅返回 None（SSE 发 EventStreamNotFoundEvent）。
+        assert!(tracker.subscribe(&job_id).await.is_none());
+        assert!(tracker.running_jobs().await.iter().all(|r| r.id != job_id));
+    }
+
+    #[tokio::test]
+    async fn fail_emits_finished_with_message() {
+        let tracker = test_tracker();
+        let mut global = tracker.subscribe_all();
+        let (job_id, _tx) = tracker.register_job(MediaServerSeriesId("s3".into())).await;
+        let _ = global.recv().await.unwrap(); // Created
+        tracker.fail_job(&job_id, "boom".to_string(), false).await;
+        let finished = global.recv().await.unwrap();
+        match finished.kind {
+            GlobalJobEventKind::Finished { status, message, .. } => {
+                assert_eq!(status, MetadataJobStatus::Failed);
+                assert_eq!(message.as_deref(), Some("boom"));
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
     }
 }
