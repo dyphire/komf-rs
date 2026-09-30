@@ -1312,9 +1312,11 @@ pub fn create_provider(
         }
         crate::config::MangaBakaMode::Database => {
             match database_file {
-                Some(path) if path.exists() => {
-                    MangaBakaDataSource::Db(MangaBakaDbRepository::new(path.to_path_buf()))
-                }
+                Some(path) if path.exists() => MangaBakaDataSource::Db {
+                    repo: MangaBakaDbRepository::new(path.to_path_buf()),
+                    // 离线未命中回退在线 API（复用同一 OAuth 登录态）。
+                    api: MangaBakaApiClient::new(http_client.clone(), oauth_manager),
+                },
                 _ => {
                     // 对应 Kotlin："Failed to find MangaBaka database. Disabling MangaBaka provider"
                     tracing::warn!(
@@ -1393,12 +1395,9 @@ impl MangaBakaMetadataProvider {
         &self,
         series_id: i64,
     ) -> Result<Vec<MangaBakaSeriesImageDto>, ProviderError> {
-        let MangaBakaDataSource::Api(client) = &self.data_source else {
-            // 离线库 series 表仅存单封面，无多语言卷封面数据，books 无法组装。
-            return Ok(Vec::new());
-        };
+        // Db 模式离线库 series 表无多语言卷封面数据 → data_source 内回退在线 API。
         self.images_cache
-            .get_or_load(series_id, || client.get_series_images(series_id))
+            .get_or_load(series_id, || self.data_source.get_series_images(series_id))
             .await
     }
 }
@@ -1621,9 +1620,14 @@ impl MetadataProvider for MangaBakaMetadataProvider {
 // ---------------------------------------------------------------------------
 
 /// 数据源：API（在线）或本地 SQLite 数据库（`MangaBakaMode.DATABASE`）。
+/// Db 模式下搜索保持纯离线；具体条目查询（link/series/book）离线未命中回退在线 API。
 pub enum MangaBakaDataSource {
     Api(MangaBakaApiClient),
-    Db(MangaBakaDbRepository),
+    Db {
+        repo: MangaBakaDbRepository,
+        /// 离线未命中时回退在线 API（resolve_link / series 详情 / 卷封面）。
+        api: MangaBakaApiClient,
+    },
 }
 
 impl MangaBakaDataSource {
@@ -1635,14 +1639,29 @@ impl MangaBakaDataSource {
     ) -> Result<Vec<MangaBakaSeriesDto>, ProviderError> {
         match self {
             MangaBakaDataSource::Api(client) => client.search(title, types, types_not).await,
-            MangaBakaDataSource::Db(repo) => repo.search(title, types, types_not),
+            MangaBakaDataSource::Db { repo, .. } => repo.search(title, types, types_not),
         }
     }
 
     async fn get_series(&self, id: i64) -> Result<MangaBakaSeriesDto, ProviderError> {
         match self {
             MangaBakaDataSource::Api(client) => client.get_series(id).await,
-            MangaBakaDataSource::Db(repo) => repo.get_series(id),
+            // 离线未命中 → 回退在线 API（条目已定位，仅补数据）。
+            MangaBakaDataSource::Db { repo, api } => match repo.get_series(id) {
+                Ok(series) => Ok(series),
+                Err(_) => api.get_series(id).await,
+            },
+        }
+    }
+
+    /// 多语言卷封面列表：离线库无此数据，Db 模式直接回退在线 API。
+    async fn get_series_images(
+        &self,
+        id: i64,
+    ) -> Result<Vec<MangaBakaSeriesImageDto>, ProviderError> {
+        match self {
+            MangaBakaDataSource::Api(client) => client.get_series_images(id).await,
+            MangaBakaDataSource::Db { api, .. } => api.get_series_images(id).await,
         }
     }
 }
