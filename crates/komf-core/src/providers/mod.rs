@@ -582,6 +582,7 @@ fn create_metadata_providers(
     }
 
     // MangaBaka：API 或 DATABASE（本地 SQLite）数据源；BookWalker：本地 SQLite 数据库。
+    // OAuth 登录后 API 请求带用户态（401 走强制刷新重试，与 tracker 统一）。
     if let Some(p) = mangabaka::create_provider(
         &config.manga_baka,
         default_name_matcher,
@@ -589,6 +590,7 @@ fn create_metadata_providers(
         manga_baka_db.as_deref(),
         series_title_language.clone(),
         config.manga_baka.cover_languages.clone(),
+        oauth_manager.clone(),
     ) {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),

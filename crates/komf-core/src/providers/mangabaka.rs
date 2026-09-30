@@ -503,15 +503,73 @@ const MANGA_BAKA_RATE_LIMIT: (u32, std::time::Duration) = (1, std::time::Duratio
 pub struct MangaBakaApiClient {
     pub http: reqwest::Client,
     limiter: crate::rate_limiter::ThroughputLimiter,
+    oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 }
 
 impl MangaBakaApiClient {
-    fn new(http: reqwest::Client) -> Self {
+    fn new(
+        http: reqwest::Client,
+        oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    ) -> Self {
         let (events, interval) = MANGA_BAKA_RATE_LIMIT;
         Self {
             http,
             limiter: crate::rate_limiter::ThroughputLimiter::new(events, interval),
+            oauth,
         }
+    }
+
+    /// 已登录时取当前 access token（过期自动刷新）；未登录返回 None（保持匿名请求）。
+    async fn token(&self) -> Option<String> {
+        match &self.oauth {
+            Some(o) => o.access_token(crate::oauth::OAuthProvider::MangaBaka).await,
+            None => None,
+        }
+    }
+
+    /// 401 且强制刷新失败/重试仍 401 时清除登录态（与 tracker 侧统一行为）。
+    fn note_unauthorized(&self) {
+        if let Some(o) = &self.oauth {
+            o.logout(crate::oauth::OAuthProvider::MangaBaka);
+        }
+    }
+
+    /// 带可选 Bearer 的 GET 请求构建。
+    fn get(&self, url: &str, token: Option<&str>) -> reqwest::RequestBuilder {
+        let mut request = self.http.get(url);
+        if let Some(t) = token {
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        request
+    }
+
+    /// 发送请求；遇 401 先强制刷新重试一次（带新 token 重建），刷新失败或
+    /// 重试仍 401 才清登录态。
+    async fn send_with_retry<F>(
+        &self,
+        build: F,
+        mut token: Option<String>,
+    ) -> Result<reqwest::Response, ProviderError>
+    where
+        F: Fn(Option<String>) -> reqwest::RequestBuilder,
+    {
+        let mut response = build(token.clone()).send().await?;
+        let mut status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let refreshed = match &self.oauth {
+                Some(o) => o.refresh_now(crate::oauth::OAuthProvider::MangaBaka).await,
+                None => None,
+            };
+            if let Some(new_token) = refreshed {
+                token = Some(new_token);
+                response = build(token.clone()).send().await?;
+                status = response.status();
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.note_unauthorized();
+            }
+        }
+        Ok(response)
     }
 
     async fn search(
@@ -521,17 +579,20 @@ impl MangaBakaApiClient {
         types_not: &[MangaBakaTypeDto],
     ) -> Result<Vec<MangaBakaSeriesDto>, ProviderError> {
         self.limiter.acquire().await;
-        let mut request = self
-            .http
-            .get(format!("{BASE_URL}/v1/series/search"))
-            .query(&[("q", title)]);
-        for t in types {
-            request = request.query(&[("type", t.as_str())]);
-        }
-        for t in types_not {
-            request = request.query(&[("type_not", t.as_str())]);
-        }
-        let response = request.send().await?;
+        let token = self.token().await;
+        let build = |token: Option<String>| {
+            let mut request = self
+                .get(&format!("{BASE_URL}/v1/series/search"), token.as_deref())
+                .query(&[("q", title)]);
+            for t in types {
+                request = request.query(&[("type", t.as_str())]);
+            }
+            for t in types_not {
+                request = request.query(&[("type_not", t.as_str())]);
+            }
+            request
+        };
+        let response = self.send_with_retry(build, token).await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -547,11 +608,11 @@ impl MangaBakaApiClient {
 
     async fn get_series(&self, id: i64) -> Result<MangaBakaSeriesDto, ProviderError> {
         self.limiter.acquire().await;
-        let response = self
-            .http
-            .get(format!("{BASE_URL}/v1/series/{id}"))
-            .send()
-            .await?;
+        let token = self.token().await;
+        let build = |token: Option<String>| {
+            self.get(&format!("{BASE_URL}/v1/series/{id}"), token.as_deref())
+        };
+        let response = self.send_with_retry(build, token).await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -574,16 +635,19 @@ impl MangaBakaApiClient {
         let mut page = 1u32;
         loop {
             self.limiter.acquire().await;
-            let response = self
-                .http
-                .get(format!("{BASE_URL}/v1/series/{id}/images"))
+            let token = self.token().await;
+            let build = |token: Option<String>| {
+                self.get(
+                    &format!("{BASE_URL}/v1/series/{id}/images"),
+                    token.as_deref(),
+                )
                 .query(&[
                     ("type", "volume"),
                     ("limit", "50"),
                     ("page", page.to_string().as_str()),
                 ])
-                .send()
-                .await?;
+            };
+            let response = self.send_with_retry(build, token).await?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
@@ -1237,13 +1301,14 @@ pub fn create_provider(
     database_file: Option<&std::path::Path>,
     series_title_language: Option<String>,
     cover_languages: Vec<String>,
+    oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
 ) -> Option<MangaBakaMetadataProvider> {
     if !config.enabled {
         return None;
     }
     let data_source = match config.mode {
         crate::config::MangaBakaMode::Api => {
-            MangaBakaDataSource::Api(MangaBakaApiClient::new(http_client.clone()))
+            MangaBakaDataSource::Api(MangaBakaApiClient::new(http_client.clone(), oauth_manager))
         }
         crate::config::MangaBakaMode::Database => {
             match database_file {
