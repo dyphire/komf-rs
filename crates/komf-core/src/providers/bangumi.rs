@@ -2089,8 +2089,7 @@ impl MetadataProvider for BangumiMetadataProvider {
                             .get_related(id)
                             .into_iter()
                             .filter(|r| {
-                                r.subject_type == Some(1)
-                                    && r.relation.as_deref() == Some("单行本")
+                                r.subject_type == Some(1) && r.relation.as_deref() == Some("单行本")
                             })
                             .map(|r| BangumiSubjectRelation {
                                 id: r.id,
@@ -2222,11 +2221,13 @@ impl MetadataProvider for BangumiMetadataProvider {
         let platform_filter = media_type
             .and_then(media_type_platform)
             .or_else(|| media_type_platform(self.media_type));
-        // ① Archive 离线优先：series 过滤 + tag 过滤 + platform 过滤 + 相似度过滤（复用 matcher）
+        // ① Archive 启用：纯离线搜索（未命中不回退在线）。
         if let Some(archive) = &self.archive {
-            if let Some(store) = archive.get() {
-                let results = store.search(series_name);
-                let mut out: Vec<SeriesSearchResult> = Vec::new();
+            let Some(store) = archive.get() else {
+                return Ok(Vec::new());
+            };
+            let results = store.search(series_name);
+            let mut out: Vec<SeriesSearchResult> = Vec::new();
                 for v in results {
                     if out.len() >= limit {
                         break;
@@ -2304,9 +2305,10 @@ impl MetadataProvider for BangumiMetadataProvider {
                     }
                     return Ok(out);
                 }
-            }
+                // 离线未命中：不回退在线（archive 模式下纯离线）。
+                return Ok(Vec::new());
         }
-        // ② 在线
+        // ② 在线（archive 未启用）
         let results = self.client.search(series_name, limit as u32).await?;
         Ok(results
             .into_iter()
@@ -2324,15 +2326,14 @@ impl MetadataProvider for BangumiMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
-        // ① Archive 离线优先（未就绪/未命中 → 在线）
+        // ① Archive 启用：纯离线匹配（未命中不回退在线）。
         if let Some(archive) = &self.archive {
-            if let Some(store) = archive.get() {
-                if let Some(meta) = self.match_from_archive(&store, match_query).await? {
-                    return Ok(Some(meta));
-                }
-            }
+            let Some(store) = archive.get() else {
+                return Ok(None);
+            };
+            return self.match_from_archive(&store, match_query).await;
         }
-        // ② 在线
+        // ② 在线（archive 未启用）
         let results = self.client.search(&match_query.series_name, 20).await?;
         // 优先库配置 mediaType（query.media_type），无则用 provider 全局配置
         let platform_filter = match_query
