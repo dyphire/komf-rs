@@ -427,9 +427,11 @@ impl MediaServerModule {
 
         // 标签翻译：seriesTitleLanguage 为中文时构建（非 bangumi/ehentai provider
         // 的最终写入 tags 做英文 → 中文映射，见 tag_translator.rs）。
+        // 环境变量开关 `KOMF_TAG_TRANSLATION=0`/`false` 可禁用（默认启用，无配置项）。
         let tag_translator = if crate::tag_translator::TagTranslator::is_chinese_language(
             config.post_processing.series_title_language.as_deref(),
-        ) {
+        ) && crate::tag_translator::enabled_by_env()
+        {
             Some(crate::tag_translator::TagTranslator::builtin())
         } else {
             None

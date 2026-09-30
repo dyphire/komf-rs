@@ -91,6 +91,7 @@ Environment variables (same as the Kotlin version):
 | `KOMF_AUTH_KEY`                                | Access key for sensitive operations (optional, strongly recommended for public exposure): when set, sensitive requests from outside the local network must present it (local/LAN bypass); `GET /version` and `GET /api/health` stay public; legacy `KOMF_WEBUI_KEY` still works as fallback |
 | `KOMF_WEB_DIR`                                 | WebUI static directory override (`web/dist` -> `ui` lookup order) |
 | `KOMF_AUTH_FORCE_REMOTE`                       | Debug only: `1` treats every client as remote to force the key path |
+| `KOMF_TAG_TRANSLATION`                        | Env-only switch (no config option): built-in tag translation (EN→ZH tags mapping when seriesTitleLanguage is Chinese; not the ehentai-specific translator) is enabled by default; set to `0` or `false` (case-insensitive) to disable |
 
 ### Docker
 

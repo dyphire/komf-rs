@@ -59,6 +59,19 @@ impl TagTranslator {
     }
 }
 
+/// 内置标签翻译（非 ehentai 独有翻译）的环境变量开关：默认启用；
+/// 设置 `KOMF_TAG_TRANSLATION=0` 或 `KOMF_TAG_TRANSLATION=false`（大小写不敏感）时禁用。
+/// 仅环境变量控制，不新增配置项。
+pub fn enabled_by_env() -> bool {
+    match std::env::var("KOMF_TAG_TRANSLATION") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v != "0" && v != "false"
+        }
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +120,31 @@ mod tests {
         assert!(!TagTranslator::is_chinese_language(Some("en")));
         assert!(!TagTranslator::is_chinese_language(Some("ja")));
         assert!(!TagTranslator::is_chinese_language(None));
+    }
+
+    #[test]
+    fn env_switch_defaults_enabled_and_opt_out() {
+        // 默认启用（未设置环境变量）
+        std::env::remove_var("KOMF_TAG_TRANSLATION");
+        assert!(enabled_by_env());
+        // =0 / =false（大小写不敏感）禁用
+        std::env::set_var("KOMF_TAG_TRANSLATION", "0");
+        assert!(!enabled_by_env());
+        std::env::set_var("KOMF_TAG_TRANSLATION", "false");
+        assert!(!enabled_by_env());
+        std::env::set_var("KOMF_TAG_TRANSLATION", " FALSE ");
+        assert!(!enabled_by_env());
+        // 带空白 / 其他值仍为启用
+        std::env::set_var("KOMF_TAG_TRANSLATION", " 0 ");
+        assert!(!enabled_by_env());
+        std::env::set_var("KOMF_TAG_TRANSLATION", "1");
+        assert!(enabled_by_env());
+        std::env::set_var("KOMF_TAG_TRANSLATION", "true");
+        assert!(enabled_by_env());
+        std::env::set_var("KOMF_TAG_TRANSLATION", "disabled");
+        assert!(enabled_by_env());
+        // 清理，避免影响并行测试
+        std::env::remove_var("KOMF_TAG_TRANSLATION");
     }
 
     #[test]

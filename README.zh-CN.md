@@ -91,6 +91,7 @@ copy examples/application.example.yml application.yml # Windows
 | `KOMF_AUTH_KEY`                                | 敏感操作访问密钥（可选，公网暴露强烈建议设置）：设置后，非本地/局域网的敏感请求必须输入（本地/局域网免密钥）；`GET /version` 与 `GET /api/health` 照常放行；旧变量 `KOMF_WEBUI_KEY` 仍兼容回退 |
 | `KOMF_WEB_DIR`                                 | WebUI 静态目录覆盖（查找顺序 `web/dist` -> `ui`） |
 | `KOMF_AUTH_FORCE_REMOTE`                       | 仅调试：`1` 时把所有来源按远程处理，强制走密钥校验 |
+| `KOMF_TAG_TRANSLATION`                        | 仅环境变量开关（无配置项）：内置标签翻译（seriesTitleLanguage 为中文时的英文→中文 tags 映射，非 ehentai 独有翻译）默认启用；设为 `0` 或 `false`（大小写不敏感）时禁用 |
 
 ### Docker
 
