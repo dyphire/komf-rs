@@ -674,9 +674,18 @@ impl OAuthManager {
 }
 
 /// 校验 `start` 的 `redirect_path_prefix`：必须是 `/seg/seg` 形式（以 `/` 开头、
-/// 不以 `/` 结尾、段非空）。字符集不含 `.`：`.`/`..` 段会被 URL 规范化用于逃逸
-/// 前缀、拼出白名单外的回调路径，索性整体禁掉；`%`/`?`/`#` 等同样被字符集挡下。
+/// 不以 `/` 结尾、段非空），且不超过 256 字节——state 随前缀膨胀，部分平台对
+/// state 大小有限制，超长会在授权阶段才失败。字符集不含 `.`：`.`/`..` 段会被
+/// URL 规范化用于逃逸前缀、拼出白名单外的回调路径，索性整体禁掉；`%`/`?`/`#`
+/// 等同样被字符集挡下。
 pub fn validate_redirect_path_prefix(prefix: &str) -> Result<(), String> {
+    const MAX_LEN: usize = 256;
+    if prefix.len() > MAX_LEN {
+        return Err(format!(
+            "invalid redirect_path_prefix: {} bytes exceeds the {MAX_LEN}-byte limit",
+            prefix.len()
+        ));
+    }
     let valid = prefix.len() > 1
         && prefix.starts_with('/')
         && !prefix.ends_with('/')
@@ -769,6 +778,18 @@ mod tests {
         ] {
             assert!(validate_redirect_path_prefix(bad).is_err(), "{bad}");
         }
+    }
+
+    /// 长度上限：256 字节放行，257 拒绝（state 随前缀膨胀，平台对 state 大小有限制）。
+    #[test]
+    fn redirect_path_prefix_length_cap() {
+        let ok = format!("/{}", "a".repeat(255));
+        assert_eq!(ok.len(), 256);
+        assert!(validate_redirect_path_prefix(&ok).is_ok());
+        let too_long = format!("/{}", "a".repeat(256));
+        assert_eq!(too_long.len(), 257);
+        let err = validate_redirect_path_prefix(&too_long).unwrap_err();
+        assert!(err.contains("256-byte limit"), "{err}");
     }
 
     /// 编译期注入可见性：cargo build / test 时设置了该变量，则 client_secret 必须

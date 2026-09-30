@@ -110,7 +110,25 @@ async fn start(
         return bad_request("cannot determine instance host (Host header missing)");
     };
     let scheme = instance_scheme(&headers);
-    let prefix = match params.redirect_path_prefix.as_deref() {
+    authorize_response(
+        &manager(&state),
+        provider,
+        &scheme,
+        &host,
+        params.redirect_path_prefix.as_deref(),
+    )
+}
+
+/// 校验前缀、组装实例回调并发起授权；独立出来是因为 SharedState 装配太重，
+/// 测试只能直调这一层。
+fn authorize_response(
+    mgr: &OAuthManager,
+    provider: OAuthProvider,
+    scheme: &str,
+    host: &str,
+    prefix: Option<&str>,
+) -> Response {
+    let prefix = match prefix {
         Some(p) => match komf_core::oauth::validate_redirect_path_prefix(p) {
             Ok(()) => p,
             Err(e) => return bad_request(e),
@@ -119,7 +137,7 @@ async fn start(
     };
     // 实例回调（中转页经 state.redirectUrl 转交回来）。
     let redirect_url = format!("{scheme}://{host}{prefix}/api/oauth/{}/callback", provider.as_str());
-    match manager(&state).start(provider, &redirect_url) {
+    match mgr.start(provider, &redirect_url) {
         Ok(url) => Redirect::to(&url).into_response(),
         Err(e) => internal(e),
     }
@@ -199,4 +217,66 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn test_manager(test_name: &str) -> Arc<OAuthManager> {
+        let dir = std::env::temp_dir().join(format!("komf-oauth-routes-{test_name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        OAuthManager::new(Some(&dir), reqwest::Client::new())
+    }
+
+    fn cleanup(test_name: &str) {
+        let dir = std::env::temp_dir().join(format!("komf-oauth-routes-{test_name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 实例 origin：优先 X-Forwarded-*（反代），否则 Host 头 + http。
+    #[test]
+    fn instance_origin_prefers_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("internal:8085"));
+        assert_eq!(instance_host(&headers).as_deref(), Some("internal:8085"));
+        assert_eq!(instance_scheme(&headers), "http");
+        headers.insert("x-forwarded-host", HeaderValue::from_static("komga.example"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(instance_host(&headers).as_deref(), Some("komga.example"));
+        assert_eq!(instance_scheme(&headers), "https");
+    }
+
+    /// start 的 302 Location 中 state.redirectUrl 按 scheme/host/prefix 组装。
+    #[test]
+    fn start_assembles_callback_url_with_prefix() {
+        let mgr = test_manager("assemble");
+        let response =
+            authorize_response(&mgr, OAuthProvider::Anilist, "https", "komga.example", Some("/api/v1/komf"));
+        assert!(response.status().is_redirection());
+        let location = response.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+        let url = url::Url::parse(location).unwrap();
+        let state_raw = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state_raw).unwrap();
+        assert_eq!(
+            state["redirectUrl"],
+            "https://komga.example/api/v1/komf/api/oauth/anilist/callback"
+        );
+        cleanup("assemble");
+    }
+
+    /// 非法前缀 → 400，不发起授权。
+    #[test]
+    fn start_rejects_invalid_prefix() {
+        let mgr = test_manager("reject");
+        let response =
+            authorize_response(&mgr, OAuthProvider::Anilist, "https", "komga.example", Some("/a/../b"));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        cleanup("reject");
+    }
 }
