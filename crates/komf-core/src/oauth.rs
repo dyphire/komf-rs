@@ -7,7 +7,8 @@
 //!      时经 `option_env!` 固化进二进制，不做运行时环境变量），
 //!      变量名见 `OAuthProvider::secret_env_var`）；
 //!   2. 注册回调固定指向官方中转页（`relay_url`）；
-//!   3. 中转页按 `state.redirectUrl`（= 当前实例 `/api/oauth/{p}/callback`）
+//!   3. 中转页按 `state.redirectUrl`（= 当前实例 `/api/oauth/{p}/callback`；
+//!      `start` 支持 `redirect_path_prefix` 加路径前缀，反代/子路径部署用）
 //!      把授权结果转交回实例；
 //!   4. 本模块负责授权发起（PKCE/state）、token 交换、自动刷新与持久化。
 //!
@@ -672,6 +673,28 @@ impl OAuthManager {
     }
 }
 
+/// 校验 `start` 的 `redirect_path_prefix`：必须是 `/seg/seg` 形式（以 `/` 开头、
+/// 不以 `/` 结尾、段非空）。字符集不含 `.`：`.`/`..` 段会被 URL 规范化用于逃逸
+/// 前缀、拼出白名单外的回调路径，索性整体禁掉；`%`/`?`/`#` 等同样被字符集挡下。
+pub fn validate_redirect_path_prefix(prefix: &str) -> Result<(), String> {
+    let valid = prefix.len() > 1
+        && prefix.starts_with('/')
+        && !prefix.ends_with('/')
+        && prefix[1..].split('/').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid redirect_path_prefix '{prefix}': must look like /api/v1/komf (leading '/', no trailing '/', segments of [A-Za-z0-9_-])"
+        ))
+    }
+}
+
 fn open_db(path: &Path) -> Option<Connection> {
     let conn = Connection::open(path).ok()?;
     conn.execute_batch(
@@ -732,6 +755,20 @@ mod tests {
         assert_eq!(secret_from(Some("")), None);
         assert_eq!(secret_from(Some("   ")), None);
         assert_eq!(secret_from(Some(" abc ")), Some("abc".to_string()));
+    }
+
+    /// 前缀校验：合法形式放行；点段、空段、尾斜杠、非法字符一律拒绝。
+    #[test]
+    fn redirect_path_prefix_validation() {
+        for ok in ["/api/v1/komf", "/komf", "/a-b_c/1"] {
+            assert!(validate_redirect_path_prefix(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "/", "api", "/api/", "//a", "/a//b", "/a b", "/a?b", "/a%2f", "/..", "/a/../b",
+            "/a/./b", "/中",
+        ] {
+            assert!(validate_redirect_path_prefix(bad).is_err(), "{bad}");
+        }
     }
 
     /// 编译期注入可见性：cargo build / test 时设置了该变量，则 client_secret 必须

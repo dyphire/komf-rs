@@ -2,7 +2,8 @@
 //!
 //! 采用「共享 client + 中转页」模式（与中转页 `docs/oauth-relay` 配合）：
 //! - `start`：生成 PKCE/state 并 302 到平台授权页；state 携带当前实例回调
-//!   `redirectUrl`，中转页授权完成后按 state 跳回本实例 callback；
+//!   `redirectUrl`（可选 `redirect_path_prefix` 加路径前缀），中转页授权完成
+//!   后按 state 跳回本实例 callback；
 //! - `callback`：校验 state/nonce → code 换 token → 持久化；成功后触发配置
 //!   热重载（使 MAL 等"登录后才注册"的 provider 生效）并 302 回 WebUI；
 //! - `status` / `logout`：供 WebUI 展示登录态与退出。
@@ -86,10 +87,19 @@ fn instance_host(headers: &axum::http::HeaderMap) -> Option<String> {
         .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_string))
 }
 
+#[derive(Deserialize)]
+struct StartParams {
+    redirect_path_prefix: Option<String>,
+}
+
 /// `GET /api/oauth/{provider}/start`：302 到平台授权页。
+/// 可选 `?redirect_path_prefix=/prefix`：回调 URL 加路径前缀，供反代把回调挂进
+/// 自有命名空间（如 kmrs 的 /api/v1/komf）或子路径部署；中转页白名单允许任意
+/// 路径前缀，无需改动。
 async fn start(
     State(state): State<SharedState>,
     Path(provider): Path<String>,
+    Query(params): Query<StartParams>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let provider = match parse_provider(&provider) {
@@ -100,8 +110,15 @@ async fn start(
         return bad_request("cannot determine instance host (Host header missing)");
     };
     let scheme = instance_scheme(&headers);
+    let prefix = match params.redirect_path_prefix.as_deref() {
+        Some(p) => match komf_core::oauth::validate_redirect_path_prefix(p) {
+            Ok(()) => p,
+            Err(e) => return bad_request(e),
+        },
+        None => "",
+    };
     // 实例回调（中转页经 state.redirectUrl 转交回来）。
-    let redirect_url = format!("{scheme}://{host}/api/oauth/{}/callback", provider.as_str());
+    let redirect_url = format!("{scheme}://{host}{prefix}/api/oauth/{}/callback", provider.as_str());
     match manager(&state).start(provider, &redirect_url) {
         Ok(url) => Redirect::to(&url).into_response(),
         Err(e) => internal(e),
