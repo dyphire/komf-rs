@@ -102,7 +102,7 @@ fn build_state(
         http_client.clone(),
         Some(&work_dir),
         Some(oauth_manager.clone()),
-        series_title_language,
+        series_title_language.clone(),
     );
     // bangumi/Archive、e-hentai-db 离线数据源句柄（archive 未启用 → None；/api/update-*-db 与 /config 用）。
     // 注意：需在 `media_server_module` 移动 `providers_module.metadata_providers` 之前取出。
@@ -174,6 +174,7 @@ fn build_state(
     let tracker_services = Arc::new(komf_core::trackers::TrackerServices::new(
         http_client.clone(),
         Some(oauth_manager.clone()),
+        series_title_language.clone(),
     ));
     AppState::from_modules(
         config.clone(),

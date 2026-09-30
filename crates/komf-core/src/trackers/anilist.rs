@@ -108,27 +108,67 @@ impl AniListTracker {
         }
     }
 
-    async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
-        let mut request = self.http.post(GRAPHQL_URL);
-        if let Some(manager) = &self.oauth {
-            if let Some(token) = manager.access_token(OAuthProvider::Anilist).await {
-                request =
-                    request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
-            }
+    /// HTTP 401 或 GraphQL errors 含 Invalid token / Invalid Authentication
+    /// 即视为 token 失效（AniList 对无效 token 可能返回 200 + errors）。
+    fn is_unauthorized(status: reqwest::StatusCode, body: &Value) -> bool {
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return true;
         }
-        let response = request
-            .json(&json!({ "query": query, "variables": variables }))
-            .send()
+        body.get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| {
+                errors
+                    .iter()
+                    .filter_map(|e| e.get("message").and_then(Value::as_str))
+                    .any(|m| m.contains("Invalid token") || m.contains("Invalid Authentication"))
+            })
+    }
+
+    async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
+        let mut token = match &self.oauth {
+            Some(manager) => manager.access_token(OAuthProvider::Anilist).await,
+            None => None,
+        };
+        let send = |token: Option<&str>| {
+            let mut request = self.http.post(GRAPHQL_URL);
+            if let Some(t) = token {
+                request =
+                    request.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            request
+                .json(&json!({ "query": query, "variables": variables }))
+                .send()
+        };
+        let mut response = send(token.as_deref())
             .await
             .map_err(|e| format!("anilist request failed: {e}"))?;
-        let status = response.status();
-        let body: Value = response
+        let mut status = response.status();
+        let mut body: Value = response
             .json()
             .await
             .map_err(|e| format!("anilist response parse failed: {e}"))?;
-        let unauthorized = status == reqwest::StatusCode::UNAUTHORIZED;
+        let mut unauthorized = Self::is_unauthorized(status, &body);
         if unauthorized {
-            self.note_unauthorized();
+            // token 被源站判无效：先强制刷新重试一次，失败才清登录态（四个 tracker 统一）。
+            let refreshed = match &self.oauth {
+                Some(manager) => manager.refresh_now(OAuthProvider::Anilist).await,
+                None => None,
+            };
+            if let Some(new_token) = refreshed {
+                token = Some(new_token);
+                response = send(token.as_deref())
+                    .await
+                    .map_err(|e| format!("anilist request failed: {e}"))?;
+                status = response.status();
+                body = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("anilist response parse failed: {e}"))?;
+                unauthorized = Self::is_unauthorized(status, &body);
+            }
+            if unauthorized {
+                self.note_unauthorized();
+            }
         }
         if let Some(errors) = body.get("errors").and_then(Value::as_array) {
             let message = errors
@@ -136,12 +176,6 @@ impl AniListTracker {
                 .filter_map(|e| e.get("message").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("; ");
-            if unauthorized
-                || message.contains("Invalid token")
-                || message.contains("Invalid Authentication")
-            {
-                self.note_unauthorized();
-            }
             return Err(if message.is_empty() {
                 format!("anilist GraphQL error (HTTP {status})")
             } else {
@@ -153,7 +187,8 @@ impl AniListTracker {
             .ok_or_else(|| format!("anilist returned no data (HTTP {status})"))
     }
 
-    /// 源站判定 token 失效（HTTP 401 或 Invalid token 错误）时清除登录态。
+    /// 源站判定 token 失效（HTTP 401 或 Invalid token 错误，且强制刷新失败/重试仍失效）
+    /// 时清除登录态。
     fn note_unauthorized(&self) {
         if let Some(manager) = &self.oauth {
             manager.logout(OAuthProvider::Anilist);

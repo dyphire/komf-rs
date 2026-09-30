@@ -219,22 +219,22 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 - `GET /api/cover/redirect?url=<encoded>` —— `302` + `Referrer-Policy: no-referrer` 跳转到目标封面 URL。WebUI 用它展示搜索结果封面：MangaDex 等封面 CDN 对白名单外 `Referer`（自部署域名、局域网 IP 等）返回占位横幅，无 `Referer` 时放行真实封面——重定向让浏览器丢弃 Referer 后直连加载真封面。目标 host 经 provider 封面域名白名单校验（防开放重定向 / SSRF），白名单外返回 `400`。搜索 API 的 `imageUrl` 保持直链，第三方服务端消费者不受影响，也可按需使用本端点。
 
 
-### OAuth 登录（`{provider}` = `anilist`、`mal` 或 `bangumi`）
+### OAuth 登录（`{provider}` = `anilist`、`mal`、`bangumi` 或 `mangabaka`）
 
 元数据 provider 的服务端 OAuth2 登录，采用**共享 client + 官方中转页**方案（无需按实例注册回调）。机制、client_secret 注入与部署说明见 [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md)。
 
-- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal 使用 PKCE）。可选 `?redirect_path_prefix=/prefix` 给回调路径加前缀，用于反代把回调挂进自有命名空间（如 kmrs 的 `/api/v1/komf`）或子路径部署
+- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal/mangabaka 使用 PKCE）。可选 `?redirect_path_prefix=/prefix` 给回调路径加前缀，用于反代把回调挂进自有命名空间（如 kmrs 的 `/api/v1/komf`）或子路径部署
 - `GET /api/oauth/{provider}/callback` —— OAuth 回调（经中转页转交）：校验后以 code 换取 token，存入 `<configDir>/oauth.sqlite`，随后 `302` 到 `/?oauth=success`（或 `/?oauth=error&message=...`）
 - `GET /api/oauth/{provider}/status` —— `200` JSON `{"logged_in":bool,"username":string|null}`
 - `POST /api/oauth/{provider}/logout` —— `204`，清除已存 token
 
 登录后该 provider 的请求以 OAuth bearer token 鉴权（优先于手动 `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`）；token 过期后若有 refresh token 则自动刷新，否则清除登录态并回退匿名请求。tracker 相关接口在请求时发现登录态已失效（过期且无法刷新、未注入 secret、刷新被拒、或源站以 `401` 拒绝该 token——同时清除已存登录态）时返回 `401`，避免阅读状态同步静默地以无用户态运行。WebUI Provider 页显示各平台登录状态并提供登录/退出入口。
 
-### 阅读状态（Tracker）（`{provider}` = `anilist`、`mal` 或 `bangumi`；需先 OAuth 登录）
+### 阅读状态（Tracker）（`{provider}` = `anilist`、`mal`、`bangumi` 或 `mangabaka`；需先 OAuth 登录）
 
-三平台阅读列表同步，基于上述 OAuth 登录。
+四平台阅读列表同步，基于上述 OAuth 登录。
 
-- `GET /api/tracker/{provider}/search?name=...&nsfw=...` —— 搜索平台条目；每条带 `tracked`（是否已在用户列表中）。`nsfw` 缺省 `true`，仅在 `false` 时过滤成人内容。`name` 也支持平台条目链接——`anilist.co/manga/{id}`、`myanimelist.net/manga/{id}`、`bgm.tv`/`bangumi.tv/subject/{id}`——后端直接解析为单条结果。
+- `GET /api/tracker/{provider}/search?name=...&nsfw=...` —— 搜索平台条目；每条带 `tracked`（是否已在用户列表中）。`nsfw` 缺省 `true`，仅在 `false` 时过滤成人内容。`name` 也支持平台条目链接——`anilist.co/manga/{id}`、`myanimelist.net/manga/{id}`、`bgm.tv`/`bangumi.tv/subject/{id}`、`mangabaka.org/{id}`——后端直接解析为单条结果。
 - `GET /api/tracker/{provider}/state?trackId=...` —— 当前列表条目（`status`、`score`、已读卷/话、开始/完成日期、总量）；未入列表返回空状态。
 - `POST /api/tracker/{provider}/update` —— 推送状态更新：
 
@@ -244,7 +244,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 `status` 取值为 `reading`（在读）、`planning`（想看）、`completed`（看过）、`paused`（搁置）、`dropped`（抛弃）、`rereading`（重看）；省略该字段表示保持当前状态。
 
-说明：`tracked` 为用户态——AniList 取 `mediaListEntry`、MAL 取 `my_list_status`（详情并发拉取）、Bangumi 拉取用户收藏集合。Bangumi 搜索在 v0 API 失败时兜底旧版 `GET /search/subject/{q}?type=1`（元数据匹配 provider 同样兜底）。AniList 评分跟随账户 `mediaListOptions.scoreFormat`（POINT_10 账户读写 0–10，其余 0–100）。
+说明：`tracked` 为用户态——AniList 取 `mediaListEntry`、MAL 取 `my_list_status`（详情并发拉取）、Bangumi 拉取用户收藏集合、MangaBaka 批量查用户收藏（`GET /v1/my/library/batch`）。Bangumi 搜索在 v0 API 失败时兜底旧版 `GET /search/subject/{q}?type=1`（元数据匹配 provider 同样兜底）。AniList 评分跟随账户 `mediaListOptions.scoreFormat`（POINT_10 账户读写 0–10，其余 0–100）。MangaBaka 评分为 0–100，其 `plan_to_read`/`considering` 映射为 `planning`；更新时条目不存在则 `POST` 创建、已存在则 `PATCH`。
 
 - `GET /api/tracker/links` —— 本实例已关联条目的本地台账：每次成功 `update` 都会按 `{provider, trackId, title, coverUrl, url, updatedAt}`（最新在前）upsert 进 `<configDir>/oauth.sqlite` 的 `tracker_links` 表。`update` 可附带 `title` / `coverUrl`（不推送平台，仅用于台账展示）。
 

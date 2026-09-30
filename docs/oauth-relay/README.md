@@ -15,7 +15,7 @@ WebUI 发起授权（state 携带 redirectUrl = 实例 /api/oauth/{provider}/cal
 
 - **AniList（隐式流）**：token 在 URL fragment，服务器收不到，由本页移入 query 后跳回；
 - **MAL / Bangumi / MangaBaka（授权码流）**：code 在 query，原样透传；
-- `redirectUrl` 仅允许 `http(s)://…/api/oauth/{provider}/callback`（路径可带任意前缀，配合 `start` 的 `redirect_path_prefix` 支持反代/子路径部署），防止开放重定向；
+- `redirectUrl` 仅允许 `http(s)://…/api/oauth/{provider}/callback`，防止开放重定向；
 - 本页为纯静态资源，无后端、无外部依赖，可托管于 GitHub Pages / Cloudflare Pages 等任意静态托管。
 
 ## 文件
@@ -63,20 +63,23 @@ WebUI 发起授权（state 携带 redirectUrl = 实例 /api/oauth/{provider}/cal
 | AniList | `KOMF_OAUTH_ANILIST_CLIENT_SECRET` |
 | MyAnimeList | `KOMF_OAUTH_MAL_CLIENT_SECRET` |
 | Bangumi | `KOMF_OAUTH_BANGUMI_CLIENT_SECRET` |
+| MangaBaka | `KOMF_OAUTH_MANGABAKA_CLIENT_SECRET` |
 
-三个平台都**强制要求** secret（缺失时 token 交换必然 401，回调会返回明确错误提示）。
+四个平台都**强制要求** secret（缺失时 token 交换必然 401，回调会返回明确错误提示）。
 token 自动刷新同样依赖 secret，未注入时过期 token 会被清除、需要重新授权。
 
 **GitHub Actions（本项目发布通道）**：先在仓库 Settings → Secrets and variables →
 Actions 配置 `KOMF_OAUTH_ANILIST_CLIENT_SECRET` / `KOMF_OAUTH_MAL_CLIENT_SECRET` /
-`KOMF_OAUTH_BANGUMI_CLIENT_SECRET` 三个 secret，`release.yml` 的构建 job 已通过
-`env:` 引用注入，编译出的二进制与 Docker 镜像即携带 secret，**运行时无需再传**：
+`KOMF_OAUTH_BANGUMI_CLIENT_SECRET` / `KOMF_OAUTH_MANGABAKA_CLIENT_SECRET` 四个 secret，
+`release.yml` 的构建 job 已通过 `env:` 引用注入，编译出的二进制与 Docker 镜像即携带
+secret，**运行时无需再传**：
 
 ```yaml
 env:
   KOMF_OAUTH_ANILIST_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_ANILIST_CLIENT_SECRET }}
   KOMF_OAUTH_MAL_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_MAL_CLIENT_SECRET }}
   KOMF_OAUTH_BANGUMI_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_BANGUMI_CLIENT_SECRET }}
+  KOMF_OAUTH_MANGABAKA_CLIENT_SECRET: ${{ secrets.KOMF_OAUTH_MANGABAKA_CLIENT_SECRET }}
 ```
 
 **自行编译**（本地 / 自建 CI / fork 仓库）：
@@ -85,6 +88,7 @@ env:
 KOMF_OAUTH_ANILIST_CLIENT_SECRET='<anilist-secret>' \
 KOMF_OAUTH_MAL_CLIENT_SECRET='<mal-secret>' \
 KOMF_OAUTH_BANGUMI_CLIENT_SECRET='<bangumi-secret>' \
+KOMF_OAUTH_MANGABAKA_CLIENT_SECRET='<mangabaka-secret>' \
 cargo build --release
 ```
 
