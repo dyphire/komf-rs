@@ -179,8 +179,10 @@ function TriText(props: { value: any; onChange: (v: string | null) => void; plac
   );
 }
 /** 三态下拉：不动=保持原值；选择=设置；✕=发 null 清空 */
-function TriSelect(props: { value: any; options: string[]; onChange: (v: string | null) => void; hint?: string }) {
+function TriSelect(props: { value: any; options: (string | { label: string; value: string })[]; onChange: (v: string | null) => void; hint?: string }) {
   const { t } = useLang();
+  const labelOf = (o: string | { label: string; value: string }) => (typeof o === 'string' ? o : o.label);
+  const valOf = (o: string | { label: string; value: string }) => (typeof o === 'string' ? o : o.value);
   return (
     <div className="row" style={{ gap: 4 }}>
       <select
@@ -192,7 +194,7 @@ function TriSelect(props: { value: any; options: string[]; onChange: (v: string 
       >
         <option value="">{t('keep')}</option>
         {props.options.map((o) => (
-          <option key={o} value={o}>{o}</option>
+          <option key={valOf(o)} value={valOf(o)}>{labelOf(o)}</option>
         ))}
       </select>
       <button type="button" className="btn" title={t('tri.clear2')} onClick={() => props.onChange(null)}>✕</button>
@@ -358,63 +360,63 @@ function ProviderList(props: {
             {open && (
               <>
                 <div className="grid">
-                  <Field label="mediaType">
+                  <Field label={t('f.mediaType')}>
                     <select value={cur.mediaType ?? 'MANGA'} onChange={(e) => upd([...base, 'mediaType'], e.target.value)}>
                       {['MANGA', 'NOVEL', 'COMIC', 'WEBTOON'].map((m) => <option key={m} value={m}>{m}</option>)}
                     </select>
                   </Field>
-                  <Field label="nameMatchingMode">
-                    <TriSelect value={cur.nameMatchingMode} options={NAME_MODES} onChange={(v) => upd([...base, 'nameMatchingMode'], v)} />
+                  <Field label={t('f.provNameMatchingMode')}>
+                    <TriSelect value={cur.nameMatchingMode} options={NAME_MODES.map((m) => ({ label: t('mode.' + m), value: m }))} onChange={(v) => upd([...base, 'nameMatchingMode'], v)} />
                   </Field>
-                  <Field label="authorRoles">
-                    <MultiSelect value={cur.authorRoles} options={AUTHOR_ROLES} onChange={(v) => upd([...base, 'authorRoles'], v)} />
+                  <Field label={t('f.authorRoles')}>
+                    <MultiSelect value={cur.authorRoles} options={AUTHOR_ROLES.map((r) => ({ label: t('role.' + r), value: r }))} onChange={(v) => upd([...base, 'authorRoles'], v)} />
                   </Field>
-                  <Field label="artistRoles">
-                    <MultiSelect value={cur.artistRoles} options={AUTHOR_ROLES} onChange={(v) => upd([...base, 'artistRoles'], v)} />
+                  <Field label={t('f.artistRoles')}>
+                    <MultiSelect value={cur.artistRoles} options={AUTHOR_ROLES.map((r) => ({ label: t('role.' + r), value: r }))} onChange={(v) => upd([...base, 'artistRoles'], v)} />
                   </Field>
-                  <Field label="tagWhitelistFile">
+                  <Field label={t('f.tagWhitelistFile')}>
                     <Text value={cur.tagWhitelistFile} onChange={(v) => upd([...base, 'tagWhitelistFile'], v || null)} placeholder={t('ph.tagWhitelistFile')} />
                   </Field>
                   {key === 'mangaDex' && (
                     <>
                       <Field label={t('f.coverLanguages')}><CommaField value={cur.coverLanguages} onChange={(v) => upd([...base, 'coverLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
-                      <Field label="links">
+                      <Field label={t('f.links')}>
                         <MultiSelect value={cur.links} options={MANGA_DEX_LINKS} onChange={(v) => upd([...base, 'links'], v)} />
                       </Field>
                     </>
                   )}
                   {key === 'aniList' && (
                     <>
-                      <Field label="tagsScoreThreshold"><input type="number" value={cur.tagsScoreThreshold ?? 60} onChange={(e) => upd([...base, 'tagsScoreThreshold'], Number(e.target.value))} /></Field>
-                      <Field label="tagsSizeLimit"><input type="number" value={cur.tagsSizeLimit ?? 15} onChange={(e) => upd([...base, 'tagsSizeLimit'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.tagsScoreThreshold')}><input type="number" value={cur.tagsScoreThreshold ?? 60} onChange={(e) => upd([...base, 'tagsScoreThreshold'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.tagsSizeLimit')}><input type="number" value={cur.tagsSizeLimit ?? 15} onChange={(e) => upd([...base, 'tagsSizeLimit'], Number(e.target.value))} /></Field>
                     </>
                   )}
                   {key === 'mangaBaka' && (
                     <>
-                      <Field label="mode"><select value={cur.mode ?? 'API'} onChange={(e) => upd([...base, 'mode'], e.target.value)}><option value="API">API</option><option value="DATABASE">DATABASE</option></select></Field>
+                      <Field label={t('f.mode')}><select value={cur.mode ?? 'API'} onChange={(e) => upd([...base, 'mode'], e.target.value)}><option value="API">API</option><option value="DATABASE">DATABASE</option></select></Field>
                       <Field label={t('f.coverLanguages')}><CommaField value={cur.coverLanguages} onChange={(v) => upd([...base, 'coverLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
-                      <Field label="updateIntervalHours"><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.updateIntervalHours')}><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
                     </>
                   )}
                   {key === 'bangumi' && (
                     <>
                       <Field label={t('f.tagWhitelist')}><CommaField value={cur.tagWhitelist} onChange={(v) => upd([...base, 'tagWhitelist'], v)} /></Field>
-                      <SwitchField label="archive.enabled" value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
+                      <SwitchField label={t('f.archiveEnabled')} value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
                     </>
                   )}
                   {key === 'bookWalker' && (
-                    <Field label="updateIntervalHours"><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
+                    <Field label={t('f.updateIntervalHours')}><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
                   )}
                   {key === 'eHentai' && (
                     <>
-                      <Field label="searchDomain"><select value={cur.searchDomain ?? 'e-hentai'} onChange={(e) => upd([...base, 'searchDomain'], e.target.value)}><option value="e-hentai">e-hentai</option><option value="exhentai">exhentai</option></select></Field>
-                      <Field label="titlePriority"><select value={cur.titlePriority ?? 'jpn'} onChange={(e) => upd([...base, 'titlePriority'], e.target.value)}><option value="jpn">jpn</option><option value="title">title</option></select></Field>
-                      <SwitchField label="gidOnlyMatch" value={cur.gidOnlyMatch} onChange={(v) => upd([...base, 'gidOnlyMatch'], v)} />
+                      <Field label={t('f.searchDomain')}><select value={cur.searchDomain ?? 'e-hentai'} onChange={(e) => upd([...base, 'searchDomain'], e.target.value)}><option value="e-hentai">e-hentai</option><option value="exhentai">exhentai</option></select></Field>
+                      <Field label={t('f.titlePriority')}><select value={cur.titlePriority ?? 'jpn'} onChange={(e) => upd([...base, 'titlePriority'], e.target.value)}><option value="jpn">jpn</option><option value="title">title</option></select></Field>
+                      <SwitchField label={t('f.gidOnlyMatch')} value={cur.gidOnlyMatch} onChange={(v) => upd([...base, 'gidOnlyMatch'], v)} />
                       <Field label={t('f.preferredLanguages')}><CommaField value={cur.preferredLanguages} onChange={(v) => upd([...base, 'preferredLanguages'], v)} /></Field>
-                      <SwitchField label="archive.enabled" value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
-                      <SwitchField label="tagTranslationEnabled" value={cur.tagTranslationEnabled} onChange={(v) => upd([...base, 'tagTranslationEnabled'], v)} />
-                      <Field label="tagTranslationUrl"><Text value={cur.tagTranslationUrl} onChange={(v) => upd([...base, 'tagTranslationUrl'], v || null)} placeholder={t('ph.tagTranslationUrl')} /></Field>
-                      <Field label="titleTemplate"><Text value={cur.titleTemplate} onChange={(v) => upd([...base, 'titleTemplate'], v || null)} /></Field>
+                      <SwitchField label={t('f.archiveEnabled')} value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
+                      <SwitchField label={t('f.tagTranslationEnabled')} value={cur.tagTranslationEnabled} onChange={(v) => upd([...base, 'tagTranslationEnabled'], v)} />
+                      <Field label={t('f.tagTranslationUrl')}><Text value={cur.tagTranslationUrl} onChange={(v) => upd([...base, 'tagTranslationUrl'], v || null)} placeholder={t('ph.tagTranslationUrl')} /></Field>
+                      <Field label={t('f.titleTemplate')}><Text value={cur.titleTemplate} onChange={(v) => upd([...base, 'titleTemplate'], v || null)} /></Field>
                       <Field label={t('f.translatorKeywords')}><CommaField value={cur.translatorKeywords} onChange={(v) => upd([...base, 'translatorKeywords'], v)} /></Field>
                     </>
                   )}
@@ -424,7 +426,7 @@ function ProviderList(props: {
                   {SERIES_FIELDS.map((f) => {
                     const on = cur.seriesMetadata?.[f] ?? (f !== 'score' && f !== 'useOriginalPublisher');
                     return (
-                      <ToggleRow key={f} label={f} value={on} className={on ? '' : 'off'} onChange={(v) => upd([...base, 'seriesMetadata', f], v)} />
+                      <ToggleRow key={f} label={t('fld.' + f)} value={on} className={on ? '' : 'off'} onChange={(v) => upd([...base, 'seriesMetadata', f], v)} />
                     );
                   })}
                 </div>
@@ -433,7 +435,7 @@ function ProviderList(props: {
                   {BOOK_FIELDS.map((f) => {
                     const on = cur.bookMetadata?.[f] ?? true;
                     return (
-                      <ToggleRow key={f} label={f} value={on} className={on ? '' : 'off'} onChange={(v) => upd([...base, 'bookMetadata', f], v)} />
+                      <ToggleRow key={f} label={t('fld.' + f)} value={on} className={on ? '' : 'off'} onChange={(v) => upd([...base, 'bookMetadata', f], v)} />
                     );
                   })}
                 </div>
@@ -443,6 +445,115 @@ function ProviderList(props: {
         );
       })}
     </div>
+  );
+}
+
+// ---------------- 元数据处理表单（default 与按库覆盖共用） ----------------
+
+function MetadataUpdateForm(props: {
+  s: string;
+  b: string[];
+  mu: any;
+  draft: any;
+  upd: (path: (string | number)[], value: any) => void;
+}) {
+  const { t } = useLang();
+  const { s, b, mu, draft, upd } = props;
+  return (
+    <>
+      <div className="grid">
+        <Field label={t('f.libraryType')}><select value={mu.libraryType ?? 'MANGA'} onChange={(e) => upd([s, ...b, 'libraryType'], e.target.value)}>{['MANGA', 'NOVEL', 'COMIC', 'WEBTOON'].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
+        <SwitchField label={t('f.aggregate')} value={mu.aggregate} onChange={(v) => upd([s, ...b, 'aggregate'], v)} />
+        <SwitchField label={t('f.mergeTags')} value={mu.mergeTags} onChange={(v) => upd([s, ...b, 'mergeTags'], v)} />
+        <SwitchField label={t('f.mergeGenres')} value={mu.mergeGenres} onChange={(v) => upd([s, ...b, 'mergeGenres'], v)} />
+        <SwitchField label={t('f.seriesCovers')} value={mu.seriesCovers} onChange={(v) => upd([s, ...b, 'seriesCovers'], v)} />
+        <SwitchField label={t('f.bookCovers')} value={mu.bookCovers} onChange={(v) => upd([s, ...b, 'bookCovers'], v)} />
+        <SwitchField label={t('f.overrideExistingCovers')} value={mu.overrideExistingCovers ?? true} onChange={(v) => upd([s, ...b, 'overrideExistingCovers'], v)} />
+        <SwitchField label={t('f.lockCovers')} value={mu.lockCovers ?? true} onChange={(v) => upd([s, ...b, 'lockCovers'], v)} />
+        <Field label={t('f.updateModes')}><MultiSelect value={mu.updateModes} options={UPDATE_MODES.map((m) => ({ label: t('mode.' + m), value: m }))} onChange={(v) => upd([s, ...b, 'updateModes'], v)} /></Field>
+        <SwitchField label={t('f.postSeriesTitle')} value={mu.postProcessing?.seriesTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitle'], v)} />
+        <Field label={t('f.seriesTitleLanguage')}><Text value={mu.postProcessing?.seriesTitleLanguage ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitleLanguage'], v || null)} placeholder="en/zh/null" /></Field>
+        <SwitchField label={t('f.alternativeSeriesTitles')} value={mu.postProcessing?.alternativeSeriesTitles} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitles'], v)} />
+        <Field label={t('f.altSeriesTitleLangs')}><CommaField value={mu.postProcessing?.alternativeSeriesTitleLanguages} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitleLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
+        <SwitchField label={t('f.fallbackToAltTitle')} value={mu.postProcessing?.fallbackToAltTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'fallbackToAltTitle'], v)} />
+        <SwitchField label={t('f.orderBooks')} value={mu.postProcessing?.orderBooks} onChange={(v) => upd([s, ...b, 'postProcessing', 'orderBooks'], v)} />
+        <Field label={t('f.readingDirectionValue')}><select value={mu.postProcessing?.readingDirectionValue ?? ''} onChange={(e) => upd([s, ...b, 'postProcessing', 'readingDirectionValue'], e.target.value || null)}><option value="">null</option><option value="LEFT_TO_RIGHT">LEFT_TO_RIGHT</option><option value="RIGHT_TO_LEFT">RIGHT_TO_LEFT</option><option value="VERTICAL">VERTICAL</option><option value="WEBTOON">WEBTOON</option></select></Field>
+        <Field label={t('f.languageValue')}><Text value={mu.postProcessing?.languageValue ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'languageValue'], v || null)} placeholder="null/zh/en" /></Field>
+        <Field label={t('f.scoreTagName')}><Text value={mu.postProcessing?.scoreTagName ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'scoreTagName'], v || null)} /></Field>
+        <SwitchField label={t('f.searchTitleExtractionEnabled')} value={mu.searchTitleExtraction?.enabled} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'enabled'], v)} />
+      </div>
+      <details className="card-sub">
+        <summary>{t('md.advanced')}</summary>
+        <div className="grid">
+          <SwitchField label={t('f.overrideComicInfo')} value={mu.overrideComicInfo} onChange={(v) => upd([s, ...b, 'overrideComicInfo'], v)} />
+          <SwitchField label={t('f.mylarCovers')} value={mu.mylarCovers} onChange={(v) => upd([s, ...b, 'mylarCovers'], v)} />
+          <Field label={t('f.mylarOutputDir')}><TriText value={getPath(draft, [s, ...b, 'mylarOutputDir'])} onChange={(v) => upd([s, ...b, 'mylarOutputDir'], v)} placeholder={t('ph.mylarOutputDir')} /></Field>
+          <Field label={t('f.failedMatchCollectionName')}><TriText value={getPath(draft, [s, ...b, 'failedMatchCollectionName'])} onChange={(v) => upd([s, ...b, 'failedMatchCollectionName'], v)} placeholder={t('ph.failedMatchCollection')} /></Field>
+          <Field label={t('f.originalPublisherTagName')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'originalPublisherTagName'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'originalPublisherTagName'], v)} /></Field>
+          <SwitchField label={t('f.linksSkipEnabled')} value={mu.postProcessing?.linksSkipEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksSkipEnabled'], v)} />
+          <SwitchField label={t('f.linksMatchEnabled')} value={mu.postProcessing?.linksMatchEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksMatchEnabled'], v)} />
+        </div>
+        <Field label={t('f.publisherTagNames')} hint={t('hint.langJaEn')}>
+          <PairRows
+            rows={getPath(draft, [s, ...b, 'postProcessing', 'publisherTagNames'])}
+            kind="obj"
+            k1="tagName"
+            k2="language"
+            ph1="tagName"
+            ph2="language"
+            onChange={(rows) => upd([s, ...b, 'postProcessing', 'publisherTagNames'], rows)}
+          />
+        </Field>
+        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
+          <Field label={t('f.altLabelRomaji')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'romaji'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'romaji'], v)} /></Field>
+          <Field label={t('f.altLabelNative')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'native'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'native'], v)} /></Field>
+          <Field label={t('f.altLabelLocalized')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'localized'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'localized'], v)} /></Field>
+        </div>
+        <h3 style={{ margin: '10px 0 4px' }}>{t('md.chineseConversion')}</h3>
+        <div className="grid">
+          <SwitchField label={t('f.ccEnabled')} value={mu.chineseConversion?.enabled} onChange={(v) => upd([s, ...b, 'chineseConversion', 'enabled'], v)} />
+          <Field label={t('f.ccDirection')}><select value={mu.chineseConversion?.direction ?? 't2s'} onChange={(e) => upd([s, ...b, 'chineseConversion', 'direction'], e.target.value)}><option value="t2s">t2s</option><option value="s2t">s2t</option></select></Field>
+          <SwitchField label={t('md.ccSearch')} value={mu.chineseConversion?.search} onChange={(v) => upd([s, ...b, 'chineseConversion', 'search'], v)} />
+          <SwitchField label={t('md.ccMatching')} value={mu.chineseConversion?.matching} onChange={(v) => upd([s, ...b, 'chineseConversion', 'matching'], v)} />
+          <SwitchField label="chineseConversion.update（元数据）" value={mu.chineseConversion?.update?.enabled} onChange={(v) => upd([s, ...b, 'chineseConversion', 'update', 'enabled'], v)} />
+        </div>
+        <Field label={t('md.ccUpdateFields')}>
+          <div className="checks">
+            {CHINESE_FIELDS.map((f) => {
+              const fields = mu.chineseConversion?.update?.fields ?? [];
+              const on = fields.includes(f);
+              return (
+                <ToggleRow key={f} label={t('fld.' + f)} value={on} className={on ? '' : 'off'} onChange={(v) => {
+                  const next = v ? [...fields, f] : fields.filter((x: string) => x !== f);
+                  upd([s, ...b, 'chineseConversion', 'update', 'fields'], next);
+                }} />
+              );
+            })}
+          </div>
+        </Field>
+        <details className="card-sub">
+          <summary>{t('md.searchTitleExtraction')}</summary>
+          <div className="grid">
+            <Field label={t('f.bracketRegex')}><TriText value={getPath(draft, [s, ...b, 'searchTitleExtraction', 'bracketRegex'])} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'bracketRegex'], v)} placeholder={t('ph.bracketRegex')} /></Field>
+            <Field label={t('f.authorSeparator')}><TriText value={getPath(draft, [s, ...b, 'searchTitleExtraction', 'authorSeparator'])} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'authorSeparator'], v)} /></Field>
+            <Field label={t('f.titleSplitters')}><CommaField value={mu.searchTitleExtraction?.titleSplitters} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'titleSplitters'], v)} /></Field>
+            <Field label={t('f.symbolNormalizeRegex')}><Text value={mu.searchTitleExtraction?.symbolNormalizeRegex ?? ''} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'symbolNormalizeRegex'], v || null)} /></Field>
+          </div>
+          <Field label={t('f.cleanupRegex')}><CommaField value={mu.searchTitleExtraction?.cleanupRegex} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'cleanupRegex'], v)} /></Field>
+          <Field label={t('f.charMappings')}>
+            <PairRows
+              rows={mu.searchTitleExtraction?.charMappings}
+              kind="arr"
+              k1=""
+              k2=""
+              ph1={t('ph.srcChar')}
+              ph2={t('ph.dstChar')}
+              onChange={(rows) => upd([s, ...b, 'searchTitleExtraction', 'charMappings'], rows)}
+            />
+          </Field>
+        </details>
+      </details>
+    </>
   );
 }
 
@@ -888,7 +999,6 @@ export default function App() {
   // 按库覆盖编辑
   const [scopeServer, setScopeServer] = useState<ServerKind>('komga');
   const [scopeLib, setScopeLib] = useState('');
-  const [scopeText, setScopeText] = useState('{}');
   // 搜索试跑
   const [searchServer, setSearchServer] = useState<ServerKind>('komga');
   const [searchLib, setSearchLib] = useState('');
@@ -1026,23 +1136,9 @@ export default function App() {
     setMsg(null);
     try {
       let body: any = clone(patch) ?? {};
-      // 合并按库覆盖文本(显式 null=删除)
-      if (scopeLib.trim()) {
-        try {
-          const parsed = scopeText.trim() ? JSON.parse(scopeText) : {};
-          const origLib = getPath(orig, [scopeServer, 'metadataUpdate', 'library', scopeLib]) ?? null;
-          // 与 GET 原值一致时不发送，避免"选中库即保存"误删覆盖；显式删除走「删除覆盖」按钮(发 null)
-          if (JSON.stringify(parsed) !== JSON.stringify(origLib)) {
-            body[scopeServer] = body[scopeServer] ?? {};
-            body[scopeServer].metadataUpdate = body[scopeServer].metadataUpdate ?? {};
-            const lib = { ...getPath(orig, [scopeServer, 'metadataUpdate', 'library']) };
-            lib[scopeLib] = parsed && Object.keys(parsed).length ? parsed : null;
-            (body[scopeServer].metadataUpdate as any).library = { [scopeLib]: lib[scopeLib] };
-          }
-        } catch (e: any) {
-          throw new Error(t('err.scopeJson', { msg: e.message }));
-        }
-      }
+      // 按库覆盖现在与 default 共用同一套表单组件，变更直接写入 draft，
+      // 由 diff(orig, draft) 生成 patch（含该库 metadataUpdate 覆盖差异）；
+      // 「删除覆盖」按钮将库覆盖置 null，patch 发送 null 即删除。
       if (isEmptyPatch(body)) {
         setMsg({ ok: true, text: t('save.noChange') });
         return;
@@ -1306,10 +1402,10 @@ export default function App() {
             <h2>{SERVER_LABEL[s]}</h2>
             <p className="desc">{t('ms.desc', { s })}</p>
             <div className="grid">
-              <Field label="baseUri"><Text value={getPath(draft, [s, 'baseUri'])} onChange={(v) => upd([s, 'baseUri'], v)} /></Field>
+              <Field label={t('f.baseUri')}><Text value={getPath(draft, [s, 'baseUri'])} onChange={(v) => upd([s, 'baseUri'], v)} /></Field>
               {s === 'komga' && (
                 <>
-                  <Field label="komgaUser"><Text value={getPath(draft, [s, 'komgaUser'])} onChange={(v) => upd([s, 'komgaUser'], v)} /></Field>
+                  <Field label={t('f.komgaUser')}><Text value={getPath(draft, [s, 'komgaUser'])} onChange={(v) => upd([s, 'komgaUser'], v)} /></Field>
                   <Field label={t('f.komgaPassword')} hint={t('sensitive')}><Text password value={getPath(draft, [s, 'komgaPassword']) ?? ''} onChange={(v) => upd([s, 'komgaPassword'], v)} placeholder="********" /></Field>
                   <Field label={t('f.komgaApiKey')} hint={t('sensitive')}><Text password value={getPath(draft, [s, 'komgaApiKey']) ?? ''} onChange={(v) => upd([s, 'komgaApiKey'], v)} placeholder={t('notConfigured')} /></Field>
                 </>
@@ -1319,14 +1415,14 @@ export default function App() {
               )}
               {s === 'stump' && (
                 <>
-                  <Field label="username"><Text value={getPath(draft, [s, 'username'])} onChange={(v) => upd([s, 'username'], v)} /></Field>
+                  <Field label={t('f.username')}><Text value={getPath(draft, [s, 'username'])} onChange={(v) => upd([s, 'username'], v)} /></Field>
                   <Field label={t('f.password')} hint={t('sensitive')}><Text password value={getPath(draft, [s, 'password']) ?? ''} onChange={(v) => upd([s, 'password'], v)} placeholder="********" /></Field>
                   <Field label={t('f.apiKey')} hint={t('sensitive')}><Text password value={getPath(draft, [s, 'apiKey']) ?? ''} onChange={(v) => upd([s, 'apiKey'], v)} placeholder={t('notConfigured')} /></Field>
                 </>
               )}
             </div>
             <div className="grid">
-              <SwitchField label="eventListener.enabled" value={getPath(draft, [s, 'eventListener', 'enabled'])} onChange={(v) => upd([s, 'eventListener', 'enabled'], v)} />
+              <SwitchField label={t('f.eventListenerEnabled')} value={getPath(draft, [s, 'eventListener', 'enabled'])} onChange={(v) => upd([s, 'eventListener', 'enabled'], v)} />
               <Field label={t('f.metadataLibraryFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataLibraryFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name ?? l.id}`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataLibraryFilter'], v)} /></Field>
               <Field label={t('f.metadataSeriesExcludeFilter')}><MultiSelect value={getPath(draft, [s, 'eventListener', 'metadataSeriesExcludeFilter']) ?? []} options={(libs[s] ?? []).map((l) => ({ label: `${l.name ?? l.id}`, value: l.id }))} onChange={(v) => upd([s, 'eventListener', 'metadataSeriesExcludeFilter'], v)} /></Field>
             </div>
@@ -1405,98 +1501,7 @@ export default function App() {
             <div className="card" key={s}>
               <h2>{t('md.defaultTitle', { s: SERVER_LABEL[s] })}</h2>
               <p className="desc">{t('md.desc', { s })}</p>
-              <div className="grid">
-                <Field label="libraryType"><select value={mu.libraryType ?? 'MANGA'} onChange={(e) => upd([s, ...b, 'libraryType'], e.target.value)}>{['MANGA', 'NOVEL', 'COMIC', 'WEBTOON'].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
-                <SwitchField label="aggregate" value={mu.aggregate} onChange={(v) => upd([s, ...b, 'aggregate'], v)} />
-                <SwitchField label="mergeTags" value={mu.mergeTags} onChange={(v) => upd([s, ...b, 'mergeTags'], v)} />
-                <SwitchField label="mergeGenres" value={mu.mergeGenres} onChange={(v) => upd([s, ...b, 'mergeGenres'], v)} />
-                <SwitchField label="seriesCovers" value={mu.seriesCovers} onChange={(v) => upd([s, ...b, 'seriesCovers'], v)} />
-                <SwitchField label="bookCovers" value={mu.bookCovers} onChange={(v) => upd([s, ...b, 'bookCovers'], v)} />
-                <SwitchField label="overrideExistingCovers" value={mu.overrideExistingCovers ?? true} onChange={(v) => upd([s, ...b, 'overrideExistingCovers'], v)} />
-                <SwitchField label="lockCovers" value={mu.lockCovers ?? true} onChange={(v) => upd([s, ...b, 'lockCovers'], v)} />
-                <Field label={t('f.updateModes')}><MultiSelect value={mu.updateModes} options={UPDATE_MODES} onChange={(v) => upd([s, ...b, 'updateModes'], v)} /></Field>
-                <SwitchField label="postProcessing.seriesTitle" value={mu.postProcessing?.seriesTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitle'], v)} />
-                <Field label="seriesTitleLanguage"><Text value={mu.postProcessing?.seriesTitleLanguage ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitleLanguage'], v || null)} placeholder="en/zh/null" /></Field>
-                <SwitchField label="postProcessing.alternativeSeriesTitles" value={mu.postProcessing?.alternativeSeriesTitles} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitles'], v)} />
-                <Field label={t('f.altSeriesTitleLangs')}><CommaField value={mu.postProcessing?.alternativeSeriesTitleLanguages} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitleLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
-                <SwitchField label="orderBooks" value={mu.postProcessing?.orderBooks} onChange={(v) => upd([s, ...b, 'postProcessing', 'orderBooks'], v)} />
-                <Field label="readingDirectionValue"><Text value={mu.postProcessing?.readingDirectionValue ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'readingDirectionValue'], v || null)} placeholder="null/LEFT_TO_RIGHT/…" /></Field>
-                <Field label="languageValue"><Text value={mu.postProcessing?.languageValue ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'languageValue'], v || null)} placeholder="null/zh/en" /></Field>
-                <Field label="scoreTagName"><Text value={mu.postProcessing?.scoreTagName ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'scoreTagName'], v || null)} /></Field>
-                <SwitchField label="searchTitleExtraction.enabled" value={mu.searchTitleExtraction?.enabled} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'enabled'], v)} />
-                <SwitchField label="chineseConversion.enabled" value={mu.chineseConversion?.enabled} onChange={(v) => upd([s, ...b, 'chineseConversion', 'enabled'], v)} />
-                <Field label="chineseConversion.direction"><select value={mu.chineseConversion?.direction ?? 't2s'} onChange={(e) => upd([s, ...b, 'chineseConversion', 'direction'], e.target.value)}><option value="t2s">t2s</option><option value="s2t">s2t</option></select></Field>
-              </div>
-              <details className="card-sub">
-                <summary>{t('md.advanced')}</summary>
-                <div className="grid">
-                  <SwitchField label="overrideComicInfo" value={mu.overrideComicInfo} onChange={(v) => upd([s, ...b, 'overrideComicInfo'], v)} />
-                  <SwitchField label="mylarCovers" value={mu.mylarCovers} onChange={(v) => upd([s, ...b, 'mylarCovers'], v)} />
-                  <Field label={t('f.mylarOutputDir')}><TriText value={getPath(draft, [s, ...b, 'mylarOutputDir'])} onChange={(v) => upd([s, ...b, 'mylarOutputDir'], v)} placeholder={t('ph.mylarOutputDir')} /></Field>
-                  <Field label={t('f.failedMatchCollectionName')}><TriText value={getPath(draft, [s, ...b, 'failedMatchCollectionName'])} onChange={(v) => upd([s, ...b, 'failedMatchCollectionName'], v)} placeholder={t('ph.failedMatchCollection')} /></Field>
-                  <SwitchField label="postProcessing.fallbackToAltTitle" value={mu.postProcessing?.fallbackToAltTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'fallbackToAltTitle'], v)} />
-                  <Field label={t('f.originalPublisherTagName')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'originalPublisherTagName'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'originalPublisherTagName'], v)} /></Field>
-                  <SwitchField label="postProcessing.linksSkipEnabled" value={mu.postProcessing?.linksSkipEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksSkipEnabled'], v)} />
-                  <SwitchField label="postProcessing.linksMatchEnabled" value={mu.postProcessing?.linksMatchEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksMatchEnabled'], v)} />
-                </div>
-                <Field label={t('f.publisherTagNames')} hint={t('hint.langJaEn')}>
-                  <PairRows
-                    rows={getPath(draft, [s, ...b, 'postProcessing', 'publisherTagNames'])}
-                    kind="obj"
-                    k1="tagName"
-                    k2="language"
-                    ph1="tagName"
-                    ph2="language"
-                    onChange={(rows) => upd([s, ...b, 'postProcessing', 'publisherTagNames'], rows)}
-                  />
-                </Field>
-                <div className="grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
-                  <Field label="alternateTitleLabels.romaji"><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'romaji'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'romaji'], v)} /></Field>
-                  <Field label="alternateTitleLabels.native"><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'native'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'native'], v)} /></Field>
-                  <Field label="alternateTitleLabels.localized"><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'localized'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'localized'], v)} /></Field>
-                </div>
-                <h3 style={{ margin: '10px 0 4px' }}>{t('md.chineseConversion')}</h3>
-                <div className="grid">
-                  <SwitchField label={t('md.ccSearch')} value={mu.chineseConversion?.search} onChange={(v) => upd([s, ...b, 'chineseConversion', 'search'], v)} />
-                  <SwitchField label={t('md.ccMatching')} value={mu.chineseConversion?.matching} onChange={(v) => upd([s, ...b, 'chineseConversion', 'matching'], v)} />
-                  <SwitchField label="chineseConversion.update.enabled" value={mu.chineseConversion?.update?.enabled} onChange={(v) => upd([s, ...b, 'chineseConversion', 'update', 'enabled'], v)} />
-                </div>
-                <Field label={t('md.ccUpdateFields')}>
-                  <div className="checks">
-                    {CHINESE_FIELDS.map((f) => {
-                      const fields = mu.chineseConversion?.update?.fields ?? [];
-                      const on = fields.includes(f);
-                      return (
-                        <ToggleRow key={f} label={f} value={on} className={on ? '' : 'off'} onChange={(v) => {
-                          const next = v ? [...fields, f] : fields.filter((x: string) => x !== f);
-                          upd([s, ...b, 'chineseConversion', 'update', 'fields'], next);
-                        }} />
-                      );
-                    })}
-                  </div>
-                </Field>
-                <details className="card-sub">
-                  <summary>{t('md.searchTitleExtraction')}</summary>
-                  <div className="grid">
-                    <Field label={t('f.bracketRegex')}><TriText value={getPath(draft, [s, ...b, 'searchTitleExtraction', 'bracketRegex'])} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'bracketRegex'], v)} placeholder={t('ph.bracketRegex')} /></Field>
-                    <Field label={t('f.authorSeparator')}><TriText value={getPath(draft, [s, ...b, 'searchTitleExtraction', 'authorSeparator'])} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'authorSeparator'], v)} /></Field>
-                    <Field label={t('f.titleSplitters')}><CommaField value={mu.searchTitleExtraction?.titleSplitters} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'titleSplitters'], v)} /></Field>
-                    <Field label="symbolNormalizeRegex"><Text value={mu.searchTitleExtraction?.symbolNormalizeRegex ?? ''} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'symbolNormalizeRegex'], v || null)} /></Field>
-                  </div>
-                  <Field label={t('f.cleanupRegex')}><CommaField value={mu.searchTitleExtraction?.cleanupRegex} onChange={(v) => upd([s, ...b, 'searchTitleExtraction', 'cleanupRegex'], v)} /></Field>
-                  <Field label={t('f.charMappings')}>
-                    <PairRows
-                      rows={mu.searchTitleExtraction?.charMappings}
-                      kind="arr"
-                      k1=""
-                      k2=""
-                      ph1={t('ph.srcChar')}
-                      ph2={t('ph.dstChar')}
-                      onChange={(rows) => upd([s, ...b, 'searchTitleExtraction', 'charMappings'], rows)}
-                    />
-                  </Field>
-                </details>
-              </details>
+              <MetadataUpdateForm s={s} b={b} mu={mu} draft={draft} upd={upd} />
             </div>
           );
         })}
@@ -1510,19 +1515,17 @@ export default function App() {
                 {SERVERS.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
               <select value={scopeLib} onChange={(e) => {
-                const id = e.target.value;
-                setScopeLib(id);
-                const cur = getPath(orig, [scopeServer, 'metadataUpdate', 'library', id]);
-                setScopeText(JSON.stringify(cur ?? {}, null, 2));
+                setScopeLib(e.target.value);
               }}>
                 <option value="">{t('selectLib')}</option>
                 {libOptions.map((l) => <option key={l.id} value={l.id} title={`${l.name} (${l.id})`}>{l.name} ({l.id})</option>)}
               </select>
               <button className="btn" onClick={() => {
-                const def = getPath(draft, [scopeServer, 'metadataUpdate', 'default']) ?? {};
-                setScopeText(JSON.stringify({ libraryType: def.libraryType, aggregate: def.aggregate }, null, 2));
+                const def = getPath(draft, [scopeServer, 'metadataUpdate', 'default']);
+                if (def) upd([scopeServer, 'metadataUpdate', 'library', scopeLib], clone(def));
+                else setMsg({ ok: false, text: t('lib.copyFail') });
               }}>{t('lib.copySkeleton')}</button>
-              <button className="btn" onClick={() => setScopeText('{}')}>{t('lib.delMeta')}</button>
+              <button className="btn" onClick={() => upd([scopeServer, 'metadataUpdate', 'library', scopeLib], null)}>{t('lib.delMeta')}</button>
               {scopeHasProviders && (
                 <>
                   <button className="btn" onClick={() => {
@@ -1541,7 +1544,11 @@ export default function App() {
             <div className="card" style={{ background: 'var(--panel2)' }}>
               <h3 style={{ overflowWrap: 'anywhere' }}>{t('lib.metaTitle', { lib: scopeLib || t('lib.unselected') })}</h3>
               <p className="desc">{t('lib.metaDesc')}</p>
-              <textarea rows={12} style={{ width: '100%' }} value={scopeText} onChange={(e) => setScopeText(e.target.value)} />
+              {scopeLib.trim() ? (
+                <MetadataUpdateForm s={scopeServer} b={['metadataUpdate', 'library', scopeLib]} mu={getPath(draft, [scopeServer, 'metadataUpdate', 'library', scopeLib]) ?? {}} draft={draft} upd={upd} />
+              ) : (
+                <p className="desc">{t('selectLib')}</p>
+              )}
             </div>
             {scopeHasProviders && (
               <ProviderList
@@ -1564,8 +1571,8 @@ export default function App() {
               <div className="grid">
                 <Field label={t('f.webhooks')}><textarea rows={4} value={(getPath(draft, ['notifications', 'discord', 'webhooks']) ?? []).join('\n').includes('*') ? '' : (getPath(draft, ['notifications', 'discord', 'webhooks']) ?? []).join('\n')} onChange={(e) => upd(['notifications', 'discord', 'webhooks'], e.target.value.split('\n').map((x) => x.trim()).filter(Boolean))} placeholder="https://discord.com/api/webhooks/…" /></Field>
                 <Field label={t('f.urls')}><textarea rows={4} value={(getPath(draft, ['notifications', 'apprise', 'urls']) ?? []).join('\n').includes('*') ? '' : (getPath(draft, ['notifications', 'apprise', 'urls']) ?? []).join('\n')} onChange={(e) => upd(['notifications', 'apprise', 'urls'], e.target.value.split('\n').map((x) => x.trim()).filter(Boolean))} placeholder="discord://… / gotify://…" /></Field>
-                <SwitchField label="discord.seriesCover" value={getPath(draft, ['notifications', 'discord', 'seriesCover'])} onChange={(v) => upd(['notifications', 'discord', 'seriesCover'], v)} />
-                <SwitchField label="apprise.seriesCover" value={getPath(draft, ['notifications', 'apprise', 'seriesCover'])} onChange={(v) => upd(['notifications', 'apprise', 'seriesCover'], v)} />
+                <SwitchField label={t('f.seriesCover')} value={getPath(draft, ['notifications', 'discord', 'seriesCover'])} onChange={(v) => upd(['notifications', 'discord', 'seriesCover'], v)} />
+                <SwitchField label={t('f.seriesCover')} value={getPath(draft, ['notifications', 'apprise', 'seriesCover'])} onChange={(v) => upd(['notifications', 'apprise', 'seriesCover'], v)} />
               </div>
             </div>
 
