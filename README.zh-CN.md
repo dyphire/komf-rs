@@ -88,7 +88,7 @@ copy examples/application.example.yml application.yml # Windows
 | `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | MAL provider 必需                            |
 | `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | ComicVine provider 必需                      |
 | `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token（显示 NSFW 条目）                  |
-| `KOMF_WEBUI_KEY`                               | WebUI 访问密钥（可选）：设置后，非本地/局域网访问必须输入（本地/局域网免密钥） |
+| `KOMF_AUTH_KEY`                                | 敏感操作访问密钥（可选，公网暴露强烈建议设置）：设置后，非本地/局域网的敏感请求必须输入（本地/局域网免密钥）；`GET /version` 与 `GET /api/health` 照常放行；旧变量 `KOMF_WEBUI_KEY` 仍兼容回退 |
 | `KOMF_WEB_DIR`                                 | WebUI 静态目录覆盖（查找顺序 `web/dist` -> `ui`） |
 | `KOMF_AUTH_FORCE_REMOTE`                       | 仅调试：`1` 时把所有来源按远程处理，强制走密钥校验 |
 
@@ -114,7 +114,7 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
 
 ## 安全
 
-服务内置**可选密钥认证门**：设置 `KOMF_WEBUI_KEY` 后，**非本地/局域网**来源的请求必须输入密钥——本地/回环与局域网（RFC1918 / link-local / IPv6 ULA）来源始终免密钥放行。未授权的 `/api/*` 请求返回 `401`；页面/静态资源请求返回内置登录页（输入框样式与 WebUI 一致）。登录成功 `POST /api/auth/login` 会种下 HttpOnly 会话 cookie（`komf_auth`）；`POST /api/auth/logout` 清除之。cookie 由 SHA-1（密钥 + 固定盐）派生并以恒定时间比较。`KOMF_AUTH_FORCE_REMOTE=1`（仅调试）把所有来源强制按远程处理以走密钥分支。
+服务内置**可选密钥认证门**——**公网暴露使用时强烈建议设置 `KOMF_AUTH_KEY`**。设置 `KOMF_AUTH_KEY`（旧变量 `KOMF_WEBUI_KEY` 仍兼容回退）后，**非本地/局域网**来源的**敏感操作**请求必须输入密钥——本地/回环与局域网（RFC1918 / link-local / IPv6 ULA）来源始终免密钥放行；非敏感的 `GET /version`（版本查询）与 `GET /api/health`（健康/状态查询）照常放行。未授权的敏感 `/api/*` 请求返回 `401`；页面/静态资源请求返回内置登录页（输入框样式与 WebUI 一致）。登录成功 `POST /api/auth/login` 会种下 HttpOnly 会话 cookie（`komf_auth`）；`POST /api/auth/logout` 清除之。cookie 由 SHA-1（密钥 + 固定盐）派生并以恒定时间比较。`KOMF_AUTH_FORCE_REMOTE=1`（仅调试）把所有来源强制按远程处理以走密钥分支。
 
 未启用密钥门时服务**没有内置鉴权**：任何能连上 HTTP 端口的人都可以读取（脱敏后的）配置、通过 `PATCH /api/config` 修改配置并调用元数据接口。请把它当数据库管理后台对待：
 
@@ -167,11 +167,12 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 - `GET /api/config`、`PATCH /api/config` —— 读取 / 更新配置（热更新）
 
-### 认证（设置 `KOMF_WEBUI_KEY` 后启用）
+### 认证（设置 `KOMF_AUTH_KEY` 后启用）
 
 - `POST /api/auth/login` —— `{"key":"..."}`：成功返回 `204` + `komf_auth` cookie，失败 `401`
 - `POST /api/auth/logout` —— 清除认证 cookie
-- 未授权 `/api/*` 请求返回 `401`；其他路径返回内置登录页；本地/局域网来源绕过认证门
+- 免鉴权放行（远程）：`GET /version`、`GET /api/health`；其余敏感操作均需鉴权
+- 未授权敏感 `/api/*` 请求返回 `401`；其他路径返回内置登录页；本地/局域网来源绕过认证门
 
 ### 离线数据库下载
 
@@ -179,7 +180,8 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 ### 任务
 
-- `GET /api/jobs`、`GET /api/jobs/all`（`DELETE`）、`GET /api/jobs/{jobId}/events`（SSE）
+- `GET /api/jobs`、`GET /api/jobs/all`（`DELETE`）、`GET /api/jobs/{jobId}/events`（SSE，单任务）
+- `GET /api/jobs/events`（SSE，全局 firehose，可选 `?ids=a,b,c` 过滤）—— 单连接观察全部任务活动；帧沿用单任务事件名，另加 `JobCreatedEvent` / `JobFinishedEvent` 生命周期帧，每帧 `data` 为扁平 JSON（含 `jobId` + `seriesId`）；连接时回放当前 RUNNING 快照，单个任务结束不断流，慢客户端丢帧追赶
 
 ### 元数据（`{media-server}` = `komga`、`kavita` 或 `stump`）
 
@@ -264,7 +266,7 @@ WebUI Tracker 页中该台账显示在**已关联**下（与搜索结果互斥�
 
 - [Komf 用户脚本](https://github.com/dyphire/komf-userscript)
 
-### 内置配置 WebUI（`/`）
+### 内置配置 WebUI
 
 本仓库自带配置前端（`web/`，Vite + React + TS）：
 

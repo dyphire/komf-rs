@@ -1,9 +1,12 @@
-//! WebUI 访问保护：非本地/局域网访问要求输入环境变量 `KOMF_WEBUI_KEY` 配置的密钥。
+//! 访问保护：非本地/局域网访问的敏感操作要求输入环境变量 `KOMF_AUTH_KEY` 配置的密钥。
 //!
 //! 规则（`auth_guard` 中间件，挂在整个 base router 最外层）：
-//! - 未配置 `KOMF_WEBUI_KEY` → 不启用，全部放行（保持原行为）；
+//! - 未配置 `KOMF_AUTH_KEY`（兼容回退 `KOMF_WEBUI_KEY`）→ 不启用，全部放行（保持原行为）；
 //! - 请求来源为本地/局域网（loopback / RFC1918 私网 / link-local / ULA）→ 免密钥放行；
-//! - 远程访问：校验 `komf_auth` cookie（= SHA-1(密钥 + 固定盐) 的 base64，恒定时间比较）；
+//! - 非敏感操作（无需鉴权，远程直接放行）：
+//!   `GET /version`（版本查询）、`GET /api/health`（健康/版本查询）；
+//! - 敏感操作（远程必须鉴权）：除上述放行名单外的所有请求，校验 `komf_auth`
+//!   cookie（= SHA-1(密钥 + 固定盐) 的 base64，恒定时间比较）；
 //!   未通过时：`/api/*` 返回 401 JSON，其余路径返回内联登录页（样式对齐 Docker Copilot 类认证页）。
 //!
 //! `POST /api/auth/login`（校验密钥并种 cookie）与 `POST /api/auth/logout`（删 cookie）
@@ -21,12 +24,31 @@ use std::net::{IpAddr, SocketAddr};
 pub const COOKIE_NAME: &str = "komf_auth";
 const COOKIE_SALT: &[u8] = b":komf-webui-auth";
 
-/// 环境变量密钥：未设置/为空 → 不启用访问保护。
+/// 环境变量密钥：优先 `KOMF_AUTH_KEY`，为空时回退 `KOMF_WEBUI_KEY`（兼容旧版本）；
+/// 均未设置/为空 → 不启用访问保护。
 pub fn auth_key() -> Option<String> {
-    std::env::var("KOMF_WEBUI_KEY")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    for name in ["KOMF_AUTH_KEY", "KOMF_WEBUI_KEY"] {
+        if let Ok(v) = std::env::var(name) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// 非敏感操作判定（远程免鉴权放行）：
+/// - `/api/auth/*`：登录/登出通道，始终可访问（任意方法）；
+/// - `GET|HEAD /version`、`GET|HEAD /api/health`：版本查询 / 健康检查。
+pub fn is_public_unauthenticated(method: &axum::http::Method, path: &str) -> bool {
+    if path.starts_with("/api/auth/") {
+        return true;
+    }
+    if *method != axum::http::Method::GET && *method != axum::http::Method::HEAD {
+        return false;
+    }
+    path == "/version" || path == "/api/health"
 }
 
 /// 本地/局域网判定：loopback、RFC1918 私网（10/8、172.16/12、192.168/16）、
@@ -98,8 +120,8 @@ pub async fn auth_guard(
     if !force_remote && is_local_or_lan(addr.ip()) {
         return next.run(request).await;
     }
-    // 登录/登出接口始终可访问
-    if request.uri().path().starts_with("/api/auth/") {
+    // 非敏感操作（登录/登出、版本/健康查询）始终可访问
+    if is_public_unauthenticated(request.method(), request.uri().path()) {
         return next.run(request).await;
     }
     // 远程 + cookie 有效：放行
@@ -111,7 +133,7 @@ pub async fn auth_guard(
         Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"unauthorized","hint":"请输入 KOMF_WEBUI_KEY 配置的密钥"}"#))
+            .body(Body::from(r#"{"error":"unauthorized","hint":"请输入 KOMF_AUTH_KEY 配置的密钥"}"#))
             .unwrap()
             .into_response()
     } else {
@@ -221,7 +243,7 @@ fn login_page_html() -> String {
     <p class="err" id="err"></p>
     <button class="go" id="go" type="submit">登录 &rarr;</button>
   </form>
-  <p class="foot">密钥由服务端环境变量 KOMF_WEBUI_KEY 配置</p>
+  <p class="foot">密钥由服务端环境变量 KOMF_AUTH_KEY 配置</p>
 </div>
 <script>
   // 语言：与 SPA 共用 localStorage 'komf-lang'（zh / en），默认跟随浏览器
@@ -232,8 +254,8 @@ fn login_page_html() -> String {
     else { L = (/^zh/i.test(navigator.language)) ? 'zh' : 'en'; }
   } catch (e) {}
   var S = {
-    zh: { title: 'komf-rs 配置', sub: '请输入密钥进行认证', ph: '请输入您的密钥', eye: '显示/隐藏', go: '登录 →', foot: '密钥由服务端环境变量 KOMF_WEBUI_KEY 配置', logging: '登录中…', badKey: '密钥不正确', fail: '登录失败', net: '网络错误：' },
-    en: { title: 'komf-rs Config', sub: 'Enter your key to authenticate', ph: 'Enter your key', eye: 'Show/hide', go: 'Sign in →', foot: 'Key is configured via the KOMF_WEBUI_KEY environment variable', logging: 'Signing in…', badKey: 'Invalid key', fail: 'Sign-in failed', net: 'Network error: ' }
+    zh: { title: 'komf-rs 配置', sub: '请输入密钥进行认证', ph: '请输入您的密钥', eye: '显示/隐藏', go: '登录 →', foot: '密钥由服务端环境变量 KOMF_AUTH_KEY 配置', logging: '登录中…', badKey: '密钥不正确', fail: '登录失败', net: '网络错误：' },
+    en: { title: 'komf-rs Config', sub: 'Enter your key to authenticate', ph: 'Enter your key', eye: 'Show/hide', go: 'Sign in →', foot: 'Key is configured via the KOMF_AUTH_KEY environment variable', logging: 'Signing in…', badKey: 'Invalid key', fail: 'Sign-in failed', net: 'Network error: ' }
   };
   var s = S[L] || S.zh;
   document.title = s.title;
@@ -312,5 +334,33 @@ mod tests {
         assert!(constant_time_eq(&v, &cookie_value("secret-key")));
         assert!(!constant_time_eq(&v, &cookie_value("other-key")));
         assert!(!constant_time_eq(&v, ""));
+    }
+
+    #[test]
+    fn public_paths_allow_version_and_health_get_only() {
+        use axum::http::Method;
+        // 版本/健康查询：GET/HEAD 放行
+        assert!(is_public_unauthenticated(&Method::GET, "/version"));
+        assert!(is_public_unauthenticated(&Method::HEAD, "/version"));
+        assert!(is_public_unauthenticated(&Method::GET, "/api/health"));
+        assert!(is_public_unauthenticated(&Method::HEAD, "/api/health"));
+        // 登录通道：任意方法放行
+        assert!(is_public_unauthenticated(&Method::POST, "/api/auth/login"));
+        assert!(is_public_unauthenticated(&Method::POST, "/api/auth/logout"));
+        // 敏感操作：POST 版本/健康、配置读写、连接检查等一律不放行
+        assert!(!is_public_unauthenticated(&Method::POST, "/version"));
+        assert!(!is_public_unauthenticated(&Method::POST, "/api/health"));
+        assert!(!is_public_unauthenticated(&Method::GET, "/api/config"));
+        assert!(!is_public_unauthenticated(&Method::PATCH, "/api/config"));
+        assert!(!is_public_unauthenticated(
+            &Method::GET,
+            "/api/komga/media-server/connected"
+        ));
+        assert!(!is_public_unauthenticated(
+            &Method::GET,
+            "/api/oauth/anilist/status"
+        ));
+        assert!(!is_public_unauthenticated(&Method::GET, "/api/jobs"));
+        assert!(!is_public_unauthenticated(&Method::GET, "/"));
     }
 }
