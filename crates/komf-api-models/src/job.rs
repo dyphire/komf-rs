@@ -87,3 +87,40 @@ impl KomfMetadataJobEvent {
         }
     }
 }
+
+/// 全局 job 事件流（`GET /jobs/events` firehose）生命周期帧的事件名。
+pub const JOB_CREATED_EVENT_NAME: &str = "JobCreatedEvent";
+pub const JOB_FINISHED_EVENT_NAME: &str = "JobFinishedEvent";
+
+/// 构建 `JobCreatedEvent` 的 SSE data（扁平 JSON，含 jobId/seriesId/type）。
+pub fn job_created_json(job_id: &str, series_id: &str, started_at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "JobCreatedEvent",
+        "jobId": job_id,
+        "seriesId": series_id,
+        "startedAt": started_at,
+    })
+}
+
+/// 构建 `JobFinishedEvent` 的 SSE data（扁平 JSON，含 jobId/seriesId/status）。
+pub fn job_finished_json(
+    job_id: &str,
+    series_id: &str,
+    status: KomfMetadataJobStatus,
+    message: Option<&str>,
+    finished_at: &str,
+) -> serde_json::Value {
+    let status_str = match status {
+        KomfMetadataJobStatus::Running => "RUNNING",
+        KomfMetadataJobStatus::Failed => "FAILED",
+        KomfMetadataJobStatus::Completed => "COMPLETED",
+    };
+    serde_json::json!({
+        "type": "JobFinishedEvent",
+        "jobId": job_id,
+        "seriesId": series_id,
+        "status": status_str,
+        "message": message,
+        "finishedAt": finished_at,
+    })
+}

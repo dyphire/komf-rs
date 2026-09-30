@@ -1,7 +1,7 @@
 //! 元数据服务 —— 对应 `MetadataService.kt` 与 `MetadataServiceProvider.kt`。
 use crate::client::{MediaServerClient, MediaServerError};
 use crate::config::{ChineseConversionConfig, ChineseField, SearchTitleExtractionConfig};
-use crate::jobs::{KomfJobTracker, KomfJobsRepository, MetadataJobEvent, MetadataJobId, SeriesMatch};
+use crate::jobs::{JobEventSender, KomfJobTracker, KomfJobsRepository, MetadataJobEvent, MetadataJobId, SeriesMatch};
 use crate::metadata_merger::MetadataMerger;
 use crate::metadata_updater::MetadataUpdater;
 use crate::model::*;
@@ -236,7 +236,7 @@ impl MetadataService {
 
     async fn identify_series_metadata_inner(
         &self,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
         series_id: &MediaServerSeriesId,
         fallback_provider: CoreProviders,
         fallback_provider_series_id: &ProviderSeriesId,
@@ -298,7 +298,7 @@ impl MetadataService {
         &self,
         series: &MediaServerSeries,
         books: &[MediaServerBook],
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
     ) -> LinksFetchOutcome {
         // oneshot 单本系列：书籍级链接（聚合优先，books 回退）参与收集
         let combined_links = series_links_including_books(series, books);
@@ -382,7 +382,7 @@ impl MetadataService {
 
     async fn set_series_metadata_inner(
         &self,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
         series_id: &MediaServerSeriesId,
         provider_name: CoreProviders,
         provider_series_id: &ProviderSeriesId,
@@ -710,7 +710,7 @@ impl MetadataService {
     /// Ok(NoMatch) = 匹配失败；Ok(Skipped) = 被跳过（linksSkip 等，job 正常 complete）。
     async fn match_series_metadata_inner(
         &self,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
         series_id: &MediaServerSeriesId,
         apply_links_skip: bool,
     ) -> Result<MatchOutcome, (Option<CoreProviders>, String)> {
@@ -878,7 +878,7 @@ impl MetadataService {
     async fn finish_job(
         &self,
         job_id: &MetadataJobId,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
         result: Result<(), (Option<CoreProviders>, String)>,
     ) {
         match result {
@@ -918,7 +918,7 @@ impl MetadataService {
         search_titles: &[String],
         provider: Arc<dyn MetadataProvider>,
         edition: Option<&str>,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
     ) -> Option<SeriesAndBookMetadata> {
         for search_title in search_titles {
             tracing::info!("searching \"{search_title}\" using {}", provider.provider_name());
@@ -984,7 +984,7 @@ impl MetadataService {
         series_meta: &ProviderSeriesMetadata,
         provider: Arc<dyn MetadataProvider>,
         edition: Option<&str>,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
     ) -> HashMap<MediaServerBookId, Option<BookMetadata>> {
         let metadata_match = self.associate_book_metadata(books, &series_meta.books, edition);
 
@@ -1111,7 +1111,7 @@ impl MetadataService {
         excluded_alt_titles: Vec<String>,
         providers: Vec<Arc<dyn MetadataProvider>>,
         edition: Option<&str>,
-        tx: &tokio::sync::broadcast::Sender<MetadataJobEvent>,
+        tx: &JobEventSender,
     ) -> SeriesAndBookMetadata {
         if providers.is_empty() {
             let mut seed =
