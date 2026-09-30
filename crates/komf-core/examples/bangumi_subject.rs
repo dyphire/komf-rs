@@ -33,6 +33,7 @@ async fn main() {
         None,
         &http,
         None,
+        None, // archive（全局服务由 ProvidersModule 创建；example 走在线 API）
         None,
     )
     .expect("bangumi provider create failed");

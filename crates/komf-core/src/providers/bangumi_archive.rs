@@ -21,6 +21,7 @@
 use crate::providers::bangumi::{BangumiInfoBoxItem, BangumiRating, BangumiSubject, BangumiTag};
 use crate::providers::{CoreProviders, ProviderError};
 use futures::StreamExt;
+use komf_api_models::config::DownloadProgress;
 use serde::Deserialize;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -1162,13 +1163,28 @@ fn fts_query(user_input: &str) -> String {
 // ArchiveService —— 后台下载/构建/周期更新（原子替换共享槽）
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct BangumiArchiveService {
     store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>>,
     ready: Arc<AtomicBool>,
+    /// 打开现有数据（index+mmap）的启动任务是否已完成（无论成败）。
+    /// 周期更新循环等待该标志，避免打开任务在 do_update 释放旧 store 后重新 mmap
+    /// subject.jsonlines → 解压覆盖写入撞 os error 1224。
+    opened: Arc<AtomicBool>,
+    /// 周期自动更新循环是否已启动（防重复 spawn）。
+    auto_update_started: Arc<AtomicBool>,
+    http_client: reqwest::Client,
+    data_dir: PathBuf,
+    idle_release_secs: u64,
+    /// 更新互斥：下载/构建期间忽略新的触发（复用进行中的进度流）。
+    download_in_progress: Arc<AtomicBool>,
+    progress: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
 }
 
 impl BangumiArchiveService {
     /// 启动后台任务（非阻塞）。`dir` 为数据目录（缺省 workDir/bangumi-archive）。
+    /// 只创建服务并加载现有数据；周期自动更新由编排方（app_context）统一调用
+    /// `start_auto_update` 启动，服务本身不自行调度。
     pub fn start(
         config: &crate::config::BangumiArchiveConfig,
         http_client: reqwest::Client,
@@ -1177,11 +1193,18 @@ impl BangumiArchiveService {
         let store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>> =
             Arc::new(RwLock::new(None));
         let ready = Arc::new(AtomicBool::new(false));
+        let opened = Arc::new(AtomicBool::new(false));
         let svc = Arc::new(Self {
             store: store.clone(),
             ready: ready.clone(),
+            opened: opened.clone(),
+            auto_update_started: Arc::new(AtomicBool::new(false)),
+            http_client: http_client.clone(),
+            data_dir: dir.clone(),
+            idle_release_secs: config.idle_release_secs.unwrap_or(0),
+            download_in_progress: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Mutex::new(None)),
         });
-        let interval_hours = config.update_interval_hours;
         let idle_release_secs = config.idle_release_secs.unwrap_or(0);
         // 后台空闲释放：每 min(idle,60)s 检查一次，空闲超时自动释放 mmap 热页
         if idle_release_secs > 0 {
@@ -1200,84 +1223,43 @@ impl BangumiArchiveService {
             let _ = std::fs::create_dir_all(&dir);
             let db_path = dir.join("archive_index.db");
             let subjects_path = dir.join("subject.jsonlines");
-            let relations_path = dir.join("subject-relations.jsonlines");
-            let persons_path = dir.join("person.jsonlines");
-            let subject_persons_path = dir.join("subject-persons.jsonlines");
-            // 尝试打开现有索引 + mmap
-            let mut current: Option<Arc<BangumiArchiveStore>> = BangumiArchiveStore::open(
-                &db_path,
-                &subjects_path,
-                idle_release_secs,
-            )
-            .ok()
-                .map(|s| {
-                    let _ = s.init_schema();
-                    Arc::new(s)
-                })
-                .filter(|s| s.validate());
-            if let Some(s) = &current {
-                *store.write().unwrap() = Some(s.clone());
-                ready.store(true, Ordering::SeqCst);
-                tracing::info!("bangumi archive ready (existing index)");
+            // 尝试打开现有索引 + mmap（无条件：状态徽标/手动更新需要就绪）
+            if let Ok(s) = BangumiArchiveStore::open(&db_path, &subjects_path, idle_release_secs) {
+                let _ = s.init_schema();
+                if s.validate() {
+                    *store.write().unwrap() = Some(Arc::new(s));
+                    ready.store(true, Ordering::SeqCst);
+                    tracing::info!("bangumi archive ready (existing index)");
+                }
             }
-            // 首次构建 / 周期检查
+            opened.store(true, Ordering::SeqCst);
+        });
+        svc
+    }
+
+    /// 启动周期自动更新（幂等；interval=0 不启动）。
+    /// 复用 launch_update（与手动触发同一互斥通道）；间隔 interval，
+    /// 下载/构建失败后 15 分钟快速重试（旧库保留，provider 保持可用）。
+    pub fn start_auto_update(self: &Arc<Self>, interval_hours: u64) {
+        if interval_hours == 0 {
+            return;
+        }
+        if self.auto_update_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let svc = self.clone();
+        tokio::spawn(async move {
+            // 等打开现有数据完成后再开始周期检查（见 `opened` 注释：防 1224 竞态）
+            while !svc.opened.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
             let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
-            // 下载/构建失败后快速重试（而非等满 interval）：15 分钟
             let retry_delay = std::time::Duration::from_secs(15 * 60);
             loop {
-                let mut ok = true;
-                if current.is_none() {
-                    match download_and_rebuild(
-                        &http_client,
-                        &dir,
-                        &db_path,
-                        &subjects_path,
-                        &relations_path,
-                        &persons_path,
-                        &subject_persons_path,
-                        idle_release_secs,
-                    )
-                    .await
-                    {
-                        Ok(new_store) => {
-                            *store.write().unwrap() = Some(new_store.clone());
-                            current = Some(new_store);
-                            ready.store(true, Ordering::SeqCst);
-                            tracing::info!("bangumi archive ready (rebuilt)");
-                        }
-                        Err(e) => {
-                            ok = false;
-                            tracing::warn!("bangumi archive build failed: {e}; falling back to online");
-                        }
-                    }
-                } else if interval_hours > 0 {
-                    match check_update(
-                        &http_client,
-                        &dir,
-                        &db_path,
-                        &subjects_path,
-                        &relations_path,
-                        &persons_path,
-                        &subject_persons_path,
-                        idle_release_secs,
-                    )
-                    .await {
-                        Ok(Some(new_store)) => {
-                            *store.write().unwrap() = Some(new_store);
-                            tracing::info!("bangumi archive updated");
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            ok = false;
-                            tracing::warn!("bangumi archive update check failed: {e}");
-                        }
-                    }
-                }
-                // 失败后短间隔快速重试；成功恢复正常 interval
+                let ok = Self::wait_update(&svc).await;
                 tokio::time::sleep(if ok { interval } else { retry_delay }).await;
             }
         });
-        svc
     }
 
     /// 当前 store（未就绪/构建中 → None → 调用方回退在线 API）。
@@ -1291,45 +1273,174 @@ impl BangumiArchiveService {
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
     }
-}
 
-/// 检查 latest.json；需要更新时下载 → 解压 → 重建 → 返回新 store（原子替换）。
-async fn check_update(
-    http_client: &reqwest::Client,
-    dir: &Path,
-    db_path: &Path,
-    subjects_path: &Path,
-    relations_path: &Path,
-    persons_path: &Path,
-    subject_persons_path: &Path,
-    idle_release_secs: u64,
-) -> Result<Option<Arc<BangumiArchiveStore>>, ProviderError> {
-    let meta = fetch_latest_meta(http_client).await?;
-    let remote_time = meta.updated_at.unwrap_or_default();
-    if remote_time.is_empty() {
-        return Ok(None);
+    /// 最近一次成功更新的数据时间（远程 release `updated_at`，即离线数据版本）；
+    /// 未下载过 → None（WebUI 显示「未下载」）。对应 `MangaBakaDbMetadata.timestamp` 语义。
+    pub fn download_timestamp(&self) -> Option<String> {
+        std::fs::read_to_string(self.data_dir.join("last_updated"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.get()
+                    .and_then(|s| s.get_meta("last_updated"))
+                    .filter(|s| !s.is_empty())
+            })
     }
-    // 本地 last_updated 对比（远程早于等于本地 → 无需更新）
-    let store = BangumiArchiveStore::open(db_path, subjects_path, idle_release_secs)
-        .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
-    let local = store.get_meta("last_updated");
-    if let Some(local) = local {
-        if remote_after(&remote_time, &local).is_none_or(|b| !b) {
-            return Ok(None);
+
+    /// 启动（或复用进行中的）更新，返回进度事件流（对齐 `MangaBakaDbDownloader::launch_download`）。
+    pub fn launch_update(&self) -> tokio::sync::watch::Receiver<Option<DownloadProgress>> {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        if self
+            .download_in_progress
+            .compare_exchange(
+                false,
+                true,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            {
+                let mut guard = self.progress.lock().unwrap();
+                *guard = Some(sender.clone());
+            }
+            let this = self.clone();
+            tokio::spawn(async move {
+                let result = this.do_update(&sender).await;
+                // 失败必须发射 ErrorEvent 终态，否则路由层 watch 流等不到 Finished/Error 会一直挂起
+                if let Err(e) = &result {
+                    tracing::error!("bangumi archive update failed: {e}");
+                    let _ = sender.send(Some(DownloadProgress::ErrorEvent {
+                        message: e.clone(),
+                    }));
+                }
+                this.download_in_progress
+                    .store(false, Ordering::SeqCst);
+                let _ = result;
+            });
+        } else {
+            let guard = self.progress.lock().unwrap();
+            if let Some(current) = guard.as_ref() {
+                return current.subscribe();
+            }
+        }
+        receiver
+    }
+
+    /// 启动（或复用）更新并等待 Finished/Error 事件；返回是否成功（后台循环用）。
+    async fn wait_update(d: &Arc<Self>) -> bool {
+        let mut rx = d.launch_update();
+        loop {
+            // watch channel：事件变化后 changed() Ok；sender 全部 drop 后 Err（防悬挂）
+            if rx.changed().await.is_err() {
+                return false;
+            }
+            match rx.borrow().as_ref() {
+                Some(DownloadProgress::FinishedEvent) => return true,
+                Some(DownloadProgress::ErrorEvent { .. }) => return false,
+                _ => {}
+            }
         }
     }
-    download_and_rebuild(
-        http_client,
-        dir,
-        db_path,
-        subjects_path,
-        relations_path,
-        persons_path,
-        subject_persons_path,
-        idle_release_secs,
-    )
-    .await
-    .map(Some)
+
+    /// 单次更新：远程 meta → 本地 last_updated 对比（不新则跳过，不重复下载）→
+    /// 下载 → 解压 → 重建 → 原子替换 → 持久化更新时间。
+    async fn do_update(
+        &self,
+        sender: &tokio::sync::watch::Sender<Option<DownloadProgress>>,
+    ) -> Result<(), String> {
+        let emit = |sender: &tokio::sync::watch::Sender<Option<DownloadProgress>>,
+                    event: DownloadProgress| {
+            let _ = sender.send(Some(event));
+        };
+        let db_path = self.data_dir.join("archive_index.db");
+        let subjects_path = self.data_dir.join("subject.jsonlines");
+        let relations_path = self.data_dir.join("subject-relations.jsonlines");
+        let persons_path = self.data_dir.join("person.jsonlines");
+        let subject_persons_path = self.data_dir.join("subject-persons.jsonlines");
+
+        // 1. 远程 meta（latest.json：下载地址 / 更新时间 / 大小）
+        emit(
+            sender,
+            DownloadProgress::ProgressEvent {
+                total: 0,
+                completed: 0,
+                info: Some("checking bangumi archive update".to_string()),
+            },
+        );
+        let meta = fetch_latest_meta(&self.http_client)
+            .await
+            .map_err(|e| format!("bangumi archive meta: {e}"))?;
+        let remote_time = meta.updated_at.clone().unwrap_or_default();
+
+        // 2. 更新检测：本地索引存在且远程不晚于本地 → 跳过（不重复下载）。
+        //    远程无 updated_at 时无从判断（对齐旧 check_update：视为无需更新）。
+        if let Some(current) = self.get() {
+            if remote_time.is_empty() {
+                emit(
+                    sender,
+                    DownloadProgress::ProgressEvent {
+                        total: 0,
+                        completed: 0,
+                        info: Some("bangumi archive has no update info; skipping".to_string()),
+                    },
+                );
+                emit(sender, DownloadProgress::FinishedEvent);
+                return Ok(());
+            }
+            let local = current.get_meta("last_updated");
+            if let Some(local) = local {
+                if remote_after(&remote_time, &local).is_none_or(|b| !b) {
+                    emit(
+                        sender,
+                        DownloadProgress::ProgressEvent {
+                            total: 0,
+                            completed: 0,
+                            info: Some("bangumi archive is up to date".to_string()),
+                        },
+                    );
+                    emit(sender, DownloadProgress::FinishedEvent);
+                    return Ok(());
+                }
+            }
+        }
+
+        // 3. 下载 → 解压 → 重建（进度事件流；失败保留旧库，provider 不失效）。
+        //    重建前先释放旧 store 的 mmap：Windows 下目标文件被用户映射时覆盖写入报
+        //    os error 1224（ERROR_USER_MAPPED_FILE）；出槽置未就绪后，在途搜索短暂持有
+        //    Arc 的窗口由解压写入的短重试兜底（见 create_extracted_file）。
+        {
+            let mut guard = self.store.write().unwrap();
+            if guard.is_some() {
+                *guard = None;
+                self.ready.store(false, Ordering::SeqCst);
+            }
+        }
+        let emit_c = |event: DownloadProgress| emit(sender, event);
+        let emit_ref: Option<&(dyn Fn(DownloadProgress) + Send + Sync)> = Some(&emit_c);
+        let new_store = download_and_rebuild(
+            &self.data_dir,
+            &db_path,
+            &subjects_path,
+            &relations_path,
+            &persons_path,
+            &subject_persons_path,
+            self.idle_release_secs,
+            &meta,
+            emit_ref,
+        )
+        .await
+        .map_err(|e| format!("bangumi archive rebuild: {e}"))?;
+
+        // 4. 原子替换 + 持久化更新时间（download_timestamp 在 store 未打开时也能读）
+        *self.store.write().unwrap() = Some(new_store);
+        self.ready.store(true, Ordering::SeqCst);
+        let _ = std::fs::write(self.data_dir.join("last_updated"), &remote_time);
+        tracing::info!("bangumi archive ready (rebuilt)");
+        emit(sender, DownloadProgress::FinishedEvent);
+        Ok(())
+    }
 }
 
 fn remote_after(remote: &str, local: &str) -> Option<bool> {
@@ -1346,11 +1457,13 @@ fn remote_after(remote: &str, local: &str) -> Option<bool> {
 /// 下载 zip（支持断点续传）：`.tmp` 已存在时 Range 续传；GitHub release asset 支持 Range。
 /// 大小校验用 expected_size（GitHub API 的 size，即完整大小）：
 /// 206 续传时完整大小 = 已有 + 本次写入；200 全量时 = 本次写入。
+/// `on_progress(written_total, expected_total)`：下载字节进度回调（断点续传时 written 为累计值）。
 async fn download_zip(
     dl: &reqwest::Client,
     url: &str,
     tmp_zip: &Path,
     expected_size: Option<u64>,
+    on_progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
 ) -> Result<(), ProviderError> {
     use std::io::Write;
     let existing = std::fs::metadata(tmp_zip).map(|m| m.len()).unwrap_or(0);
@@ -1367,6 +1480,16 @@ async fn download_zip(
         ));
     }
     let resumed = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    // 进度总大小在消费流之前读取（bytes_stream 会 move response）：
+    // 206 时 Content-Length 是剩余字节，完整大小 = existing + 剩余
+    let progress_total = if resumed {
+        response
+            .content_length()
+            .map(|l| existing + l)
+            .or_else(|| expected_size)
+    } else {
+        response.content_length().or(expected_size)
+    };
     let mut file = std::io::BufWriter::new(if resumed {
         std::fs::OpenOptions::new().append(true).open(tmp_zip)
     } else {
@@ -1382,6 +1505,9 @@ async fn download_zip(
         written += chunk.len() as u64;
         file.write_all(&chunk)
             .map_err(|e| ProviderError::message(format!("archive write: {e}")))?;
+        if let Some(on_progress) = on_progress {
+            on_progress(existing + written, progress_total.unwrap_or(0));
+        }
     }
     file.flush()
         .map_err(|e| ProviderError::message(format!("archive flush: {e}")))?;
@@ -1399,37 +1525,44 @@ async fn download_zip(
     Ok(())
 }
 
-/// zip 下载指数退避重试：首次 + 3 次（5s/30s/120s）；中断续传只补剩余字节。
+/// zip 下载指数退避重试（公共工具）：首次 + 3 次（5s/30s/120s）；中断续传只补剩余字节。
 async fn download_zip_with_retry(
     dl: &reqwest::Client,
     url: &str,
     tmp_zip: &Path,
     expected_size: Option<u64>,
+    on_progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
 ) -> Result<(), ProviderError> {
-    const DELAYS: [u64; 3] = [5, 30, 120];
-    let mut attempt = 0u32;
-    loop {
-        match download_zip(dl, url, tmp_zip, expected_size).await {
-            Ok(()) => return Ok(()),
+    crate::util::download::with_retry("bangumi archive download", || {
+        download_zip(dl, url, tmp_zip, expected_size, on_progress)
+    })
+    .await
+}
+
+/// 覆盖写归档解压目标文件（短重试）：Windows 下目标被旧 store 的 mmap 占用时
+/// `File::create` 报 ERROR_USER_MAPPED_FILE（os error 1224）；最多 5 次 × 递增 200ms
+/// 等待在途搜索释放 Arc。同步实现：解压循环内不引入 await（`entry` 借用 `archive`，
+/// 跨 await 会导致 future 非 Send）。仅在 create 阶段重试（entry 流未被消费，重试不产生坏数据）。
+fn create_extracted_file(target: &Path, name: &str) -> Result<std::fs::File, ProviderError> {
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match std::fs::File::create(target) {
+            Ok(file) => return Ok(file),
             Err(e) => {
-                if attempt as usize >= DELAYS.len() {
-                    return Err(e);
-                }
-                tracing::warn!(
-                    "bangumi archive download attempt {} failed: {e}; retrying in {}s",
-                    attempt + 1,
-                    DELAYS[attempt as usize]
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(DELAYS[attempt as usize])).await;
-                attempt += 1;
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
             }
         }
     }
+    Err(ProviderError::message(format!(
+        "archive write {name}: {}",
+        last_err.unwrap()
+    )))
 }
 
 /// 下载 zip → 解压 → 全量重建 → 返回新 store。
+/// `meta` 为已获取的 latest.json（避免重复请求）；`emit` 输出进度事件（可选）。
 async fn download_and_rebuild(
-    http_client: &reqwest::Client,
     dir: &Path,
     db_path: &Path,
     subjects_path: &Path,
@@ -1437,13 +1570,22 @@ async fn download_and_rebuild(
     persons_path: &Path,
     subject_persons_path: &Path,
     idle_release_secs: u64,
+    meta: &LatestMeta,
+    emit: Option<&(dyn Fn(DownloadProgress) + Send + Sync)>,
 ) -> Result<Arc<BangumiArchiveStore>, ProviderError> {
-    let meta = fetch_latest_meta(http_client).await?;
     let url = meta
         .browser_download_url
+        .clone()
         .filter(|u| !u.is_empty())
         .ok_or_else(|| ProviderError::message("archive: no download url"))?;
     let expected_size = meta.size;
+    if let Some(emit) = emit {
+        emit(DownloadProgress::ProgressEvent {
+            total: 0,
+            completed: 0,
+            info: Some(format!("downloading {url}")),
+        });
+    }
     // zip 持久缓存（约 418MB）：同 size 时跳过重复下载（构建失败/重启不重下）
     let zip_path = dir.join("archive-latest.zip");
     let cached_ok = std::fs::metadata(&zip_path)
@@ -1451,19 +1593,36 @@ async fn download_and_rebuild(
         .unwrap_or(false);
     if !cached_ok {
         tracing::info!("downloading bangumi archive ({url})");
-        let dl = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3600))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ProviderError::message(format!("archive client: {e}")))?;
+        let dl = crate::util::download::long_download_client()
+            .map_err(ProviderError::message)?;
         let tmp_zip = zip_path.with_extension("tmp");
-        download_zip_with_retry(&dl, &url, &tmp_zip, expected_size).await?;
+        // 字节进度 → ProgressEvent（闭包借用 emit/url，生命周期与本次调用一致）
+        let emit_c = emit;
+        let url_c = url.clone();
+        let progress_emitter: &(dyn Fn(u64, u64) + Send + Sync) = &move |written, total| {
+            if let Some(f) = emit_c {
+                f(DownloadProgress::ProgressEvent {
+                    total: total as i64,
+                    completed: written as i64,
+                    info: Some(url_c.clone()),
+                });
+            }
+        };
+        download_zip_with_retry(&dl, &url, &tmp_zip, expected_size, Some(progress_emitter))
+            .await?;
         std::fs::rename(&tmp_zip, &zip_path)
             .map_err(|e| ProviderError::message(format!("archive move: {e}")))?;
     } else {
         tracing::info!("bangumi archive zip cache hit ({} bytes)", expected_size.unwrap_or(0));
     }
     // 解压（zip crate 读取时自动校验 CRC）
+    if let Some(emit) = emit {
+        emit(DownloadProgress::ProgressEvent {
+            total: 0,
+            completed: 0,
+            info: Some("extracting archive".to_string()),
+        });
+    }
     let zip_file = std::fs::File::open(&zip_path)
         .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
     let mut archive = zip::ZipArchive::new(zip_file).map_err(|e| {
@@ -1492,9 +1651,9 @@ async fn download_and_rebuild(
             None
         };
         if let Some(target) = target {
-            let mut out = std::io::BufWriter::new(std::fs::File::create(target).map_err(
-                |e| ProviderError::message(format!("archive write {name}: {e}")),
-            )?);
+            // Windows：旧 store 仍被在途搜索短暂映射时 File::create 报 os error 1224；
+            // 短重试（最多 5 次，累计约 2s）等待 Arc 释放。entry 流不消费，重试安全。
+            let mut out = std::io::BufWriter::new(create_extracted_file(target, name.as_str())?);
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| ProviderError::message(format!("archive extract {name}: {e}")))?;
             match name.as_str() {
@@ -1513,6 +1672,13 @@ async fn download_and_rebuild(
         ));
     }
     // 重建索引
+    if let Some(emit) = emit {
+        emit(DownloadProgress::ProgressEvent {
+            total: 0,
+            completed: 0,
+            info: Some("building index".to_string()),
+        });
+    }
     let new_store = BangumiArchiveStore::open(db_path, subjects_path, idle_release_secs)
         .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
     new_store
@@ -1521,7 +1687,7 @@ async fn download_and_rebuild(
     let (subj, rel, persons, sp) = new_store
         .build(subjects_path, relations_path, persons_path, subject_persons_path)
         .map_err(|e| ProviderError::message(format!("archive build: {e}")))?;
-    new_store.set_meta("last_updated", &meta.updated_at.unwrap_or_default());
+    new_store.set_meta("last_updated", &meta.updated_at.clone().unwrap_or_default());
     tracing::info!(
         "bangumi archive rebuilt: {subj} subjects, {rel} relations, {persons} persons, {sp} subject-persons"
     );

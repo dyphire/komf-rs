@@ -256,6 +256,10 @@ pub struct MetadataProvidersConfigDto {
     pub library_providers: Option<std::collections::HashMap<String, Option<ProvidersConfigDto>>>,
     pub manga_baka_database: Option<MangaBakaDatabaseDto>,
     pub book_walker_download_date: Option<String>,
+    /// bangumi/Archive 离线数据源（Rust 扩展）：下载状态/更新时间。
+    pub bangumi_database: Option<BangumiDatabaseDto>,
+    /// e-hentai-db 离线数据源（Rust 扩展）：下载状态/更新时间。
+    pub ehentai_database: Option<EHentaiDatabaseDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +267,22 @@ pub struct MetadataProvidersConfigDto {
 pub struct MangaBakaDatabaseDto {
     pub download_timestamp: String,
     pub checksum: String,
+}
+
+/// bangumi/Archive 离线数据库状态（Rust 扩展，对齐 `MangaBakaDatabaseDto` 语义）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BangumiDatabaseDto {
+    /// 最近一次成功更新的数据时间（远程 release `updated_at`）；未下载过 → 字段缺省。
+    pub download_timestamp: String,
+}
+
+/// e-hentai-db 离线数据库状态（Rust 扩展，对齐 `MangaBakaDatabaseDto` 语义）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EHentaiDatabaseDto {
+    /// 最近一次成功更新的数据时间（远端 release asset Last-Modified）；未下载过 → 字段缺省。
+    pub download_timestamp: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

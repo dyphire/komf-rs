@@ -38,7 +38,7 @@ fn deprecated_metadata_routes(kind: ServerKind) -> Router<SharedState> {
 
 async fn get_config(State(state): State<SharedState>) -> Response {
     let state = state.read().unwrap();
-    Json(mappers::to_config_dto(&state.config, None, None, None)).into_response()
+    Json(mappers::to_config_dto(&state.config, None, None, None, None, None)).into_response()
 }
 
 async fn update_config(

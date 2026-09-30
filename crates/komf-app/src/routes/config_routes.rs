@@ -3,7 +3,7 @@ use crate::mappers;
 use crate::routes::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use komf_api_models::config::{DownloadProgress, KomfConfigUpdateRequest};
@@ -14,6 +14,8 @@ pub fn router() -> Router<SharedState> {
         .route("/config", get(get_config).patch(update_config))
         .route("/update-manga-baka-db", axum::routing::post(update_manga_baka_db))
         .route("/update-book-walker-db", axum::routing::post(update_book_walker_db))
+        .route("/update-bangumi-db", axum::routing::post(update_bangumi_db))
+        .route("/update-ehentai-db", axum::routing::post(update_ehentai_db))
 }
 
 async fn get_config(State(state): State<SharedState>) -> impl IntoResponse {
@@ -29,11 +31,15 @@ async fn get_config(State(state): State<SharedState>) -> impl IntoResponse {
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty());
     let book_walker_timestamp = state.book_walker_db_downloader.download_timestamp();
+    let bangumi_timestamp = state.bangumi_archive.as_ref().and_then(|a| a.download_timestamp());
+    let ehentai_timestamp = state.ehentai_archive.as_ref().and_then(|a| a.download_timestamp());
     Json(mappers::to_config_dto(
         &state.config,
         manga_baka_timestamp.as_deref(),
         manga_baka_checksum.as_deref(),
         book_walker_timestamp.as_deref(),
+        bangumi_timestamp.as_deref(),
+        ehentai_timestamp.as_deref(),
     ))
 }
 
@@ -73,6 +79,27 @@ async fn update_book_walker_db(State(state): State<SharedState>) -> impl IntoRes
     let downloader = state.book_walker_db_downloader.clone();
     drop(state);
     download_to_jsonl(move |_| downloader.launch_download())
+}
+
+/// Rust 扩展：bangumi/Archive 离线 DB 手动更新（与 Kotlin `updateMangaBakaDB` 同事件流语义）。
+/// archive 未启用（服务未创建）→ 404，客户端表现与 MangaBaka 库缺失一致。
+async fn update_bangumi_db(State(state): State<SharedState>) -> Response {
+    let state = state.read().unwrap();
+    let Some(archive) = state.bangumi_archive.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    drop(state);
+    download_to_jsonl(move |_| archive.launch_update()).into_response()
+}
+
+/// Rust 扩展：e-hentai-db 离线 DB 手动更新（同 `updateBangumiDb` 语义）。
+async fn update_ehentai_db(State(state): State<SharedState>) -> Response {
+    let state = state.read().unwrap();
+    let Some(archive) = state.ehentai_archive.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    drop(state);
+    download_to_jsonl(move |_| archive.launch_update()).into_response()
 }
 
 /// 将下载事件流转换为 `application/jsonl` 响应体（一行一个事件 JSON）。

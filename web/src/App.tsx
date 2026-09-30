@@ -1,5 +1,5 @@
 import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ServerKind, streamJobEvents, updateDb } from './api';
+import { api, DbKind, ServerKind, streamJobEvents, updateDb } from './api';
 import { diff, isEmptyPatch } from './diff';
 import { useLang } from './i18n';
 import * as YAML from 'yaml';
@@ -923,8 +923,8 @@ export default function App() {
     });
   };
 
-  /** 触发 MangaBaka/BookWalker 离线 DB 下载（jsonl 进度流 → 进度条；完成后重载刷新徽标） */
-  async function runDbDownload(kind: 'manga-baka' | 'book-walker') {
+  /** 触发 MangaBaka/BookWalker/Bangumi/EHentai 离线 DB 下载（jsonl 进度流 → 进度条；完成后重载刷新徽标） */
+  async function runDbDownload(kind: DbKind) {
     if (dbBusy) return;
     setDbBusy(kind);
     setDbErr(null);
@@ -1244,6 +1244,8 @@ export default function App() {
                 <span className="badge">nameMatchingMode: {draft.metadataProviders?.nameMatchingMode ?? '-'}</span>
                 <span className="badge">{t('ov.mangaBakaDb', { v: draft.metadataProviders?.mangaBakaDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
                 <span className="badge">{t('ov.bookWalkerDb', { v: draft.metadataProviders?.bookWalkerDownloadDate ?? t('db.undownloaded') })}</span>
+                <span className="badge">{t('ov.bangumiDb', { v: draft.metadataProviders?.bangumiDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
+                <span className="badge">{t('ov.ehentaiDb', { v: draft.metadataProviders?.ehentaiDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
               </div>
             </div>
             <div className="card">
@@ -1378,6 +1380,10 @@ export default function App() {
                 <button className="btn" disabled={!!dbBusy} onClick={() => runDbDownload('manga-baka')}>{dbBusy === 'manga-baka' ? t('db.downloading') : t('db.downloadDb')}</button>
                 <span className="badge">{t('ov.bookWalkerDb', { v: draft.metadataProviders?.bookWalkerDownloadDate ?? t('db.undownloaded') })}</span>
                 <button className="btn" disabled={!!dbBusy} onClick={() => runDbDownload('book-walker')}>{dbBusy === 'book-walker' ? t('db.downloading') : t('db.downloadDb')}</button>
+                <span className="badge">{t('ov.bangumiDb', { v: draft.metadataProviders?.bangumiDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
+                <button className="btn" disabled={!!dbBusy} onClick={() => runDbDownload('bangumi')}>{dbBusy === 'bangumi' ? t('db.downloading') : t('db.downloadDb')}</button>
+                <span className="badge">{t('ov.ehentaiDb', { v: draft.metadataProviders?.ehentaiDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
+                <button className="btn" disabled={!!dbBusy} onClick={() => runDbDownload('ehentai')}>{dbBusy === 'ehentai' ? t('db.downloading') : t('db.downloadDb')}</button>
               </div>
               {dbBusy && dbProg?.kind === dbBusy && (
                 <div className="db-prog">
@@ -1411,6 +1417,8 @@ export default function App() {
                 <Field label={t('f.updateModes')}><MultiSelect value={mu.updateModes} options={UPDATE_MODES} onChange={(v) => upd([s, ...b, 'updateModes'], v)} /></Field>
                 <SwitchField label="postProcessing.seriesTitle" value={mu.postProcessing?.seriesTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitle'], v)} />
                 <Field label="seriesTitleLanguage"><Text value={mu.postProcessing?.seriesTitleLanguage ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'seriesTitleLanguage'], v || null)} placeholder="en/zh/null" /></Field>
+                <SwitchField label="postProcessing.alternativeSeriesTitles" value={mu.postProcessing?.alternativeSeriesTitles} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitles'], v)} />
+                <Field label={t('f.altSeriesTitleLangs')}><CommaField value={mu.postProcessing?.alternativeSeriesTitleLanguages} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitleLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
                 <SwitchField label="orderBooks" value={mu.postProcessing?.orderBooks} onChange={(v) => upd([s, ...b, 'postProcessing', 'orderBooks'], v)} />
                 <Field label="readingDirectionValue"><Text value={mu.postProcessing?.readingDirectionValue ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'readingDirectionValue'], v || null)} placeholder="null/LEFT_TO_RIGHT/…" /></Field>
                 <Field label="languageValue"><Text value={mu.postProcessing?.languageValue ?? ''} onChange={(v) => upd([s, ...b, 'postProcessing', 'languageValue'], v || null)} placeholder="null/zh/en" /></Field>
@@ -1426,8 +1434,6 @@ export default function App() {
                   <SwitchField label="mylarCovers" value={mu.mylarCovers} onChange={(v) => upd([s, ...b, 'mylarCovers'], v)} />
                   <Field label={t('f.mylarOutputDir')}><TriText value={getPath(draft, [s, ...b, 'mylarOutputDir'])} onChange={(v) => upd([s, ...b, 'mylarOutputDir'], v)} placeholder={t('ph.mylarOutputDir')} /></Field>
                   <Field label={t('f.failedMatchCollectionName')}><TriText value={getPath(draft, [s, ...b, 'failedMatchCollectionName'])} onChange={(v) => upd([s, ...b, 'failedMatchCollectionName'], v)} placeholder={t('ph.failedMatchCollection')} /></Field>
-                  <SwitchField label="postProcessing.alternativeSeriesTitles" value={mu.postProcessing?.alternativeSeriesTitles} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitles'], v)} />
-                  <Field label={t('f.altSeriesTitleLangs')}><CommaField value={mu.postProcessing?.alternativeSeriesTitleLanguages} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternativeSeriesTitleLanguages'], v)} placeholder={t('ph.exJaZh')} /></Field>
                   <SwitchField label="postProcessing.fallbackToAltTitle" value={mu.postProcessing?.fallbackToAltTitle} onChange={(v) => upd([s, ...b, 'postProcessing', 'fallbackToAltTitle'], v)} />
                   <Field label={t('f.originalPublisherTagName')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'originalPublisherTagName'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'originalPublisherTagName'], v)} /></Field>
                   <SwitchField label="postProcessing.linksSkipEnabled" value={mu.postProcessing?.linksSkipEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksSkipEnabled'], v)} />

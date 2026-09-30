@@ -166,10 +166,11 @@ export async function streamJobEvents(
   dispatch();
 }
 
-/** 触发离线 DB 下载（MangaBaka/BookWalker）：POST /api/update-*-db，响应为 NDJSON 进度流。
+/** 触发离线 DB 下载（MangaBaka/BookWalker/Bangumi/EHentai）：POST /api/update-*-db，响应为 NDJSON 进度流。
  *  每行一个事件：{"type":"ProgressEvent","total","completed","info"} / {"type":"FinishedEvent"} / {"type":"ErrorEvent","message"} */
+export type DbKind = 'manga-baka' | 'book-walker' | 'bangumi' | 'ehentai';
 export async function updateDb(
-  kind: 'manga-baka' | 'book-walker',
+  kind: DbKind,
   onEvent: (ev: { type: string; total?: number; completed?: number; info?: string | null; message?: string }) => void,
   signal?: AbortSignal,
 ): Promise<void> {

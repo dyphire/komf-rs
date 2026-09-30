@@ -2271,6 +2271,14 @@ impl MangaBakaDbDownloader {
             let this = self.clone();
             tokio::spawn(async move {
                 let result = this.do_download(&sender).await;
+                // 对齐 BookWalker/Kotlin：失败必须发射 ErrorEvent 终态，
+                // 否则路由层 watch 流等不到 Finished/Error 会一直挂起（表现为断流/失败）。
+                if let Err(e) = &result {
+                    tracing::error!("MangaBaka database download failed: {e}");
+                    let _ = sender.send(Some(DownloadProgress::ErrorEvent {
+                        message: e.clone(),
+                    }));
+                }
                 // 容错：失败残留的临时文件清理（成功路径已 rename，此清理无害）
                 let _ = std::fs::remove_file(PathBuf::from(format!(
                     "{}.tmp",
@@ -2344,17 +2352,10 @@ impl MangaBakaDbDownloader {
                 info: Some(MANGA_BAKA_CHECKSUM_URL.to_string()),
             },
         );
-        let new_checksum = self
-            .http
-            .get(MANGA_BAKA_CHECKSUM_URL)
-            .send()
-            .await
-            .map_err(|e| format!("HttpRequestException: {e}"))?
-            .text()
-            .await
-            .map_err(|e| format!("HttpRequestException: {e}"))?
-            .trim()
-            .to_string();
+        // 小请求重试走公共工具（`util::download`，与 bangumi/ehentai/bookwalker 同口径）。
+        let new_checksum =
+            crate::util::download::fetch_text_with_retry(&self.http, MANGA_BAKA_CHECKSUM_URL, "mangabaka")
+                .await?;
         if self.database_file.exists() && self.metadata_valid() {
             let stored = std::fs::read_to_string(self.work_dir.join("checksum.sha1"))
                 .unwrap_or_default()
@@ -2370,7 +2371,10 @@ impl MangaBakaDbDownloader {
         let _ = std::fs::create_dir_all(&self.work_dir);
         let tmp_file = PathBuf::from(format!("{}.tmp", self.database_file.display()));
 
-        // 2. 下载压缩包
+        // 2. 下载压缩包（对齐 bangumi archive）：
+        // - 专用长超时 client（共享 client 60s 总超时，大文件必断）；
+        // - 指数退避重试（首次 + 3 次 5s/30s/120s）；
+        // - Range 断点续传（服务端不支持则从头下）。
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -2379,50 +2383,34 @@ impl MangaBakaDbDownloader {
                 info: Some(MANGA_BAKA_DB_URL.to_string()),
             },
         );
-        let response = self
-            .http
-            .get(MANGA_BAKA_DB_URL)
-            .send()
-            .await
-            .map_err(|e| format!("HttpRequestException: {e}"))?;
-        if !response.status().is_success() {
-            return Err(format!("ResponseException: {}", response.status()));
-        }
-        let total = response.content_length().unwrap_or(0) as i64;
-        emit(
-            sender,
-            DownloadProgress::ProgressEvent {
-                total,
-                completed: 0,
-                info: Some(MANGA_BAKA_DB_URL.to_string()),
+        let dl_client = crate::util::download::long_download_client()?;
+        crate::util::download::download_with_retry(
+            &dl_client,
+            MANGA_BAKA_DB_URL,
+            &self.database_archive,
+            "mangabaka archive download",
+            &|total: i64, completed: i64| {
+                emit(
+                    sender,
+                    DownloadProgress::ProgressEvent {
+                        total,
+                        completed,
+                        info: Some(MANGA_BAKA_DB_URL.to_string()),
+                    },
+                )
             },
-        );
-        let mut stream = response.bytes_stream();
-        let mut file = tokio::fs::File::create(&self.database_archive)
-            .await
-            .map_err(|e| format!("FileSystemException: {e}"))?;
-        let mut completed: i64 = 0;
-        use futures::StreamExt;
-        use tokio::io::AsyncWriteExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("HttpRequestException: {e}"))?;
-            completed += chunk.len() as i64;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("FileSystemException: {e}"))?;
-            emit(
-                sender,
-                DownloadProgress::ProgressEvent {
-                    total,
-                    completed,
-                    info: Some(MANGA_BAKA_DB_URL.to_string()),
-                },
-            );
-        }
-        file.flush()
-            .await
-            .map_err(|e| format!("FileSystemException: {e}"))?;
-        drop(file);
+            &|attempt: usize, delay: u64, err: &str| {
+                emit(
+                    sender,
+                    DownloadProgress::ProgressEvent {
+                        total: 0,
+                        completed: 0,
+                        info: Some(format!("retrying in {delay}s ({attempt}/3): {err}")),
+                    },
+                )
+            },
+        )
+        .await?;
 
         // 3. 解压（tar + gzip，取首个条目）——对应 Kotlin `extractDatabaseFile`
         emit(
@@ -2521,20 +2509,17 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let response = self
-                .http
-                .get("https://api.mangabaka.org/v1/tags")
-                .send()
-                .await
-                .map_err(|e| format!("HttpRequestException: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!("ResponseException: {}", response.status()));
-            }
-            let response: MangaBakaTagsResponse = response
-                .json()
-                .await
+            // tags 小请求同样重试；写 tmp_file（原子替换前），此前误写旧库会导致
+            // 首装 `no such table: tags` 必失败、增量时标签丢失。
+            let text = crate::util::download::fetch_text_with_retry(
+                &self.http,
+                "https://api.mangabaka.org/v1/tags",
+                "mangabaka",
+            )
+            .await?;
+            let response: MangaBakaTagsResponse = serde_json::from_str(&text)
                 .map_err(|e| format!("SerializationException: {e}"))?;
-            let conn = rusqlite::Connection::open(&self.database_file)
+            let conn = rusqlite::Connection::open(&tmp_file)
                 .map_err(|e| format!("SQLiteException: {e}"))?;
             for tag in response.data {
                 conn.execute(
@@ -2571,7 +2556,8 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let conn = rusqlite::Connection::open(&self.database_file)
+            // 同上：必须写 tmp_file，否则 rename 后关联丢失。
+            let conn = rusqlite::Connection::open(&tmp_file)
                 .map_err(|e| format!("SQLiteException: {e}"))?;
             conn.execute_batch(
                 "INSERT INTO series_tags
@@ -2627,6 +2613,7 @@ impl MangaBakaDbDownloader {
         emit(sender, DownloadProgress::FinishedEvent);
         Ok(())
     }
+
 }
 
 impl Clone for MangaBakaDbDownloader {

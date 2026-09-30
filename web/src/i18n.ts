@@ -94,6 +94,8 @@ const dict: Record<string, { zh: string; en: string }> = {
   'ov.enabledProviders': { zh: '启用 Provider {a}/{b}', en: 'Providers enabled {a}/{b}' },
   'ov.mangaBakaDb': { zh: 'MangaBaka DB: {v}', en: 'MangaBaka DB: {v}' },
   'ov.bookWalkerDb': { zh: 'BookWalker DB: {v}', en: 'BookWalker DB: {v}' },
+  'ov.bangumiDb': { zh: 'Bangumi DB: {v}', en: 'Bangumi DB: {v}' },
+  'ov.ehentaiDb': { zh: 'EHentai DB: {v}', en: 'EHentai DB: {v}' },
   'ov.search': { zh: '搜索试跑', en: 'Search trial' },
   'ov.searchDesc': { zh: '直接调后端搜索，验证当前启用 Provider 与优先级。填系列 ID 后每条结果可一键设元数据(identify)。', en: 'Search the backend directly to verify enabled providers and priority. Fill in a series ID to identify any result with one click.' },
   'allLibs': { zh: '全部库', en: 'All libraries' },

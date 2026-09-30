@@ -19,7 +19,7 @@ use crate::model::{
     SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
 use crate::providers::ehentai_archive::{EHentaiArchiveService, GalleryRow};
-use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
+use crate::providers::{CoreProviders, MetadataProvider, OfflineArchive, ProviderError};
 use crate::util::NameSimilarityMatcher;
 
 const API_URL: &str = "https://api.e-hentai.org/api.php";
@@ -2038,6 +2038,7 @@ pub fn create_provider(
     default_name_matcher: NameSimilarityMatcher,
     http_client: &reqwest::Client,
     work_dir: Option<&std::path::Path>,
+    archive: Option<std::sync::Arc<EHentaiArchiveService>>,
 ) -> Option<EHentaiMetadataProvider> {
     if !config.enabled {
         return None;
@@ -2119,17 +2120,9 @@ pub fn create_provider(
             }
         });
     }
-    // e-hentai-db 离线数据源：enabled 时启动后台下载/解压（tokio::spawn 非阻塞）。
-    // 数据文件：配置 dbFile → workDir/ehentai/e-hentai.db。
-    let archive = if config.archive.enabled {
-        Some(EHentaiArchiveService::start(
-            &config.archive,
-            http_client.clone(),
-            work_dir,
-        ))
-    } else {
-        None
-    };
+    // e-hentai-db 离线数据源：全局唯一实例由 `ProvidersModule::with_oauth` 创建并传入
+    // （数据文件全局一份；库级容器共享同一服务。provider 禁用但 archive 启用时，服务经
+    // `MetadataProvidersContainer` 侧通道注册，状态徽标 / 手动更新仍可用）。
     Some(EHentaiMetadataProvider {
         client,
         metadata_mapper: EHentaiMetadataMapper::with_options(
@@ -2224,6 +2217,10 @@ impl MetadataProvider for EHentaiMetadataProvider {
 
     fn alternative_titles_enabled(&self) -> bool {
         self.metadata_mapper.metadata_config.alternative_titles
+    }
+
+    fn offline_archive(&self) -> Option<OfflineArchive> {
+        self.archive.clone().map(OfflineArchive::EHentai)
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {

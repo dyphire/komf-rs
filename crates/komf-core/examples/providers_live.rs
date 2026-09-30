@@ -91,6 +91,7 @@ async fn main() {
             &http,
             None,
             None,
+            None, // archive（全局服务由 ProvidersModule 创建；example 走在线 API）
         );
         run(&p, "Bangumi").await;
     }

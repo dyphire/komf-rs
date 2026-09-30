@@ -73,7 +73,17 @@ async fn main() {
         Err(e) => println!("store open ERR: {e}"),
     }
 
-    // provider（archive enabled）
+    // provider（archive enabled）：全局服务现由 ProvidersModule 创建，example 自行创建后传入
+    let archive = Some(komf_core::providers::bangumi_archive::BangumiArchiveService::start(
+        &BangumiArchiveConfig {
+            enabled: true,
+            dir: Some(ARCHIVE_DIR.to_string()),
+            update_interval_hours: 0,
+            idle_release_secs: None,
+        },
+        http.clone(),
+        std::path::PathBuf::from(ARCHIVE_DIR),
+    ));
     let p = komf_core::providers::bangumi::create_provider(
         &BangumiConfig {
             provider: ProviderConfig {
@@ -94,6 +104,7 @@ async fn main() {
         &http,
         None,
         None,
+        archive,
     )
     .expect("provider create failed");
 

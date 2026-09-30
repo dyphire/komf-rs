@@ -39,6 +39,10 @@ pub struct AppState {
     /// MangaBaka 管理 API 仓储（link/unlink/tags/系列详情；数据库文件存在时启用）。
     pub manga_baka_repository: Option<Arc<komf_core::providers::mangabaka::MangaBakaDbRepository>>,
     pub book_walker_db_downloader: Arc<komf_core::providers::bookwalker::BookWalkerDbDownloader>,
+    /// bangumi/Archive 离线数据源（`/api/update-bangumi-db` 与 `/config` 时间戳；未启用 → None）。
+    pub bangumi_archive: Option<Arc<komf_core::providers::bangumi_archive::BangumiArchiveService>>,
+    /// e-hentai-db 离线数据源（`/api/update-ehentai-db` 与 `/config` 时间戳；未启用 → None）。
+    pub ehentai_archive: Option<Arc<komf_core::providers::ehentai_archive::EHentaiArchiveService>>,
     /// OAuth 管理器（AniList/MAL/Bangumi 登录/状态/退出路由用；热重载复用同一实例）。
     pub oauth_manager: Arc<komf_core::oauth::OAuthManager>,
     /// Tracker 服务（AniList/MAL/Bangumi 阅读状态同步；复用 OAuth token）。
@@ -75,6 +79,8 @@ impl AppState {
         manga_baka_db_downloader: Arc<komf_core::providers::mangabaka::MangaBakaDbDownloader>,
         manga_baka_repository: Option<Arc<komf_core::providers::mangabaka::MangaBakaDbRepository>>,
         book_walker_db_downloader: Arc<komf_core::providers::bookwalker::BookWalkerDbDownloader>,
+        bangumi_archive: Option<Arc<komf_core::providers::bangumi_archive::BangumiArchiveService>>,
+        ehentai_archive: Option<Arc<komf_core::providers::ehentai_archive::EHentaiArchiveService>>,
         oauth_manager: Arc<komf_core::oauth::OAuthManager>,
         tracker_services: Arc<komf_core::trackers::TrackerServices>,
     ) -> Self {
@@ -98,6 +104,8 @@ impl AppState {
             manga_baka_db_downloader,
             manga_baka_repository,
             book_walker_db_downloader,
+            bangumi_archive,
+            ehentai_archive,
             oauth_manager,
             tracker_services,
             _module: module,

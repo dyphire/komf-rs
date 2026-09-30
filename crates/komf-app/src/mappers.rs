@@ -21,6 +21,8 @@ pub fn to_config_dto(
     manga_baka_timestamp: Option<&str>,
     manga_baka_checksum: Option<&str>,
     book_walker_timestamp: Option<&str>,
+    bangumi_timestamp: Option<&str>,
+    ehentai_timestamp: Option<&str>,
 ) -> KomfConfig {
     KomfConfig {
         komga: to_komga_dto(&config.komga),
@@ -32,6 +34,8 @@ pub fn to_config_dto(
             manga_baka_timestamp,
             manga_baka_checksum,
             book_walker_timestamp,
+            bangumi_timestamp,
+            ehentai_timestamp,
         ),
     }
 }
@@ -315,6 +319,8 @@ fn to_metadata_providers_dto(
     manga_baka_timestamp: Option<&str>,
     manga_baka_checksum: Option<&str>,
     book_walker_timestamp: Option<&str>,
+    bangumi_timestamp: Option<&str>,
+    ehentai_timestamp: Option<&str>,
 ) -> MetadataProvidersConfigDto {
     // 对应 Kotlin：`MangaBakaDatabaseDto` 仅当元数据有效（timestamp+checksum 均存在）时给出
     let manga_baka_database = match (manga_baka_timestamp, manga_baka_checksum) {
@@ -324,6 +330,13 @@ fn to_metadata_providers_dto(
         }),
         _ => None,
     };
+    // bangumi/ehentai：仅在 archive 服务就绪且有更新时间时给出（缺省 → WebUI 显示「未下载」）
+    let bangumi_database = bangumi_timestamp.map(|timestamp| BangumiDatabaseDto {
+        download_timestamp: timestamp.to_string(),
+    });
+    let ehentai_database = ehentai_timestamp.map(|timestamp| EHentaiDatabaseDto {
+        download_timestamp: timestamp.to_string(),
+    });
     MetadataProvidersConfigDto {
         // 对齐 Kotlin AppConfigMapper.toDto(MetadataProvidersConfig)：
         // malClientId 长度 <32 → "********"，否则保留前 4 字符、其余打码；
@@ -355,6 +368,8 @@ fn to_metadata_providers_dto(
         ),
         manga_baka_database,
         book_walker_download_date: book_walker_timestamp.map(str::to_string),
+        bangumi_database,
+        ehentai_database,
     }
 }
 
@@ -1584,7 +1599,7 @@ mod tests {
         assert_eq!(config.komga.komga_password, "s3cret");
 
         // GET DTO 序列化不得输出密码（脚本 passwordDisabled 判定契约）
-        let dto = to_config_dto(&config, None, None, None);
+        let dto = to_config_dto(&config, None, None, None, None, None);
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("komgaPassword"));
         assert!(!json.contains("s3cret"));
@@ -1723,7 +1738,7 @@ mod tests {
         assert_eq!(updated.komga.event_listener.metadata_series_exclude_filter, vec!["excluded-series"]);
 
         // GET 输出仍用 metadataSeriesExcludeFilter，且不带 PATCH 专用字段
-        let dto = to_config_dto(&updated, None, None, None);
+        let dto = to_config_dto(&updated, None, None, None, None, None);
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("metadataSeriesExcludeFilter"));
         assert!(!json.contains("metadataExcludeSeriesFilter"));
@@ -1763,7 +1778,7 @@ mod tests {
             Some("en")
         );
         // GET DTO 输出 en（序列化链路）
-        let dto = to_config_dto(&updated, None, None, None);
+        let dto = to_config_dto(&updated, None, None, None, None, None);
         let json = serde_json::to_string(&dto).unwrap();
         assert!(
             json.contains("\"seriesTitleLanguage\":\"en\""),
@@ -1776,7 +1791,7 @@ mod tests {
         .unwrap();
         let updated = apply_config_update(updated, &request);
         assert_eq!(updated.komga.metadata_update.default.post_processing.series_title_language, None);
-        let dto = to_config_dto(&updated, None, None, None);
+        let dto = to_config_dto(&updated, None, None, None, None, None);
         let value = serde_json::to_value(&dto).unwrap();
         let komga_lang = value["komga"]["metadataUpdate"]["default"]["postProcessing"]["seriesTitleLanguage"]
             .as_str()
@@ -1809,10 +1824,40 @@ mod tests {
         assert_eq!(config2.stump.api_key, "key-123");
 
         // GET：输出 stump 段、不输出凭据
-        let dto = to_config_dto(&config2, None, None, None);
+        let dto = to_config_dto(&config2, None, None, None, None, None);
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"stump\""), "GET must output stump section, got {json}");
         assert!(!json.contains("s3cret"));
         assert!(!json.contains("key-123"));
+    }
+
+    /// bangumi/ehentai 离线 DB 状态（Rust 扩展）：时间戳映射进 DTO；无时间戳 → 字段缺省（WebUI 显示「未下载」）。
+    #[test]
+    fn offline_db_timestamps_map_to_dto() {
+        let dto = to_config_dto(&AppConfig::default(), None, None, None, None, None);
+        assert!(dto.metadata_providers.bangumi_database.is_none());
+        assert!(dto.metadata_providers.ehentai_database.is_none());
+
+        let dto = to_config_dto(
+            &AppConfig::default(),
+            None,
+            None,
+            None,
+            Some("2025-09-30T12:00:00Z"),
+            Some("2025-09-30T12:00:00Z"),
+        );
+        assert_eq!(
+            dto.metadata_providers.bangumi_database.as_ref().map(|d| d.download_timestamp.as_str()),
+            Some("2025-09-30T12:00:00Z")
+        );
+        assert_eq!(
+            dto.metadata_providers.ehentai_database.as_ref().map(|d| d.download_timestamp.as_str()),
+            Some("2025-09-30T12:00:00Z")
+        );
+
+        // GET JSON 字段名 camelCase
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"bangumiDatabase\":{\"downloadTimestamp\":\"2025-09-30T12:00:00Z\"}"), "{json}");
+        assert!(json.contains("\"ehentaiDatabase\":{\"downloadTimestamp\":\"2025-09-30T12:00:00Z\"}"), "{json}");
     }
 }

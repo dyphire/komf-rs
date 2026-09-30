@@ -128,6 +128,14 @@ impl fmt::Display for CoreProviders {
     }
 }
 
+/// 离线数据源句柄（bangumi/Archive、e-hentai-db）—— 供 app 层查询下载状态 / 手动触发更新。
+/// provider 内部启动后台服务后，通过 `MetadataProvider::offline_archive` 暴露。
+#[derive(Clone)]
+pub enum OfflineArchive {
+    Bangumi(Arc<bangumi_archive::BangumiArchiveService>),
+    EHentai(Arc<ehentai_archive::EHentaiArchiveService>),
+}
+
 /// 元数据提供者接口 —— 对应 `MetadataProvider.kt`。
 #[async_trait::async_trait]
 pub trait MetadataProvider: Send + Sync {
@@ -173,6 +181,12 @@ pub trait MetadataProvider: Send + Sync {
     /// 默认 true（保持既有行为）；各 provider 返回自身 `SeriesMetadataConfig.alternative_titles`。
     fn alternative_titles_enabled(&self) -> bool {
         true
+    }
+
+    /// 本 provider 的离线数据源（bangumi/Archive、e-hentai-db 等；下载状态/手动更新用）。
+    /// 默认无；Bangumi / EHentai 返回其 archive 服务句柄。
+    fn offline_archive(&self) -> Option<OfflineArchive> {
+        None
     }
 
     /// 链接命中时构造搜索结果（Rust 扩展：搜索框提交 provider 链接时显示用）。
@@ -237,13 +251,29 @@ pub struct RegisteredProvider {
 /// 一组（默认或某个 library 的）provider 容器 —— 对应 `MetadataProvidersContainer`。
 pub struct MetadataProvidersContainer {
     providers: Vec<RegisteredProvider>,
+    /// 离线数据源侧通道（bangumi/Archive、e-hentai-db）：provider 禁用但 archive 启用时，
+    /// 下载状态 / 手动更新功能仍可用（匹配不参与）。provider 启用时服务由 provider 持有，此处为空。
+    archives: Vec<OfflineArchive>,
 }
 
 impl MetadataProvidersContainer {
     pub fn new(providers: Vec<RegisteredProvider>) -> Self {
         let mut providers = providers;
         providers.sort_by_key(|p| p.priority);
-        Self { providers }
+        Self {
+            providers,
+            archives: Vec::new(),
+        }
+    }
+
+    /// 注册离线数据源（provider 禁用但 archive 启用的场景）。
+    pub fn add_archive(&mut self, archive: OfflineArchive) {
+        self.archives.push(archive);
+    }
+
+    /// 离线数据源列表（provider 禁用场景注册；provider 启用时经 `provider.offline_archive()` 获取）。
+    pub fn archives(&self) -> &[OfflineArchive] {
+        &self.archives
     }
 
     pub fn providers(&self) -> &[RegisteredProvider] {
@@ -308,6 +338,42 @@ impl MetadataProviders {
             .unwrap_or(&self.default)
             .provider(name)
     }
+
+    /// 默认容器中 bangumi 的离线数据源（archive 未启用/未注册 → None）。
+    /// 侧通道（provider 禁用但 archive 启用）优先，其次经 provider 暴露。
+    pub fn bangumi_archive(&self) -> Option<Arc<bangumi_archive::BangumiArchiveService>> {
+        self.default
+            .archives()
+            .iter()
+            .find_map(|a| match a {
+                OfflineArchive::Bangumi(svc) => Some(svc.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                match self.default.provider(CoreProviders::Bangumi)?.offline_archive()? {
+                    OfflineArchive::Bangumi(svc) => Some(svc),
+                    _ => None,
+                }
+            })
+    }
+
+    /// 默认容器中 ehentai 的离线数据源（archive 未启用/未注册 → None）。
+    /// 侧通道（provider 禁用但 archive 启用）优先，其次经 provider 暴露。
+    pub fn ehentai_archive(&self) -> Option<Arc<ehentai_archive::EHentaiArchiveService>> {
+        self.default
+            .archives()
+            .iter()
+            .find_map(|a| match a {
+                OfflineArchive::EHentai(svc) => Some(svc.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                match self.default.provider(CoreProviders::EHentai)?.offline_archive()? {
+                    OfflineArchive::EHentai(svc) => Some(svc),
+                    _ => None,
+                }
+            })
+    }
 }
 
 /// Provider 模块装配 —— 对应 `ProvidersModule.kt`。
@@ -340,6 +406,34 @@ impl ProvidersModule {
     ) -> Self {
         let default_name_matcher = config.name_matching_mode;
 
+        // 离线数据源（bangumi/Archive、e-hentai-db）全局唯一实例：数据文件全局一份
+        // （缺省 workDir/bangumi-archive、workDir/ehentai/e-hentai.db），default 与所有
+        // library 容器共享同一服务，避免每容器重复实例导致重复下载/并发冲突。
+        // - 服务恒创建：状态徽标 / update-*-db 手动端点不受 `archive.enabled` 限制
+        //   （未下载显示「未下载」，点击即触发下载）；`archive.enabled` 只控制 provider
+        //   是否用离线数据参与匹配（false → provider 走在线）
+        // - 周期自动更新由 app_context 统一编排（`start_auto_update`，provider 启用才调用）
+        // - 服务用 default 配置启动（库级 dir/dbFile 覆盖属极端场景，不拆分数据文件）
+        let bangumi_archive_dir = config
+            .default_providers
+            .bangumi
+            .archive
+            .dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .or_else(|| database_work_dir.map(|d| d.join("bangumi-archive")))
+            .unwrap_or_else(|| std::path::PathBuf::from("bangumi-archive"));
+        let bangumi_archive = Some(bangumi_archive::BangumiArchiveService::start(
+            &config.default_providers.bangumi.archive,
+            http_client.clone(),
+            bangumi_archive_dir,
+        ));
+        let ehentai_archive = Some(ehentai_archive::EHentaiArchiveService::start(
+            &config.default_providers.e_hentai.archive,
+            http_client.clone(),
+            database_work_dir,
+        ));
+
         let default_providers = create_metadata_providers(
             &config.default_providers,
             default_name_matcher,
@@ -348,6 +442,8 @@ impl ProvidersModule {
             database_work_dir,
             oauth_manager.clone(),
             series_title_language.clone(),
+            bangumi_archive.clone(),
+            ehentai_archive.clone(),
         );
         let library_providers = config
             .library_providers
@@ -363,6 +459,8 @@ impl ProvidersModule {
                         database_work_dir,
                         oauth_manager.clone(),
                         series_title_language.clone(),
+                        bangumi_archive.clone(),
+                        ehentai_archive.clone(),
                     ),
                 )
             })
@@ -384,8 +482,12 @@ fn create_metadata_providers(
     database_work_dir: Option<&std::path::Path>,
     oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
     series_title_language: Option<String>,
+    bangumi_archive: Option<Arc<bangumi_archive::BangumiArchiveService>>,
+    ehentai_archive: Option<Arc<ehentai_archive::EHentaiArchiveService>>,
 ) -> MetadataProvidersContainer {
     let mut providers: Vec<RegisteredProvider> = Vec::new();
+    // 离线数据源侧通道：provider 禁用但 archive 启用时仍启动（下载状态/手动更新独立于匹配）。
+    let mut archives: Vec<OfflineArchive> = Vec::new();
 
     // 对应 Kotlin CoreModule：mangabaka/mangabaka.sqlite、bookwalker/bkwk-db.sqlite
     let manga_baka_db = database_work_dir.map(|d| d.join("mangabaka").join("mangabaka.sqlite"));
@@ -433,6 +535,15 @@ fn create_metadata_providers(
             priority: config.manga_dex.priority,
         });
     }
+    // bangumi/Archive：全局服务恒存在（状态徽标 / update-bangumi-db 手动端点不受
+    // archive.enabled 限制）；`archive.enabled` 只决定本容器 provider 是否用离线数据匹配
+    // （false → provider 走在线，服务仍经侧通道注册供状态/手动更新）。
+    let bangumi_provider_archive = if config.bangumi.archive.enabled {
+        bangumi_archive.clone()
+    } else {
+        None
+    };
+    let mut bangumi_got_archive = false;
     if let Some(p) = bangumi::create_provider(
         &config.bangumi,
         default_name_matcher,
@@ -440,11 +551,20 @@ fn create_metadata_providers(
         http_client,
         database_work_dir,
         oauth_manager.clone(),
+        bangumi_provider_archive,
     ) {
+        bangumi_got_archive = config.bangumi.archive.enabled;
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
             priority: config.bangumi.provider.priority,
         });
+    }
+    // 服务未被本容器 provider 持有（provider 禁用，或 archive.enabled=false 不参与匹配）：
+    // 经侧通道注册（状态徽标 / update-bangumi-db 可用，匹配不参与）。
+    if !bangumi_got_archive {
+        if let Some(svc) = bangumi_archive {
+            archives.push(OfflineArchive::Bangumi(svc));
+        }
     }
     if let Some(p) = comicvine::create_provider(
         &config.comic_vine,
@@ -507,19 +627,39 @@ fn create_metadata_providers(
         });
     }
     // EHentai —— 对应 Kotlin PR #284 createEHentaiMetadataProvider
+    // 同 bangumi：全局服务恒存在，`archive.enabled` 只决定 provider 是否用离线数据匹配。
+    let ehentai_provider_archive = if config.e_hentai.archive.enabled {
+        ehentai_archive.clone()
+    } else {
+        None
+    };
+    let mut ehentai_got_archive = false;
     if let Some(p) = ehentai::create_provider(
         &config.e_hentai,
         default_name_matcher,
         http_client,
         database_work_dir,
+        ehentai_provider_archive,
     ) {
+        ehentai_got_archive = config.e_hentai.archive.enabled;
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
             priority: config.e_hentai.priority,
         });
     }
+    // 服务未被本容器 provider 持有（provider 禁用，或 archive.enabled=false 不参与匹配）：
+    // 经侧通道注册（状态徽标 / update-ehentai-db 可用，匹配不参与）。
+    if !ehentai_got_archive {
+        if let Some(svc) = ehentai_archive {
+            archives.push(OfflineArchive::EHentai(svc));
+        }
+    }
 
-    MetadataProvidersContainer::new(providers)
+    let mut container = MetadataProvidersContainer::new(providers);
+    for archive in archives {
+        container.add_archive(archive);
+    }
+    container
 }
 
 /// 未实现的 provider 桩。

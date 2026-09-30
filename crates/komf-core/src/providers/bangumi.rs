@@ -7,7 +7,7 @@ use crate::model::{
     SeriesSearchResult, SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
 use crate::providers::bangumi_archive::{ArchiveSubject, BangumiArchiveService, PersonInfo};
-use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
+use crate::providers::{CoreProviders, MetadataProvider, OfflineArchive, ProviderError};
 use crate::util::NameSimilarityMatcher;
 use crate::util::chinese::{ChineseConverter, ChineseDirection};
 use serde::Deserialize;
@@ -1956,9 +1956,10 @@ pub fn create_provider(
     config: &BangumiConfig,
     default_name_matcher: NameSimilarityMatcher,
     token: Option<&str>,
-    http_client: &reqwest::Client,
-    work_dir: Option<&std::path::Path>,
+    _http_client: &reqwest::Client,
+    _work_dir: Option<&std::path::Path>,
     oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    archive: Option<std::sync::Arc<BangumiArchiveService>>,
 ) -> Option<BangumiMetadataProvider> {
     let provider = &config.provider;
     if !provider.enabled {
@@ -1987,24 +1988,12 @@ pub fn create_provider(
             tag_whitelist.push(w.clone());
         }
     }
-    // bangumi/Archive 离线数据源：enabled 时启动后台下载/构建（tokio::spawn 非阻塞）。
-    // 数据目录：配置 dir → workDir/bangumi-archive。
-    let archive = if config.archive.enabled {
-        let dir = config
-            .archive
-            .dir
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .or_else(|| work_dir.map(|d| d.join("bangumi-archive")))
-            .unwrap_or_else(|| std::path::PathBuf::from("bangumi-archive"));
-        Some(BangumiArchiveService::start(
-            &config.archive,
-            http_client.clone(),
-            dir,
-        ))
-    } else {
-        None
-    };
+    // bangumi/Archive 离线数据源：全局唯一实例由 `ProvidersModule::with_oauth` 创建并传入
+    // （数据文件全局一份；库级容器共享同一服务。provider 禁用但 archive 启用时，服务经
+    // `MetadataProvidersContainer` 侧通道注册，状态徽标 / 手动更新仍可用）。
+    // bangumi/Archive 离线数据源：全局唯一实例由 `ProvidersModule::with_oauth` 创建并传入
+    // （数据文件全局一份；库级容器共享同一服务。provider 禁用但 archive 启用时，服务经
+    // `MetadataProvidersContainer` 侧通道注册，状态徽标 / 手动更新仍可用）。
     // seriesTitleLanguage 联动：中文（zh/zh-hans/zh-tw/...）→ 作者/出版社查 name_cn；
     // None 或非中文（ja/en/...）→ 用原名（不查 name_cn）。
     let use_chinese_names = config
@@ -2047,6 +2036,10 @@ impl MetadataProvider for BangumiMetadataProvider {
 
     fn alternative_titles_enabled(&self) -> bool {
         self.metadata_mapper.series_metadata_config.alternative_titles
+    }
+
+    fn offline_archive(&self) -> Option<OfflineArchive> {
+        self.archive.clone().map(OfflineArchive::Bangumi)
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {

@@ -104,6 +104,10 @@ fn build_state(
         Some(oauth_manager.clone()),
         series_title_language,
     );
+    // bangumi/Archive、e-hentai-db 离线数据源句柄（archive 未启用 → None；/api/update-*-db 与 /config 用）。
+    // 注意：需在 `media_server_module` 移动 `providers_module.metadata_providers` 之前取出。
+    let bangumi_archive = providers_module.metadata_providers.bangumi_archive();
+    let ehentai_archive = providers_module.metadata_providers.ehentai_archive();
     let notifications_module = NotificationsModule::new(&config.notifications, http_client.clone());
     let media_server_module = MediaServerModule::new(
         &config.komga,
@@ -121,9 +125,6 @@ fn build_state(
         db_work_dir.clone(),
         http_client.clone(),
     ));
-    // 定时更新：库缺失自动下载 + 周期 checksum 检查（失败保留旧库 + 15min 快速重试）。
-    manga_baka_db_downloader
-        .start_auto_update(config.metadata_providers.default_providers.manga_baka.update_interval_hours);
     // MangaBaka 管理 API 仓储：数据库文件存在时启用（link/unlink/tags/系列详情）。
     let manga_baka_repository = {
         let database_file = db_work_dir.join("mangabaka.sqlite");
@@ -137,9 +138,39 @@ fn build_state(
         work_dir.join("bookwalker"),
         http_client.clone(),
     ));
-    // 定时更新：库缺失自动下载 + 周期 HEAD last-modified 检查（失败保留旧库 + 15min 快速重试）。
-    book_walker_db_downloader
-        .start_auto_update(config.metadata_providers.default_providers.book_walker.update_interval_hours);
+
+    // =====================================================================
+    // 统一自动更新编排（四个离线数据源同一处调度）
+    // =====================================================================
+    // 规则（全部一致）：仅 default ∪ 任一 library 启用该 provider 时周期自动更新；
+    // 全部禁用时服务/下载器仍存在（状态徽标、手动 update-*-db 端点可用）但不自动下载。
+    // 间隔取 default 配置（下载枢纽/数据文件全局一份，库级 interval 覆盖不拆分调度）。
+    // 周期：启动即检查一次 → 每 interval 小时；失败 15 分钟快速重试（旧库保留）。
+    // 检测协议留在各源实现（bangumi: release latest.json updated_at；ehentai/bookwalker:
+    // HEAD Last-Modified；mangabaka: checksum 对比）——协议不同无法统一，统一的是调度。
+    let mp = &config.metadata_providers.default_providers;
+    let libs = &config.metadata_providers.library_providers;
+
+    // bangumi/Archive（provider 启用才自动更新；服务存在与否由 archive.enabled 决定）
+    if mp.bangumi.provider.enabled || libs.values().any(|p| p.bangumi.provider.enabled) {
+        if let Some(svc) = &bangumi_archive {
+            svc.start_auto_update(mp.bangumi.archive.update_interval_hours);
+        }
+    }
+    // e-hentai-db
+    if mp.e_hentai.enabled || libs.values().any(|p| p.e_hentai.enabled) {
+        if let Some(svc) = &ehentai_archive {
+            svc.start_auto_update(mp.e_hentai.archive.update_interval_hours);
+        }
+    }
+    // MangaBaka（下载器全局单例，任何库匹配都查同一份 db）
+    if mp.manga_baka.enabled || libs.values().any(|p| p.manga_baka.enabled) {
+        manga_baka_db_downloader.start_auto_update(mp.manga_baka.update_interval_hours);
+    }
+    // BookWalker
+    if mp.book_walker.enabled || libs.values().any(|p| p.book_walker.enabled) {
+        book_walker_db_downloader.start_auto_update(mp.book_walker.update_interval_hours);
+    }
     let tracker_services = Arc::new(komf_core::trackers::TrackerServices::new(
         http_client.clone(),
         Some(oauth_manager.clone()),
@@ -151,6 +182,8 @@ fn build_state(
         manga_baka_db_downloader,
         manga_baka_repository,
         book_walker_db_downloader,
+        bangumi_archive,
+        ehentai_archive,
         oauth_manager,
         tracker_services,
     )

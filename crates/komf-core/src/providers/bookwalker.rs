@@ -1290,14 +1290,16 @@ impl BookWalkerDbDownloader {
             let _ = sender.send(Some(event));
         };
         let database_url = DATABASE_URL.to_string();
+        // 大文件用公共长超时 client（共享 client 60s 总超时必断）。
+        let dl_client = crate::util::download::long_download_client()?;
 
         if let Err(e) = self
-            .download_and_extract(sender, &emit, &database_url)
+            .download_and_extract(sender, &emit, &database_url, &dl_client)
             .await
         {
             tracing::error!("BookWalker database download failed: {e}");
-            // 容错：保留旧库（失败不删），仅清理压缩包与临时文件。
-            let _ = std::fs::remove_file(self.work_dir.join("bkwk-db.sqlite.zst"));
+            // 容错：保留旧库（失败不删）；保留压缩包残片供下次 Range 续传，
+            // 仅清理临时文件（解压损坏的包由 download_and_extract 内删除）。
             let _ = std::fs::remove_file(PathBuf::from(format!(
                 "{}.tmp",
                 self.database_file.display()
@@ -1385,6 +1387,7 @@ impl BookWalkerDbDownloader {
         sender: &tokio::sync::watch::Sender<Option<DownloadProgress>>,
         emit: &impl Fn(&tokio::sync::watch::Sender<Option<DownloadProgress>>, DownloadProgress),
         url: &str,
+        dl_client: &reqwest::Client,
     ) -> Result<(), String> {
         emit(
             sender,
@@ -1403,59 +1406,35 @@ impl BookWalkerDbDownloader {
         }
         let _ = std::fs::create_dir_all(&self.work_dir);
 
-        // 1. 下载压缩包
-        let response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("HttpRequestException: {e}"))?;
-        if !response.status().is_success() {
-            return Err(format!("ResponseException: {}", response.status()));
-        }
-        let total = response.content_length().unwrap_or(0) as i64;
-        emit(
-            sender,
-            DownloadProgress::ProgressEvent {
-                total,
-                completed: 0,
-                info: Some(url.to_string()),
+        // 1. 下载压缩包（公共重试 + 续传，与 mangabaka/bangumi/ehentai 同口径）
+        let last_modified = crate::util::download::download_with_retry(
+            dl_client,
+            url,
+            &archive,
+            "bookwalker archive download",
+            &|total: i64, completed: i64| {
+                emit(
+                    sender,
+                    DownloadProgress::ProgressEvent {
+                        total,
+                        completed,
+                        info: Some(url.to_string()),
+                    },
+                )
             },
-        );
-
-        // 提前记录 last-modified（response 被 bytes_stream 消费后无法再读响应头）
-        let last_modified = response
-            .headers()
-            .get(reqwest::header::LAST_MODIFIED)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let mut stream = response.bytes_stream();
-        let mut file = tokio::fs::File::create(&archive)
-            .await
-            .map_err(|e| format!("FileSystemException: {e}"))?;
-        let mut completed: i64 = 0;
-        use futures::StreamExt;
-        use tokio::io::AsyncWriteExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("HttpRequestException: {e}"))?;
-            completed += chunk.len() as i64;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("FileSystemException: {e}"))?;
-            emit(
-                sender,
-                DownloadProgress::ProgressEvent {
-                    total,
-                    completed,
-                    info: Some(url.to_string()),
-                },
-            );
-        }
-        file.flush()
-            .await
-            .map_err(|e| format!("FileSystemException: {e}"))?;
-        drop(file);
+            &|attempt: usize, delay: u64, err: &str| {
+                emit(
+                    sender,
+                    DownloadProgress::ProgressEvent {
+                        total: 0,
+                        completed: 0,
+                        info: Some(format!("retrying in {delay}s ({attempt}/3): {err}")),
+                    },
+                )
+            },
+        )
+        .await?
+        .last_modified;
 
         // 2. zstd 解压
         emit(
@@ -1470,7 +1449,11 @@ impl BookWalkerDbDownloader {
             std::fs::File::open(&archive).map_err(|e| format!("FileSystemException: {e}"))?;
         let output = std::fs::File::create(&tmp_file)
             .map_err(|e| format!("FileSystemException: {e}"))?;
-        zstd::stream::copy_decode(input, output).map_err(|e| format!("ZstdException: {e}"))?;
+        // 压缩包损坏（size 对但 CRC/帧错误）：删包让下次重试重下，避免毒缓存反复失败。
+        zstd::stream::copy_decode(input, output).map_err(|e| {
+            let _ = std::fs::remove_file(&archive);
+            format!("ZstdException: {e}")
+        })?;
 
         // 3. FTS5 搜索索引
         emit(
