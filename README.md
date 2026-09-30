@@ -114,7 +114,7 @@ To use it:
 
 ## Security
 
-The service ships with an **optional key-based access gate** — **setting `KOMF_AUTH_KEY` is strongly recommended when exposed to the public internet**. Set `KOMF_AUTH_KEY` (legacy `KOMF_WEBUI_KEY` still works as fallback) and **sensitive** requests from **outside the local network** must present the key — local/loopback and LAN (RFC1918 / link-local / IPv6 ULA) clients are always allowed through without one. Non-sensitive `GET /version` and `GET /api/health` stay public for version/health checks. Unauthorized sensitive `/api/*` requests get `401`; page/asset requests get an inline login page (key input, styled to match the WebUI). A successful `POST /api/auth/login` sets an HttpOnly session cookie (`komf_auth`); `POST /api/auth/logout` clears it. Cookie derivation uses SHA-1 over the key with a fixed salt, compared in constant time. `KOMF_AUTH_FORCE_REMOTE=1` (debug only) forces the key path for every client.
+The service ships with an **optional key-based access gate** — **setting `KOMF_AUTH_KEY` is strongly recommended when exposed to the public internet**. Set `KOMF_AUTH_KEY` (legacy `KOMF_WEBUI_KEY` still works as fallback) and **sensitive** requests from **outside the local network** must present the key — local/loopback and LAN (RFC1918 / link-local / IPv6 ULA) clients are always allowed through without one. Non-sensitive `GET /version` and `GET /api/health` stay public for version/health checks. Unauthorized sensitive `/api/*` requests get `401`; page/asset requests get an inline login page (key input, styled to match the WebUI). A successful `POST /api/auth/login` sets an HttpOnly session cookie (`komf_auth`); `POST /api/auth/logout` clears it. A request passes with either credential: the cookie (derivation uses SHA-1 over the key with a fixed salt, compared in constant time) or an `Authorization: Bearer <base64(key)>` header (the key is base64-encoded for transport, decoded and constant-time compared server-side, keeping the raw key out of request headers/access logs) for scripts/API clients. `KOMF_AUTH_FORCE_REMOTE=1` (debug only) forces the key path for every client.
 
 Without the key gate the service has **no built-in authentication**: anyone who can reach the HTTP port can read the (credential-masked) configuration and change it via `PATCH /api/config`, and use the metadata endpoints. Treat it like a database admin panel:
 
@@ -171,6 +171,7 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 - `POST /api/auth/login` — `{"key":"..."}`: `204` + `komf_auth` cookie on success, `401` on failure
 - `POST /api/auth/logout` — clears the auth cookie
+- Protected requests present a credential (either): `Cookie: komf_auth=<from login>`, or `Authorization: Bearer <base64(KOMF_AUTH_KEY)>` (decoded and verified server-side)
 - Public without auth (remote): `GET /version`, `GET /api/health`; all other sensitive requests require auth
 - Unauthorized sensitive `/api/*` requests return `401`; other paths return the built-in login page; local/LAN clients bypass the gate
 

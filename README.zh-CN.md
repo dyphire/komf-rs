@@ -114,7 +114,7 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
 
 ## 安全
 
-服务内置**可选密钥认证门**——**公网暴露使用时强烈建议设置 `KOMF_AUTH_KEY`**。设置 `KOMF_AUTH_KEY`（旧变量 `KOMF_WEBUI_KEY` 仍兼容回退）后，**非本地/局域网**来源的**敏感操作**请求必须输入密钥——本地/回环与局域网（RFC1918 / link-local / IPv6 ULA）来源始终免密钥放行；非敏感的 `GET /version`（版本查询）与 `GET /api/health`（健康/状态查询）照常放行。未授权的敏感 `/api/*` 请求返回 `401`；页面/静态资源请求返回内置登录页（输入框样式与 WebUI 一致）。登录成功 `POST /api/auth/login` 会种下 HttpOnly 会话 cookie（`komf_auth`）；`POST /api/auth/logout` 清除之。cookie 由 SHA-1（密钥 + 固定盐）派生并以恒定时间比较。`KOMF_AUTH_FORCE_REMOTE=1`（仅调试）把所有来源强制按远程处理以走密钥分支。
+服务内置**可选密钥认证门**——**公网暴露使用时强烈建议设置 `KOMF_AUTH_KEY`**。设置 `KOMF_AUTH_KEY`（旧变量 `KOMF_WEBUI_KEY` 仍兼容回退）后，**非本地/局域网**来源的**敏感操作**请求必须输入密钥——本地/回环与局域网（RFC1918 / link-local / IPv6 ULA）来源始终免密钥放行；非敏感的 `GET /version`（版本查询）与 `GET /api/health`（健康/状态查询）照常放行。未授权的敏感 `/api/*` 请求返回 `401`；页面/静态资源请求返回内置登录页（输入框样式与 WebUI 一致）。登录成功 `POST /api/auth/login` 会种下 HttpOnly 会话 cookie（`komf_auth`）；`POST /api/auth/logout` 清除之。凭证二选一通过即放行：cookie 由 SHA-1（密钥 + 固定盐）派生并以恒定时间比较；`Authorization: Bearer <base64(密钥)>` 请求头（密钥经 base64 编码后携带，服务端解码后恒定时间比较，避免明文密钥出现在请求头/访问日志）供脚本/API 客户端直接携带。`KOMF_AUTH_FORCE_REMOTE=1`（仅调试）把所有来源强制按远程处理以走密钥分支。
 
 未启用密钥门时服务**没有内置鉴权**：任何能连上 HTTP 端口的人都可以读取（脱敏后的）配置、通过 `PATCH /api/config` 修改配置并调用元数据接口。请把它当数据库管理后台对待：
 
@@ -171,6 +171,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 - `POST /api/auth/login` —— `{"key":"..."}`：成功返回 `204` + `komf_auth` cookie，失败 `401`
 - `POST /api/auth/logout` —— 清除认证 cookie
+- 受保护请求携带凭证（二选一）：`Cookie: komf_auth=<登录所得>`，或 `Authorization: Bearer <base64(KOMF_AUTH_KEY)>`（服务端解码后校验）
 - 免鉴权放行（远程）：`GET /version`、`GET /api/health`；其余敏感操作均需鉴权
 - 未授权敏感 `/api/*` 请求返回 `401`；其他路径返回内置登录页；本地/局域网来源绕过认证门
 

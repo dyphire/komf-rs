@@ -5,8 +5,10 @@
 //! - 请求来源为本地/局域网（loopback / RFC1918 私网 / link-local / ULA）→ 免密钥放行；
 //! - 非敏感操作（无需鉴权，远程直接放行）：
 //!   `GET /version`（版本查询）、`GET /api/health`（健康/版本查询）；
-//! - 敏感操作（远程必须鉴权）：除上述放行名单外的所有请求，校验 `komf_auth`
-//!   cookie（= SHA-1(密钥 + 固定盐) 的 base64，恒定时间比较）；
+//! - 敏感操作（远程必须鉴权）：除上述放行名单外的所有请求，二选一通过即放行：
+//!   - `komf_auth` cookie（= SHA-1(密钥 + 固定盐) 的 base64，恒定时间比较）；
+//!   - `Authorization: Bearer <base64(密钥)>` 请求头（密钥经 base64 编码后携带，
+//!     服务端解码后恒定时间比较，避免明文密钥出现在请求头/访问日志，方便脚本/API 客户端直接携带）；
 //!   未通过时：`/api/*` 返回 401 JSON，其余路径返回内联登录页（样式对齐 Docker Copilot 类认证页）。
 //!
 //! `POST /api/auth/login`（校验密钥并种 cookie）与 `POST /api/auth/logout`（删 cookie）
@@ -100,6 +102,27 @@ fn cookie_matches(request: &Request, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 从 `Authorization: Bearer <token>` 请求头校验凭证（与 cookie 等价）：
+/// token 为密钥的 base64 编码，解码后与密钥恒定时间比较，避免明文密钥出现在请求头。
+fn authorization_matches(request: &Request, key: &str) -> bool {
+    let Some(h) = request.headers().get(header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(s) = h.to_str() else { return false };
+    let Some(token) = s.strip_prefix("Bearer ") else {
+        return false;
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        return false;
+    }
+    use base64::Engine as _;
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(token) else {
+        return false;
+    };
+    constant_time_eq(std::str::from_utf8(&decoded).unwrap_or(""), key)
+}
+
 fn cookie_header(value: &str, expire: bool) -> String {
     let max_age = if expire { "; Max-Age=0" } else { "" };
     format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax{max_age}")
@@ -124,8 +147,8 @@ pub async fn auth_guard(
     if is_public_unauthenticated(request.method(), request.uri().path()) {
         return next.run(request).await;
     }
-    // 远程 + cookie 有效：放行
-    if cookie_matches(&request, &key) {
+    // 远程 + cookie 或 Authorization 头有效：放行
+    if cookie_matches(&request, &key) || authorization_matches(&request, &key) {
         return next.run(request).await;
     }
     // 未授权：API 返回 401 JSON；页面/静态资源返回内联登录页
@@ -334,6 +357,40 @@ mod tests {
         assert!(constant_time_eq(&v, &cookie_value("secret-key")));
         assert!(!constant_time_eq(&v, &cookie_value("other-key")));
         assert!(!constant_time_eq(&v, ""));
+    }
+
+    #[test]
+    fn authorization_header_requires_base64_key() {
+        use axum::http::header;
+        use base64::Engine as _;
+        let key = "secret-key";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
+        let mk = |value: &str| {
+            axum::extract::Request::builder()
+                .header(header::AUTHORIZATION, value)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        // Bearer + base64(密钥)：通过
+        assert!(authorization_matches(&mk(&format!("Bearer {b64}")), key));
+        // 明文密钥 / 派生 cookie 值：不再接受
+        assert!(!authorization_matches(&mk(&format!("Bearer {key}")), key));
+        assert!(!authorization_matches(
+            &mk(&format!("Bearer {}", cookie_value(key))),
+            key
+        ));
+        // 大小写前缀按 RFC 要求精确匹配 "Bearer "
+        assert!(!authorization_matches(&mk(&format!("bearer {b64}")), key));
+        assert!(!authorization_matches(&mk(&format!("Bearer\t{b64}")), key));
+        // 非法 base64 / 合法 base64 但内容不符 / 空 token / 缺失头
+        assert!(!authorization_matches(&mk("Bearer wrong-key"), key));
+        let other = base64::engine::general_purpose::STANDARD.encode("wrong-key");
+        assert!(!authorization_matches(&mk(&format!("Bearer {other}")), key));
+        assert!(!authorization_matches(&mk("Bearer "), key));
+        let no_header = axum::extract::Request::builder()
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!authorization_matches(&no_header, key));
     }
 
     #[test]
