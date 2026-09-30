@@ -138,7 +138,7 @@ const dict: Record<string, { zh: string; en: string }> = {
 
   // ---- OAuth ----
   'oauth.title': { zh: 'OAuth 登录（共享 client）', en: 'OAuth sign-in (shared client)' },
-  'oauth.desc': { zh: '登录后请求携带 Bearer token：MAL 无需 malClientId、Bangumi token 自动续期、AniList 解锁更高限额。', en: 'Requests carry a Bearer token after sign-in: MAL works without malClientId, Bangumi tokens auto-renew, AniList unlocks higher limits.' },
+  'oauth.desc': { zh: '登录后请求携带 Bearer token：MAL 无需 malClientId、Bangumi token 自动续期、AniList 解锁更高限额、MangaBaka 解锁用户收藏（库）读写。', en: 'Requests carry a Bearer token after sign-in: MAL works without malClientId, Bangumi tokens auto-renew, AniList unlocks higher limits, MangaBaka unlocks user library read/write.' },
   'oauth.login': { zh: '登录', en: 'Sign in' },
   'oauth.logout': { zh: '退出', en: 'Sign out' },
   'oauth.loggedInAs': { zh: '{u}', en: '{u}' },

@@ -5,7 +5,7 @@
 //! - `state`：读取某条目在平台上的跟踪状态；
 //! - `update`：推送状态/进度/评分到平台。
 //!
-//! `{provider}` 仅接受 anilist / mal / bangumi（与 OAuth 一致），
+//! `{provider}` 仅接受 anilist / mal / bangumi / mangabaka（与 OAuth 一致），
 //! 未登录时返回 401；其余返回 404。
 
 use crate::routes::SharedState;
@@ -164,6 +164,7 @@ fn tracker_entry_url(provider: &str, track_id: &str) -> Option<String> {
         "anilist" => Some(format!("https://anilist.co/manga/{track_id}")),
         "mal" => Some(format!("https://myanimelist.net/manga/{track_id}")),
         "bangumi" => Some(format!("https://bgm.tv/subject/{track_id}")),
+        "mangabaka" => Some(format!("https://mangabaka.org/{track_id}")),
         _ => None,
     }
 }

@@ -218,22 +218,22 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 - `GET /api/cover/redirect?url=<encoded>` — `302` + `Referrer-Policy: no-referrer` to the target cover URL. The WebUI uses it to render search-result covers: provider cover CDNs (MangaDex and others) return a placeholder banner for any `Referer` outside their allowlist, but serve the real cover when no `Referer` is sent — the redirect lets the browser drop the Referer and load the actual cover. The target host is validated against a provider-cover-domain allowlist (open-redirect / SSRF protection); other hosts get `400`. The search API's `imageUrl` stays a direct link, so third-party server-side consumers are unaffected and may optionally use this endpoint.
 
-### OAuth login (`{provider}` = `anilist`, `mal` or `bangumi`)
+### OAuth login (`{provider}` = `anilist`, `mal`, `bangumi` or `mangabaka`)
 
 Server-side OAuth2 login for metadata providers, using a **shared client + official relay page** (no per-instance callback registration). See [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md) for the mechanism, client-secret injection and deployment notes.
 
-- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal). Optional `?redirect_path_prefix=/prefix` prefixes the instance callback path, for reverse proxies that mount the callback inside their own namespace (e.g. kmrs under `/api/v1/komf`) or sub-path deployments
+- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal/mangabaka). Optional `?redirect_path_prefix=/prefix` prefixes the instance callback path, for reverse proxies that mount the callback inside their own namespace (e.g. kmrs under `/api/v1/komf`) or sub-path deployments
 - `GET /api/oauth/{provider}/callback` — OAuth callback (via the relay page): exchanges the code, stores the token in `<configDir>/oauth.sqlite`, then `302` to `/?oauth=success` (or `/?oauth=error&message=...`)
 - `GET /api/oauth/{provider}/status` — `200` JSON `{"logged_in":bool,"username":string|null}`
 - `POST /api/oauth/{provider}/logout` — `204`, clears the stored token
 
 Once logged in, the provider requests are authenticated with the OAuth bearer token (takes precedence over the manual `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID` options); expired tokens are auto-refreshed when a refresh token exists, otherwise the login is cleared and the provider falls back to anonymous. The tracker endpoints return `401` whenever the login is lost at request time (expired and unrefreshable, no secret, refresh rejected, or the provider itself rejects the token with `401` — which also clears the stored login), so reading-status sync never silently operates without the user's account. The WebUI Providers page shows login status and offers login/logout per provider.
 
-### Tracker (`{provider}` = `anilist`, `mal` or `bangumi`; requires OAuth login)
+### Tracker (`{provider}` = `anilist`, `mal`, `bangumi` or `mangabaka`; requires OAuth login)
 
-Reading-list sync for the three platforms, backed by the OAuth login above.
+Reading-list sync for the four platforms, backed by the OAuth login above.
 
-- `GET /api/tracker/{provider}/search?name=...&nsfw=...` — search the platform; each item carries `tracked` (whether it is already in the user's list). `nsfw` defaults to `true` and is filtered only when `false`. `name` may also be a platform entry link — `anilist.co/manga/{id}`, `myanimelist.net/manga/{id}`, `bgm.tv`/`bangumi.tv`/`subject/{id}` — with or without a scheme; the backend resolves it directly to the single item.
+- `GET /api/tracker/{provider}/search?name=...&nsfw=...` — search the platform; each item carries `tracked` (whether it is already in the user's list). `nsfw` defaults to `true` and is filtered only when `false`. `name` may also be a platform entry link — `anilist.co/manga/{id}`, `myanimelist.net/manga/{id}`, `bgm.tv`/`bangumi.tv`/`subject/{id}`, `mangabaka.org/{id}` — with or without a scheme; the backend resolves it directly to the single item.
 - `GET /api/tracker/{provider}/state?trackId=...` — the current list entry (`status`, `score`, chapters/volumes read, start/finish dates, totals); not in the list returns an empty state (Bangumi maps the "not collected" `404` to an empty state).
 - `POST /api/tracker/{provider}/update` — push a state update:
 
@@ -243,7 +243,7 @@ Reading-list sync for the three platforms, backed by the OAuth login above.
 
 `status` is one of `reading`, `planning`, `completed`, `paused`, `dropped`, `rereading`; omit the field to keep the current value.
 
-Notes: `tracked` is user-scoped — AniList via `mediaListEntry`, MAL via `my_list_status` (details fetched concurrently), Bangumi via the user's collection list. Bangumi search falls back to the legacy `GET /search/subject/{q}?type=1` when the v0 API fails (the metadata matching provider has the same fallback). AniList scores follow the account's `mediaListOptions.scoreFormat` (POINT_10 accounts read/write 0–10; other formats 0–100).
+Notes: `tracked` is user-scoped — AniList via `mediaListEntry`, MAL via `my_list_status` (details fetched concurrently), Bangumi via the user's collection list, MangaBaka via the user's library (batched `GET /v1/my/library/batch`). Bangumi search falls back to the legacy `GET /search/subject/{q}?type=1` when the v0 API fails (the metadata matching provider has the same fallback). AniList scores follow the account's `mediaListOptions.scoreFormat` (POINT_10 accounts read/write 0–10; other formats 0–100). MangaBaka ratings are 0–100 and its `plan_to_read`/`considering` map to `planning`; updates create the library entry with `POST` when it does not exist yet, `PATCH` otherwise.
 
 - `GET /api/tracker/links` — the local ledger of items linked through this komf instance: every successful `update` upserts `{provider, trackId, title, coverUrl, url, updatedAt}` (newest first) into the `tracker_links` table in `<configDir>/oauth.sqlite`. `update` accepts optional `title` / `coverUrl` fields that are not sent to the platform but are stored for this list.
 

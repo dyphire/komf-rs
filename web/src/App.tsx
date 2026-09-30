@@ -639,13 +639,13 @@ function JobEventsFeed(props: { id: string }) {
 
 // ---------------- Tracker（阅读状态同步） ----------------
 
-const TRACKER_PROVIDERS = ['anilist', 'mal', 'bangumi'];
+const TRACKER_PROVIDERS = ['anilist', 'mal', 'bangumi', 'mangabaka'];
 const TRACKER_STATUSES = ['', 'reading', 'planning', 'completed', 'paused', 'dropped', 'rereading'];
 const TRACKER_STATUS_LABEL: Record<string, string> = {
   reading: 'Reading', planning: 'Planning', completed: 'Completed',
   paused: 'Paused', dropped: 'Dropped', rereading: 'Rereading',
 };
-const TRACKER_PROVIDER_LABEL: Record<string, string> = { anilist: 'AniList', mal: 'MyAnimeList', bangumi: 'Bangumi' };
+const TRACKER_PROVIDER_LABEL: Record<string, string> = { anilist: 'AniList', mal: 'MyAnimeList', bangumi: 'Bangumi', mangabaka: 'MangaBaka' };
 
 function TrackerPage() {
   const { t } = useLang();
@@ -992,8 +992,8 @@ export default function App() {
   const [dbBusy, setDbBusy] = useState<string | null>(null);
   const [dbProg, setDbProg] = useState<{ kind: string; pct: number; info?: string } | null>(null);
   const [dbErr, setDbErr] = useState<{ kind: string; msg: string } | null>(null);
-  // OAuth 登录态（anilist / mal / bangumi，共享 client + 中转页）
-  const OAUTH_PROVIDERS = ['anilist', 'mal', 'bangumi'];
+  // OAuth 登录态（anilist / mal / bangumi / mangabaka，共享 client + 中转页）
+  const OAUTH_PROVIDERS = ['anilist', 'mal', 'bangumi', 'mangabaka'];
   const [oauth, setOauth] = useState<Record<string, { logged_in: boolean; username?: string | null }>>({});
   const [oauthBusy, setOauthBusy] = useState(false);
   // 按库覆盖编辑
@@ -1453,17 +1453,24 @@ export default function App() {
                 <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
                   {OAUTH_PROVIDERS.map((p) => {
                     const st = oauth[p];
-                    const label = p === 'mal' ? 'MyAnimeList' : p === 'bangumi' ? 'Bangumi' : 'AniList';
+                    const label = p === 'mal' ? 'MyAnimeList' : p === 'bangumi' ? 'Bangumi' : p === 'mangabaka' ? 'MangaBaka' : 'AniList';
                     return (
                       <span className="badge" key={p} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                         <b>{label}</b>
                         {st?.logged_in ? (
                           <>
-                            <span className="muted" title={t('oauth.loggedInAs', { u: st.username ?? '' })}>{st.username || t('oauth.loggedInAs', { u: '✓' })}</span>
+                            <span
+                              className="muted"
+                              style={{ color: 'var(--ok)', fontWeight: 600 }}
+                              title={t('oauth.loggedInAs', { u: st.username ?? '' })}
+                            >✓ {st.username ?? ''}</span>
                             <button className="btn" onClick={() => oauthLogout(p)}>{t('oauth.logout')}</button>
                           </>
                         ) : (
-                          <a className="btn" href={`/api/oauth/${p}/start`}>{t('oauth.login')}</a>
+                          <>
+                            <span className="muted" title={t('oauth.notLoggedIn')}>○</span>
+                            <a className="btn" href={`/api/oauth/${p}/start`}>{t('oauth.login')}</a>
+                          </>
                         )}
                       </span>
                     );

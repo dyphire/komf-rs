@@ -21,46 +21,77 @@ impl BangumiTracker {
         Self { http, oauth }
     }
 
-    /// 源站判定 token 失效（HTTP 401）时清除登录态。
+    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除登录态。
     fn note_unauthorized(&self) {
         if let Some(manager) = &self.oauth {
             manager.logout(OAuthProvider::Bangumi);
         }
     }
 
-    async fn authorized(
-        &self,
-        method: reqwest::Method,
-        url: &str,
-    ) -> Result<reqwest::RequestBuilder, String> {
+    async fn token(&self) -> Result<String, String> {
         let Some(manager) = &self.oauth else {
             return Err("bangumi: not logged in (oauth manager missing)".to_string());
         };
-        let token = manager
+        manager
             .access_token(OAuthProvider::Bangumi)
             .await
-            .ok_or_else(|| "bangumi: not logged in (no access token)".to_string())?;
-        Ok(self
-            .http
-            .request(method, url)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}")))
+            .ok_or_else(|| "bangumi: not logged in (no access token)".to_string())
+    }
+
+    /// 带 Bearer 发送请求；遇 401 先强制刷新重试一次，刷新失败或重试仍 401
+    /// 才清登录态（四个 tracker 统一行为：401→强制刷新→重试一次→仍失败才登出）。
+    async fn send_authed(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<Value>,
+        label: &str,
+    ) -> Result<reqwest::Response, String> {
+        let mut token = self.token().await?;
+        let build = |token: &str| {
+            let mut request = self
+                .http
+                .request(method.clone(), url)
+                .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+            if let Some(b) = &body {
+                request = request.json(b);
+            }
+            request
+        };
+        let mut response = build(&token)
+            .send()
+            .await
+            .map_err(|e| format!("{label} request failed: {e}"))?;
+        let mut status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let refreshed = match &self.oauth {
+                Some(manager) => manager.refresh_now(OAuthProvider::Bangumi).await,
+                None => None,
+            };
+            if let Some(new_token) = refreshed {
+                token = new_token;
+                response = build(&token)
+                    .send()
+                    .await
+                    .map_err(|e| format!("{label} request failed: {e}"))?;
+                status = response.status();
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.note_unauthorized();
+            }
+        }
+        Ok(response)
     }
 
     async fn get_json(&self, url: &str) -> Result<Value, String> {
         let response = self
-            .authorized(reqwest::Method::GET, url)
-            .await?
-            .send()
-            .await
-            .map_err(|e| format!("bangumi request failed: {e}"))?;
+            .send_authed(reqwest::Method::GET, url, None, "bangumi")
+            .await?;
         let status = response.status();
         let body: Value = response
             .json()
             .await
             .map_err(|e| format!("bangumi response parse failed: {e}"))?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized();
-        }
         if !status.is_success() {
             return Err(format!("bangumi API error (HTTP {status}): {body}"));
         }
@@ -162,24 +193,22 @@ impl BangumiTracker {
     /// v0 搜索：`POST /v0/search/subjects`（type=1 书籍）。
     async fn search_v0(&self, query: &str, nsfw: bool) -> Result<Vec<Value>, String> {
         let response = self
-            .authorized(reqwest::Method::POST, &format!("{API_BASE}/search/subjects?limit=20"))
-            .await?
-            .json(&json!({
-                "keyword": query,
-                "sort": "match",
-                "filter": { "type": [1], "nsfw": nsfw }
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("bangumi search failed: {e}"))?;
+            .send_authed(
+                reqwest::Method::POST,
+                &format!("{API_BASE}/search/subjects?limit=20"),
+                Some(json!({
+                    "keyword": query,
+                    "sort": "match",
+                    "filter": { "type": [1], "nsfw": nsfw }
+                })),
+                "bangumi search",
+            )
+            .await?;
         let status = response.status();
         let body: Value = response
             .json()
             .await
             .map_err(|e| format!("bangumi search response parse failed: {e}"))?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized();
-        }
         if !status.is_success() {
             return Err(format!("bangumi search error (HTTP {status}): {body}"));
         }
@@ -368,16 +397,14 @@ impl TrackerService for BangumiTracker {
             body.insert("vol_status".to_string(), json!(volume));
         }
         let response = self
-            .authorized(reqwest::Method::POST, &format!("{API_BASE}/users/-/collections/{id}"))
-            .await?
-            .json(&Value::Object(body))
-            .send()
-            .await
-            .map_err(|e| format!("bangumi update failed: {e}"))?;
+            .send_authed(
+                reqwest::Method::POST,
+                &format!("{API_BASE}/users/-/collections/{id}"),
+                Some(Value::Object(body)),
+                "bangumi update",
+            )
+            .await?;
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized();
-        }
         if !status.is_success() {
             let body: Value = response.json().await.unwrap_or_default();
             return Err(format!("bangumi update error (HTTP {status}): {body}"));

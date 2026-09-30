@@ -26,12 +26,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use url::Url;
 use uuid::Uuid;
 
-/// 支持的 OAuth 平台（MangaBaka 待官方发放 client 后加入）。
+/// 支持的 OAuth 平台。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthProvider {
     Anilist,
     Mal,
     Bangumi,
+    MangaBaka,
 }
 
 impl OAuthProvider {
@@ -40,6 +41,7 @@ impl OAuthProvider {
             OAuthProvider::Anilist => "anilist",
             OAuthProvider::Mal => "mal",
             OAuthProvider::Bangumi => "bangumi",
+            OAuthProvider::MangaBaka => "mangabaka",
         }
     }
 
@@ -48,6 +50,7 @@ impl OAuthProvider {
             "anilist" => Some(OAuthProvider::Anilist),
             "mal" | "myanimelist" => Some(OAuthProvider::Mal),
             "bangumi" | "bgm" => Some(OAuthProvider::Bangumi),
+            "mangabaka" | "mb" => Some(OAuthProvider::MangaBaka),
             _ => None,
         }
     }
@@ -58,6 +61,7 @@ impl OAuthProvider {
             OAuthProvider::Anilist => crate::providers::CoreProviders::Anilist,
             OAuthProvider::Mal => crate::providers::CoreProviders::Mal,
             OAuthProvider::Bangumi => crate::providers::CoreProviders::Bangumi,
+            OAuthProvider::MangaBaka => crate::providers::CoreProviders::MangaBaka,
         }
     }
 
@@ -68,6 +72,7 @@ impl OAuthProvider {
             OAuthProvider::Anilist => "KOMF_OAUTH_ANILIST_CLIENT_SECRET",
             OAuthProvider::Mal => "KOMF_OAUTH_MAL_CLIENT_SECRET",
             OAuthProvider::Bangumi => "KOMF_OAUTH_BANGUMI_CLIENT_SECRET",
+            OAuthProvider::MangaBaka => "KOMF_OAUTH_MANGABAKA_CLIENT_SECRET",
         }
     }
 }
@@ -155,6 +160,21 @@ impl OAuthApp {
                 scope: None,
                 relay_url: "https://dyphire.github.io/komf-rs/oauth-relay/bangumi.html",
                 secret_env_var: "KOMF_OAUTH_BANGUMI_CLIENT_SECRET",
+            },
+            OAuthProvider::MangaBaka => OAuthApp {
+                // MangaBaka 机密 client（OIDC；token 交换必须带 secret）。
+                // PKCE 官方仅支持 S256；scope 需 offline_access 才会下发 refresh_token，
+                // openid 才能让 userinfo 返回标准 claims（preferred_username）。
+                client_id: "flUhLWZbgpGRFcZnxLlNGXotAhxmMFbc",
+                client_secret: secret_from(option_env!("KOMF_OAUTH_MANGABAKA_CLIENT_SECRET")),
+                authorize_url: "https://mangabaka.org/auth/oauth2/authorize",
+                token_url: "https://mangabaka.org/auth/oauth2/token",
+                confidential: true,
+                requires_secret: true,
+                pkce: PkceMethod::S256,
+                scope: Some("library.read library.write profile offline_access openid"),
+                relay_url: "https://dyphire.github.io/komf-rs/oauth-relay/mangabaka.html",
+                secret_env_var: "KOMF_OAUTH_MANGABAKA_CLIENT_SECRET",
             },
         }
     }
@@ -612,11 +632,31 @@ impl OAuthManager {
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             }
+            OAuthProvider::MangaBaka => {
+                // OIDC userinfo；字段按 OIDC 标准取 preferred_username → nickname → name。
+                let resp = self
+                    .http
+                    .get("https://mangabaka.org/auth/oauth2/userinfo")
+                    .header("Authorization", &bearer)
+                    .send()
+                    .await
+                    .ok()?;
+                if !resp.status().is_success() {
+                    return None;
+                }
+                let value = resp.json::<serde_json::Value>().await.ok()?;
+                value
+                    .get("preferred_username")
+                    .or_else(|| value.get("nickname"))
+                    .or_else(|| value.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }
         };
         result
     }
 
-    /// 取当前可用的 access token（过期自动刷新；AniList 无 refresh → 清除并返回 None）。
+    /// 取当前可用的 access token（过期自动刷新；无 refresh → 清除并返回 None）。
     pub async fn access_token(&self, provider: OAuthProvider) -> Option<String> {
         let token = {
             let inner = self.inner.read().unwrap();
@@ -625,8 +665,8 @@ impl OAuthManager {
         if !token.expired() {
             return Some(token.access_token);
         }
-        let Some(refresh_token) = token.refresh_token.clone() else {
-            // 无 refresh（AniList）：清除，需重新授权
+        let Some(_) = token.refresh_token.clone() else {
+            // 无 refresh（AniList 等）：清除，需重新授权
             self.logout(provider);
             return None;
         };
@@ -639,6 +679,31 @@ impl OAuthManager {
                 app.secret_env_var
             );
             self.logout(provider);
+            return None;
+        }
+        match self.refresh_now(provider).await {
+            Some(access_token) => Some(access_token),
+            None => {
+                tracing::warn!("OAuth refresh failed for {}", provider.as_str());
+                self.logout(provider);
+                None
+            }
+        }
+    }
+
+    /// 强制刷新：源站 401（token 被判无效，本地 expires_at 尚未触发）时调用。
+    /// 有 refresh_token 且 secret 齐备则直接走 token 刷新；成功返回新 access token
+    /// 并持久化（username 保留），失败返回 None（由调用方决定是否登出）。
+    pub async fn refresh_now(&self, provider: OAuthProvider) -> Option<String> {
+        let token = {
+            let inner = self.inner.read().unwrap();
+            inner.tokens.get(&provider).cloned()
+        }?;
+        let Some(refresh_token) = token.refresh_token.clone() else {
+            return None;
+        };
+        let app = OAuthApp::for_provider(provider);
+        if app.requires_secret && app.client_secret.is_none() {
             return None;
         }
         let mut form: Vec<(&str, String)> = vec![
@@ -654,15 +719,7 @@ impl OAuthManager {
         }
         let fresh = match self.exchange(app.token_url, &form).await {
             Ok(t) if !t.access_token.is_empty() => t,
-            Ok(_) => {
-                self.logout(provider);
-                return None;
-            }
-            Err(e) => {
-                tracing::warn!("OAuth refresh failed for {}: {e}", provider.as_str());
-                self.logout(provider);
-                return None;
-            }
+            _ => return None,
         };
         let username = {
             let inner = self.inner.read().unwrap();
@@ -745,8 +802,13 @@ mod tests {
     /// 运行时修改环境变量不影响已编译的二进制。
     #[test]
     fn secret_reads_from_build_env_not_runtime() {
-        // 三平台变量名与强制要求
-        for p in [OAuthProvider::Anilist, OAuthProvider::Mal, OAuthProvider::Bangumi] {
+        // 四平台变量名与强制要求
+        for p in [
+            OAuthProvider::Anilist,
+            OAuthProvider::Mal,
+            OAuthProvider::Bangumi,
+            OAuthProvider::MangaBaka,
+        ] {
             let app = OAuthApp::for_provider(p);
             assert!(app.requires_secret, "{} requires secret", p.as_str());
             assert_eq!(app.secret_env_var, p.secret_env_var());
@@ -808,6 +870,10 @@ mod tests {
             (
                 OAuthProvider::Bangumi,
                 option_env!("KOMF_OAUTH_BANGUMI_CLIENT_SECRET"),
+            ),
+            (
+                OAuthProvider::MangaBaka,
+                option_env!("KOMF_OAUTH_MANGABAKA_CLIENT_SECRET"),
             ),
         ];
         for (p, build_val) in cases {

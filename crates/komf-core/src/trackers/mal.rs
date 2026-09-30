@@ -21,31 +21,49 @@ impl MalTracker {
         Self { http, oauth }
     }
 
-    /// 源站判定 token 失效（HTTP 401）时清除登录态，避免永久卡在 500。
+    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除登录态。
     fn note_unauthorized(&self) {
         if let Some(manager) = &self.oauth {
             manager.logout(OAuthProvider::Mal);
         }
     }
 
-    /// 带 Bearer 的 GET，解析为 JSON（401 时 access_token 已自动刷新过，直接报错）。
+    /// 带 Bearer 的 GET，解析为 JSON。遇 401 先强制刷新重试一次，刷新失败或
+    /// 重试仍 401 才清登录态（四个 tracker 统一行为：401→强制刷新→重试一次→仍失败才登出）。
     async fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
-        let token = self.token().await?;
-        let response = self
+        let mut token = self.token().await?;
+        let mut response = self
             .http
             .get(url)
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
             .send()
             .await
             .map_err(|e| format!("mal request failed: {e}"))?;
-        let status = response.status();
+        let mut status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let refreshed = match &self.oauth {
+                Some(manager) => manager.refresh_now(OAuthProvider::Mal).await,
+                None => None,
+            };
+            if let Some(new_token) = refreshed {
+                token = new_token;
+                response = self
+                    .http
+                    .get(url)
+                    .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("mal request failed: {e}"))?;
+                status = response.status();
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.note_unauthorized();
+            }
+        }
         let body: serde_json::Value = response
             .json()
             .await
             .map_err(|e| format!("mal response parse failed: {e}"))?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized();
-        }
         if !status.is_success() {
             return Err(format!(
                 "mal API error (HTTP {status}): {}",
@@ -266,7 +284,6 @@ impl TrackerService for MalTracker {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid mal id: {track_id}"))?;
-        let token = self.token().await?;
         let mut params: Vec<(String, String)> = Vec::new();
         if let Some(status) = update.status {
             params.push(("status".into(), Self::to_status_str(status).into()));
@@ -302,18 +319,39 @@ impl TrackerService for MalTracker {
             .map(|(k, v)| format!("{}={}", url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(), url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()))
             .collect::<Vec<_>>()
             .join("&");
-        let response = self
+        let mut token = self.token().await?;
+        let mut response = self
             .http
             .patch(format!("{BASE_URL}/manga/{id}/my_list_status"))
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(form)
+            .body(form.clone())
             .send()
             .await
             .map_err(|e| format!("mal update failed: {e}"))?;
-        let status = response.status();
+        let mut status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized();
+            // 401：先强制刷新重试一次，失败才清登录态（与 get_json 一致）。
+            let refreshed = match &self.oauth {
+                Some(manager) => manager.refresh_now(OAuthProvider::Mal).await,
+                None => None,
+            };
+            if let Some(new_token) = refreshed {
+                token = new_token;
+                response = self
+                    .http
+                    .patch(format!("{BASE_URL}/manga/{id}/my_list_status"))
+                    .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(form.clone())
+                    .send()
+                    .await
+                    .map_err(|e| format!("mal update failed: {e}"))?;
+                status = response.status();
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.note_unauthorized();
+            }
         }
         if !status.is_success() {
             let body: serde_json::Value = response.json().await.unwrap_or_default();

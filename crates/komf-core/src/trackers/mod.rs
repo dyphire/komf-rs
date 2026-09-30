@@ -12,6 +12,7 @@
 pub mod anilist;
 pub mod bangumi;
 pub mod mal;
+pub mod mangabaka;
 
 use std::sync::Arc;
 
@@ -99,22 +100,29 @@ pub trait TrackerService: Send + Sync {
     async fn update(&self, track_id: &str, update: &TrackUpdate) -> Result<(), String>;
 }
 
-/// 三个平台的 tracker 容器（app 层持有，供路由按 provider 分发）。
+/// 四个平台的 tracker 容器（app 层持有，供路由按 provider 分发）。
 pub struct TrackerServices {
     anilist: Arc<dyn TrackerService>,
     mal: Arc<dyn TrackerService>,
     bangumi: Arc<dyn TrackerService>,
+    mangabaka: Arc<dyn TrackerService>,
 }
 
 impl TrackerServices {
     pub fn new(
         http: reqwest::Client,
         oauth: Option<Arc<crate::oauth::OAuthManager>>,
+        series_title_language: Option<String>,
     ) -> Self {
         Self {
             anilist: Arc::new(anilist::AniListTracker::new(http.clone(), oauth.clone())),
             mal: Arc::new(mal::MalTracker::new(http.clone(), oauth.clone())),
             bangumi: Arc::new(bangumi::BangumiTracker::new(http.clone(), oauth.clone())),
+            mangabaka: Arc::new(mangabaka::MangaBakaTracker::new(
+                http.clone(),
+                oauth.clone(),
+                series_title_language,
+            )),
         }
     }
 
@@ -123,6 +131,7 @@ impl TrackerServices {
             "anilist" => Some(self.anilist.clone()),
             "mal" => Some(self.mal.clone()),
             "bangumi" => Some(self.bangumi.clone()),
+            "mangabaka" => Some(self.mangabaka.clone()),
             _ => None,
         }
     }
@@ -132,6 +141,7 @@ impl TrackerServices {
             self.anilist.clone(),
             self.mal.clone(),
             self.bangumi.clone(),
+            self.mangabaka.clone(),
         ]
     }
 }

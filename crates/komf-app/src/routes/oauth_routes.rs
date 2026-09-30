@@ -8,8 +8,8 @@
 //!   热重载（使 MAL 等"登录后才注册"的 provider 生效）并 302 回 WebUI；
 //! - `status` / `logout`：供 WebUI 展示登录态与退出。
 //!
-//! MangaBaka 尚未接入（无共享 client），`{provider}` 仅接受
-//! anilist / mal / bangumi，其余返回 404。
+//! MangaBaka 已接入（OIDC，PKCE S256），`{provider}` 接受
+//! anilist / mal / bangumi / mangabaka，其余返回 404。
 
 use crate::routes::SharedState;
 use axum::extract::{Path, Query, State};
