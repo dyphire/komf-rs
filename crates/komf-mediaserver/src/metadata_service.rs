@@ -306,6 +306,15 @@ impl MetadataService {
         if candidates.is_empty() {
             return LinksFetchOutcome::NoCandidates;
         }
+        // 候选顺序尊重 provider 配置顺序（与自动搜索路径一致）：
+        // 按配置列表索引重排；未启用的 provider 排最后并保持 links 原相对顺序。
+        let configured: Vec<CoreProviders> = self
+            .metadata_providers
+            .providers(&series.library_id.0)
+            .iter()
+            .map(|p| p.provider_name())
+            .collect();
+        let candidates = order_by_provider_config(candidates, &configured);
         let series_title = if series.metadata.title.trim().is_empty() {
             series.name.clone()
         } else {
@@ -1740,6 +1749,21 @@ fn links_match_providers(links: &[WebLink]) -> Vec<(CoreProviders, ProviderSerie
     result
 }
 
+/// 将 links 候选按 provider 配置顺序重排：配置列表索引升序；
+/// 不在配置列表中的（未启用）排最后，并保持 links 原相对顺序（稳定排序）。
+fn order_by_provider_config(
+    mut candidates: Vec<(CoreProviders, ProviderSeriesId)>,
+    configured: &[CoreProviders],
+) -> Vec<(CoreProviders, ProviderSeriesId)> {
+    let order: std::collections::HashMap<CoreProviders, usize> = configured
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (*p, i))
+        .collect();
+    candidates.sort_by_key(|(prov, _)| order.get(prov).copied().unwrap_or(usize::MAX));
+    candidates
+}
+
 /// 提取 url 中首个 prefix 后的路径段（到 / ? # 为止）。
 fn extract_path_segment(url: &str, prefix: &str) -> Option<String> {
     let rest = url.split(prefix).nth(1)?;
@@ -2276,5 +2300,53 @@ mod tests {
         assert_eq!(links_match_providers(&[link("Shikimori", "https://shikimori.one/manga/1")]), vec![]);
         assert_eq!(links_match_providers(&[]), vec![]);
         assert_eq!(links_match_providers(&[link("Random", "https://example.com/x")]), vec![]);
+    }
+
+    #[test]
+    fn order_by_provider_config_respects_config_sequence() {
+        // links 候选按 provider 配置顺序重排
+        let candidates = vec![
+            (CoreProviders::Mangadex, ProviderSeriesId("m".to_string())),
+            (CoreProviders::Bangumi, ProviderSeriesId("b".to_string())),
+            (CoreProviders::Mal, ProviderSeriesId("mal".to_string())),
+        ];
+        let configured = vec![
+            CoreProviders::Bangumi,
+            CoreProviders::Mal,
+            CoreProviders::Mangadex,
+        ];
+        assert_eq!(
+            order_by_provider_config(candidates, &configured),
+            vec![
+                (CoreProviders::Bangumi, ProviderSeriesId("b".to_string())),
+                (CoreProviders::Mal, ProviderSeriesId("mal".to_string())),
+                (CoreProviders::Mangadex, ProviderSeriesId("m".to_string())),
+            ]
+        );
+        // 未启用（不在配置列表）的排最后，多个未启用保持 links 原相对顺序
+        let candidates = vec![
+            (CoreProviders::Mangadex, ProviderSeriesId("m".to_string())),
+            (CoreProviders::Anilist, ProviderSeriesId("a".to_string())),
+            (CoreProviders::Bangumi, ProviderSeriesId("b".to_string())),
+        ];
+        let configured = vec![CoreProviders::Bangumi];
+        assert_eq!(
+            order_by_provider_config(candidates, &configured),
+            vec![
+                (CoreProviders::Bangumi, ProviderSeriesId("b".to_string())),
+                (CoreProviders::Mangadex, ProviderSeriesId("m".to_string())),
+                (CoreProviders::Anilist, ProviderSeriesId("a".to_string())),
+            ]
+        );
+        // 全部未启用：保持原顺序；空候选：空
+        let candidates = vec![
+            (CoreProviders::Mal, ProviderSeriesId("mal".to_string())),
+            (CoreProviders::Anilist, ProviderSeriesId("a".to_string())),
+        ];
+        assert_eq!(
+            order_by_provider_config(candidates.clone(), &[]),
+            candidates
+        );
+        assert_eq!(order_by_provider_config(vec![], &[CoreProviders::Bangumi]), vec![]);
     }
 }
