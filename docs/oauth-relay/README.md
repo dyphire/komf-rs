@@ -15,7 +15,7 @@ WebUI 发起授权（state 携带 redirectUrl = 实例 /api/oauth/{provider}/cal
 
 - **AniList（隐式流）**：token 在 URL fragment，服务器收不到，由本页移入 query 后跳回；
 - **MAL / Bangumi / MangaBaka（授权码流）**：code 在 query，原样透传；
-- `redirectUrl` 仅允许 `http(s)://…/api/oauth/{provider}/callback`，防止开放重定向；
+- `redirectUrl` 仅允许 `http(s)://…/api/oauth/{provider}/callback`（路径可带任意前缀，配合 `start` 的 `redirect_path_prefix` 支持反代/子路径部署），防止开放重定向；
 - 本页为纯静态资源，无后端、无外部依赖，可托管于 GitHub Pages / Cloudflare Pages 等任意静态托管。
 
 ## 文件

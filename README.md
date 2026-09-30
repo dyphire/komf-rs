@@ -218,7 +218,7 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 Server-side OAuth2 login for metadata providers, using a **shared client + official relay page** (no per-instance callback registration). See [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md) for the mechanism, client-secret injection and deployment notes.
 
-- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal)
+- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal). Optional `?redirect_path_prefix=/prefix` prefixes the instance callback path, for reverse proxies that mount the callback inside their own namespace (e.g. kmrs under `/api/v1/komf`) or sub-path deployments
 - `GET /api/oauth/{provider}/callback` — OAuth callback (via the relay page): exchanges the code, stores the token in `<configDir>/oauth.sqlite`, then `302` to `/?oauth=success` (or `/?oauth=error&message=...`)
 - `GET /api/oauth/{provider}/status` — `200` JSON `{"logged_in":bool,"username":string|null}`
 - `POST /api/oauth/{provider}/logout` — `204`, clears the stored token

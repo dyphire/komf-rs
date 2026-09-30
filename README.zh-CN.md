@@ -219,7 +219,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 元数据 provider 的服务端 OAuth2 登录，采用**共享 client + 官方中转页**方案（无需按实例注册回调）。机制、client_secret 注入与部署说明见 [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md)。
 
-- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal 使用 PKCE）
+- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal 使用 PKCE）。可选 `?redirect_path_prefix=/prefix` 给回调路径加前缀，用于反代把回调挂进自有命名空间（如 kmrs 的 `/api/v1/komf`）或子路径部署
 - `GET /api/oauth/{provider}/callback` —— OAuth 回调（经中转页转交）：校验后以 code 换取 token，存入 `<configDir>/oauth.sqlite`，随后 `302` 到 `/?oauth=success`（或 `/?oauth=error&message=...`）
 - `GET /api/oauth/{provider}/status` —— `200` JSON `{"logged_in":bool,"username":string|null}`
 - `POST /api/oauth/{provider}/logout` —— `204`，清除已存 token
