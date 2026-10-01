@@ -1343,8 +1343,28 @@ impl BookWalkerDbDownloader {
         });
     }
 
+    /// 库健康校验：能打开且主表 series 可查询。损坏文件 `Connection::open` 不立即失败
+    /// （SQLite 延迟读文件头），必须实际执行查询才能判定；坏文件在 prepare/query 时报
+    /// "file is not a database" / "database disk image is malformed" → false。
+    /// 用 query 而非 query_row：空表（无数据行）也是健康库，query_row 对空表报 NoRows 会误判。
+    fn database_usable(path: &Path) -> bool {
+        match rusqlite::Connection::open(path) {
+            Ok(c) => match c.prepare("SELECT 1 FROM series LIMIT 1") {
+                Ok(mut st) => st.query([]).is_ok(),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        }
+    }
+
     /// HEAD 检查 last-modified 是否变化；无法判断（无响应头）视为未变化。
     async fn db_changed(&self) -> Result<bool, String> {
+        // 加固：库存在但损坏（文件在、不可查询）→ 无论 HEAD 结果如何都强制重下，
+        // 由 tmp+rename 覆盖坏文件自愈。
+        if !Self::database_usable(&self.database_file) {
+            tracing::warn!("BookWalker database exists but is not usable; forcing redownload");
+            return Ok(true);
+        }
         let response = self
             .http
             .head(DATABASE_URL)
@@ -1520,6 +1540,39 @@ impl Clone for BookWalkerDbDownloader {
 mod tests {
     use super::*;
     use crate::config::{BookMetadataConfig, SeriesMetadataConfig};
+
+    #[test]
+    fn database_usable_detects_corrupt() {
+        let dir = std::env::temp_dir().join(format!(
+            "bkwk_usable_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 随机字节坏文件（open 延迟读头，须查询判定）→ false
+        let bad = dir.join("bad.sqlite");
+        std::fs::write(&bad, vec![0xabu8; 4096]).unwrap();
+        assert!(!BookWalkerDbDownloader::database_usable(&bad));
+        // 合法 SQLite 但缺 series 主表 → false
+        let empty = dir.join("empty.sqlite");
+        {
+            let c = rusqlite::Connection::open(&empty).unwrap();
+            c.execute_batch("CREATE TABLE other (x INTEGER);").unwrap();
+        }
+        assert!(!BookWalkerDbDownloader::database_usable(&empty));
+        // 含 series 表 → true
+        let good = dir.join("good.sqlite");
+        {
+            let c = rusqlite::Connection::open(&good).unwrap();
+            c.execute_batch("CREATE TABLE series (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+        assert!(BookWalkerDbDownloader::database_usable(&good));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn test_series() -> BookWalkerSeries {
         BookWalkerSeries {

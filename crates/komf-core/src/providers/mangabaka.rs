@@ -23,7 +23,7 @@ use komf_api_models::config::DownloadProgress;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2291,6 +2291,20 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
 ///
 /// 元数据（timestamp / checksum）存于 `mangabaka/` 目录下，对应 Kotlin
 /// `MangaBakaDbMetadata`（timestamp、checksum.sha1 文件）。
+/// 库健康校验：能打开且主表 series 可查询。损坏文件 `Connection::open` 不立即失败
+/// （SQLite 延迟读文件头），必须实际执行查询才能判定；坏文件在 prepare/query 时报
+/// "file is not a database" / "database disk image is malformed" → false。
+/// 用 query 而非 query_row：空表（无数据行）也是健康库，query_row 对空表报 NoRows 会误判。
+fn database_usable(path: &Path) -> bool {
+    match rusqlite::Connection::open(path) {
+        Ok(c) => match c.prepare("SELECT 1 FROM series LIMIT 1") {
+            Ok(mut st) => st.query([]).is_ok(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
 pub struct MangaBakaDbDownloader {
     pub work_dir: PathBuf,
     pub database_archive: PathBuf,
@@ -2446,8 +2460,14 @@ impl MangaBakaDbDownloader {
                 .trim()
                 .to_string();
             if stored == new_checksum {
-                emit(sender, DownloadProgress::FinishedEvent);
-                return Ok(());
+                // 加固：checksum 一致但库实际损坏（文件在、不可查询）→ 不跳过，强制重下自愈
+                if database_usable(&self.database_file) {
+                    emit(sender, DownloadProgress::FinishedEvent);
+                    return Ok(());
+                }
+                tracing::warn!(
+                    "mangabaka database exists but is not usable; forcing redownload"
+                );
             }
         }
         // 容错：保留旧库与元数据；下载/解压/建索引写临时文件，成功后再原子替换，
@@ -3038,6 +3058,39 @@ pub fn to_api_linked(linked: &MangaBakaLinkedSeriesDto) -> komf_api_models::mang
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_usable_detects_corrupt() {
+        let dir = std::env::temp_dir().join(format!(
+            "mangabaka_usable_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 随机字节坏文件（open 延迟读头，须查询判定）→ false
+        let bad = dir.join("bad.sqlite");
+        std::fs::write(&bad, vec![0xabu8; 4096]).unwrap();
+        assert!(!database_usable(&bad));
+        // 合法 SQLite 但缺 series 主表 → false
+        let empty = dir.join("empty.sqlite");
+        {
+            let c = rusqlite::Connection::open(&empty).unwrap();
+            c.execute_batch("CREATE TABLE other (x INTEGER);").unwrap();
+        }
+        assert!(!database_usable(&empty));
+        // 含 series 表 → true
+        let good = dir.join("good.sqlite");
+        {
+            let c = rusqlite::Connection::open(&good).unwrap();
+            c.execute_batch("CREATE TABLE series (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+        assert!(database_usable(&good));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn status_mapping() {
