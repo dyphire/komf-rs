@@ -1,7 +1,7 @@
 //! 元数据后处理 —— 对应 `MetadataPostProcessor.kt`。
 use crate::model::{MediaServerBookId, SeriesAndBookMetadata};
 use komf_core::model::{
-    BookMetadata, MediaType, PublisherType, ReadingDirection, SeriesMetadata, SeriesTitle,
+    BookMetadata, MediaType, PublisherType, ReadingDirection, SeriesMetadata, SeriesTitle, TitleType,
 };
 use komf_core::util::{replace_fullwidth_chars, strip_accents, BookNameParser};
 use std::collections::HashMap;
@@ -84,6 +84,25 @@ impl MetadataPostProcessor {
     ) -> SeriesMetadata {
         let alt_titles: Vec<SeriesTitle> = if self.alternative_series_titles {
             let mut titles: Vec<SeriesTitle> = series.titles.iter().cloned().collect();
+            // 去重（必须在排序前）：同名标题（distinct_name 相同）保留一个——
+            // 优先级：① Native 无语言（原始名）> ② 有语言 > ③ 非 Native 无语言；
+            // 同级时保留先出现的（拼接顺序 = 主 provider 在前，即主 provider 优先）。
+            // 排序按语言优先级会打乱来源顺序，若在排序后去重，
+            // 其他 provider 语言更靠前的同名变体会挤掉主 provider 的。
+            let mut unique: Vec<SeriesTitle> = Vec::new();
+            for t in titles {
+                if let Some(existing) = unique
+                    .iter_mut()
+                    .find(|e| distinct_name(&e.name) == distinct_name(&t.name))
+                {
+                    if dedup_score(&t) > dedup_score(existing) {
+                        *existing = t;
+                    }
+                } else {
+                    unique.push(t);
+                }
+            }
+            titles = unique;
             // 配置列表中的语言按配置位置排前（替代按语言名字母序——
             // 字母序让 "ja" 恒先于 "ja-ro"，配置顺序失效；Kavita 只有单个
             // localizedName 字段取第一个备选标题，配置优先的语言必须排在前面）。
@@ -100,8 +119,6 @@ impl MetadataPostProcessor {
                     (None, None) => std::cmp::Ordering::Equal,
                 },
             });
-            let mut seen = std::collections::HashSet::new();
-            titles.retain(|t| seen.insert(distinct_name(&t.name)));
             titles
         } else {
             Vec::new()
@@ -339,6 +356,17 @@ impl MetadataPostProcessor {
 
 pub(crate) fn distinct_name(title: &str) -> String {
     replace_fullwidth_chars(&strip_accents(&title.replace(' ', ""))).to_lowercase()
+}
+
+/// 备选去重保留优先级：同名标题（distinct_name 相同）冲突时保留分数更高的。
+/// ① Native 无语言（原始名，最保真）> ② 有语言（保留语言信息）> ③ 非 Native 无语言。
+fn dedup_score(title: &SeriesTitle) -> u8 {
+    let is_native = matches!(title.r#type, Some(TitleType::Native));
+    match (is_native, title.language.is_some()) {
+        (true, false) => 2,
+        (_, true) => 1,
+        _ => 0,
+    }
 }
 
 /// 在真实排序场景（updater）中使用的按卷/章排序逻辑 —— 对应 Kotlin `orderBook`。
@@ -595,6 +623,71 @@ mod tests {
         // 在前（en < zh）、无语言最后
         let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(alts, vec!["Frieren", "葬送的芙莉莲", "葬送のフリーレン"]);
+    }
+
+    /// 去重时主 provider 的备选优先保留：聚合拼接顺序（original + new）即来源顺序，
+    /// 同名标题（如两 provider 的 Berserk 不同语言变体）中，即使其他 provider 的
+    /// 变体语言优先级更靠前（en < ja-ro），仍保留主 provider 的（ja-ro）。
+    #[test]
+    fn alt_titles_dedup_prefers_primary_provider() {
+        // 聚合后 series.titles：主 provider 在前，其他 provider 在后
+        let series = SeriesMetadata {
+            titles: vec![
+                SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }, // 主 provider 主标题
+                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("ja-ro".into()) }, // 主 provider 备选
+                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) }, // 其他 provider 同名（语言更靠前）
+            ],
+            ..Default::default()
+        };
+        let out = processor(None).process(&SeriesAndBookMetadata::new(series, HashMap::new()));
+        // 主标题 = all.first() = ベルセルク → 剔除同名；Berserk 同名去重
+        // → 保留主 provider 的 ja-ro（en 被去重）
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Berserk"]);
+        assert_eq!(out.series_metadata.titles[0].language.as_deref(), Some("ja-ro"));
+    }
+
+    /// 去重时同名标题优先保留有语言的：主 provider 的同名备选无语言、
+    /// 其他 provider 的有语言时，无语言版本让位（保留语言信息），
+    /// 而非盲目按来源顺序保留无语言的。
+    #[test]
+    fn alt_titles_dedup_prefers_languaged() {
+        let series = SeriesMetadata {
+            titles: vec![
+                SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }, // 主 provider 主标题
+                SeriesTitle { name: "Berserk".into(), r#type: None, language: None }, // 主 provider 备选（无语言）
+                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) }, // 其他 provider 同名（有语言）
+            ],
+            ..Default::default()
+        };
+        let out = processor(None).process(&SeriesAndBookMetadata::new(series, HashMap::new()));
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Berserk"]);
+        // 无语言的让位 → 保留有语言的 en 版本
+        assert_eq!(out.series_metadata.titles[0].language.as_deref(), Some("en"));
+    }
+
+    /// 同名时无语言的 Native 优先于有语言的非 Native：原始名（Native 无语言）
+    /// 最优先，即使其他 provider 的同名标题有语言也保留 Native 无语言版本。
+    #[test]
+    fn alt_titles_dedup_prefers_native_unlanguaged() {
+        let series = SeriesMetadata {
+            titles: vec![
+                SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }, // 主 provider 主标题
+                SeriesTitle { name: "Berserk".into(), r#type: Some(TitleType::Native), language: None }, // 主 provider 备选（Native 无语言）
+                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) }, // 其他 provider 同名（有语言非 Native）
+            ],
+            ..Default::default()
+        };
+        let out = processor(None).process(&SeriesAndBookMetadata::new(series, HashMap::new()));
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Berserk"]);
+        // Native 无语言优先 → 保留 None/Native 版本（en 被让位）
+        assert!(out.series_metadata.titles[0].language.is_none());
+        assert_eq!(out.series_metadata.titles[0].r#type, Some(TitleType::Native));
     }
 
     /// alternativeTitles=false（excluded=全量标题名）：主标题语言选择仍基于全量候选，
