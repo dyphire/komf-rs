@@ -175,9 +175,14 @@ pub struct SeriesAndBookMetadata {
     pub book_oneshots: std::collections::HashMap<MediaServerBookId, bool>,
     /// 不写入备选标题的标题名集合（Rust 扩展，`seriesMetadata.alternativeTitles=false`
     /// 的 provider 在匹配/拉取时将其全量标题名记入此处）。
-    /// 后处理选出主标题后，从备选中剔除这些名字（主标题本身不受影响，
-    /// 因此主标题语言选择仍基于全量候选，不受此开关影响）。
+    /// 聚合下剔除已在 merge 阶段按来源完成（名单置空，不再透传后处理）；
+    /// 非聚合单 provider 场景仍由后处理按名剔除（仅影响该 provider 自身）。
     pub excluded_alt_titles: Vec<String>,
+    /// 主标题选择的全量候选（Rust 扩展）：所有 provider 的标题不剔除地累积于此，
+    /// 备选排除（excluded_alt_titles / series_metadata.titles 剔除）只影响备选写入，
+    /// 不影响主标题从全量候选选择（`seriesMetadata.alternativeTitles=false`
+    /// 不应影响主标题选择，主标题候选始终全量）。
+    pub all_series_titles: Vec<komf_core::model::SeriesTitle>,
 }
 
 impl SeriesAndBookMetadata {
@@ -185,11 +190,13 @@ impl SeriesAndBookMetadata {
         series_metadata: komf_core::model::SeriesMetadata,
         book_metadata: std::collections::HashMap<MediaServerBookId, Option<komf_core::model::BookMetadata>>,
     ) -> Self {
+        let all_series_titles = series_metadata.titles.clone();
         Self {
             series_metadata,
             book_metadata,
             book_oneshots: std::collections::HashMap::new(),
             excluded_alt_titles: Vec::new(),
+            all_series_titles,
         }
     }
 

@@ -1160,24 +1160,8 @@ impl MetadataService {
         original: SeriesAndBookMetadata,
         new: SeriesAndBookMetadata,
     ) -> SeriesAndBookMetadata {
-        // alternativeTitles=false 的 provider（如 aggregate 下的 anilist）：其 excluded
-        // 名单中的标题名先从自身 titles 剔除（不参与合并）。否则名单在并集后会被
-        // 后处理用于剔除备选，误删其他 provider 的同名备选标题（aggregate 下
-        // bangumi+anilist：bangumi 的 Berserk/ベルセルク 会被 anilist 名单误删）。
-        let mut new_series_metadata = new.series_metadata.clone();
-        if !new.excluded_alt_titles.is_empty() {
-            let excluded: std::collections::HashSet<String> = new
-                .excluded_alt_titles
-                .iter()
-                .map(|n| crate::metadata_post_processor::distinct_name(n))
-                .collect();
-            new_series_metadata
-                .titles
-                .retain(|t| !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name)));
-        }
-        let merged_series = self
-            .metadata_merger
-            .merge_series_metadata(&original.series_metadata, &new_series_metadata);
+        let (merged_series, all_series_titles) =
+            merge_series_metadata_with_exclusions(&self.metadata_merger, &original, &new);
 
         let original_map: HashMap<String, Option<BookMetadata>> = original
             .book_metadata
@@ -1202,11 +1186,13 @@ impl MetadataService {
             .collect();
 
         // Kotlin mergeMetadata 的 key 为 MediaServerBook（保留 original 的 oneshot 信息）。
-        // excluded 名单只保留 original（主 provider）的：new 的名单已随其标题剔除完成
-        // 使命，并入会误伤其他 provider 的同名备选标题（见上）。
-        let excluded_alt_titles = original.excluded_alt_titles;
+        // 备选剔除已在 merge 阶段按来源完成（merge_series_metadata_with_exclusions
+        // 将双方 excluded 从各自 titles 剔除），excluded 名单不再透传后处理（置空），
+        // 避免后处理对并集按名剔除误伤他人。
+        let excluded_alt_titles = Vec::new();
         let mut merged_meta =
             SeriesAndBookMetadata::new(merged_series, merged_books).with_book_oneshots(original.book_oneshots);
+        merged_meta.all_series_titles = all_series_titles;
         merged_meta.excluded_alt_titles = excluded_alt_titles;
         merged_meta
     }
@@ -1320,6 +1306,51 @@ fn excluded_alt_names(
     }
 }
 
+/// 合并系列元数据（Rust 扩展，便于单测）：备选剔除按来源。
+///
+/// alternativeTitles=false 的 provider（如 aggregate 下的 anilist）：其 excluded
+/// 名单中的标题名先从**自身** titles 剔除（不参与合并），只影响该 provider 自身的
+/// 备选，不误删其他 provider 的同名备选标题（aggregate 下 bangumi+anilist：
+/// bangumi 的 Berserk/ベルセルク 不被 anilist 名单误删）。
+///
+/// 返回 (合并后的 SeriesMetadata, 主标题全量候选)：
+/// 全量候选为双方 all_series_titles 拼接（不剔除），保证 provider 禁用备选
+/// 写入不影响主标题从全量候选选择（无论是否开启备选写入，主标题候选全量）。
+fn merge_series_metadata_with_exclusions(
+    merger: &MetadataMerger,
+    original: &SeriesAndBookMetadata,
+    new: &SeriesAndBookMetadata,
+) -> (komf_core::model::SeriesMetadata, Vec<komf_core::model::SeriesTitle>) {
+    let mut new_series_metadata = new.series_metadata.clone();
+    if !new.excluded_alt_titles.is_empty() {
+        let excluded: std::collections::HashSet<String> = new
+            .excluded_alt_titles
+            .iter()
+            .map(|n| crate::metadata_post_processor::distinct_name(n))
+            .collect();
+        new_series_metadata
+            .titles
+            .retain(|t| !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name)));
+    }
+    // original（主 provider）的 excluded 同样先从自身 titles 剔除（对称处理）：
+    // 备选排除只影响该 provider 自身，不连坐其他 provider 的同名备选。
+    let mut original_series_metadata = original.series_metadata.clone();
+    if !original.excluded_alt_titles.is_empty() {
+        let excluded: std::collections::HashSet<String> = original
+            .excluded_alt_titles
+            .iter()
+            .map(|n| crate::metadata_post_processor::distinct_name(n))
+            .collect();
+        original_series_metadata
+            .titles
+            .retain(|t| !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name)));
+    }
+    let merged_series = merger.merge_series_metadata(&original_series_metadata, &new_series_metadata);
+    let mut all_series_titles = original.all_series_titles.clone();
+    all_series_titles.extend(new.all_series_titles.iter().cloned());
+    (merged_series, all_series_titles)
+}
+
 /// Rust 扩展：按配置对系列元数据应用简繁转换（update.enabled + update.fields 过滤）。
 /// 纯函数，便于单测。
 fn apply_chinese_conversion_to_metadata(
@@ -1338,6 +1369,7 @@ fn apply_chinese_conversion_to_metadata(
         book_metadata,
         book_oneshots,
         mut excluded_alt_titles,
+        mut all_series_titles,
     } = metadata;
     for field in &cfg.update.fields {
         match field {
@@ -1346,6 +1378,10 @@ fn apply_chinese_conversion_to_metadata(
                     t.name = converter.convert(&t.name);
                 }
                 for t in &mut series_metadata.titles {
+                    t.name = converter.convert(&t.name);
+                }
+                // 主标题候选与 titles 同源，保持同步转换。
+                for t in &mut all_series_titles {
                     t.name = converter.convert(&t.name);
                 }
                 // excluded 名单与 titles 同源，保持同步转换，否则后处理按名剔除时对不上。
@@ -1380,6 +1416,7 @@ fn apply_chinese_conversion_to_metadata(
         book_metadata,
         book_oneshots,
         excluded_alt_titles,
+        all_series_titles,
     }
 }
 
@@ -2348,5 +2385,143 @@ mod tests {
             candidates
         );
         assert_eq!(order_by_provider_config(vec![], &[CoreProviders::Bangumi]), vec![]);
+    }
+
+    /// 聚合 merge：备选剔除按来源（双方 excluded 从各自 titles 剔除）。
+    /// 主 provider 禁写备选不连坐其他 provider 的同名备选（new 的 Berserk 保留）；
+    /// 主标题全量候选 = 双方 all_series_titles 拼接（不剔除）。
+    #[test]
+    fn merge_exclusions_are_per_provider_and_candidates_stay_full() {
+        use komf_core::model::{SeriesMetadata, SeriesTitle};
+        let merger = MetadataMerger::new(false, false);
+        // 主 provider：禁写备选（excluded = 全部标题名）
+        let original_titles = vec![
+            SeriesTitle { name: "ベルセルク".into(), r#type: None, language: Some("ja".into()) },
+            SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) },
+        ];
+        let mut original = SeriesAndBookMetadata::new(
+            SeriesMetadata {
+                title: Some(original_titles[0].clone()),
+                titles: original_titles.clone(),
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+        );
+        original.excluded_alt_titles = original_titles.iter().map(|t| t.name.clone()).collect();
+        // 其他 provider：备选开启（excluded 空），含与主 provider 同名的 Berserk
+        let new_titles = vec![
+            SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) },
+            SeriesTitle { name: "剣風伝奇ベルセルク".into(), r#type: None, language: Some("ja-ro".into()) },
+        ];
+        let new = SeriesAndBookMetadata::new(
+            SeriesMetadata {
+                title: Some(new_titles[0].clone()),
+                titles: new_titles.clone(),
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+        );
+        let (merged, all) = merge_series_metadata_with_exclusions(&merger, &original, &new);
+        // 主 provider 的标题从备选剔除（ベルセルク + Berserk 均为其名单）→
+        // 合并集只剩 new 的标题；new 的 Berserk（与主名单同名）保留 → 不连坐
+        let names: Vec<&str> = merged.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["Berserk", "剣風伝奇ベルセルク"]);
+        // 全量候选 = 双方拼接（4 项，不剔除），主标题候选始终全量
+        let all_names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(all_names, vec!["ベルセルク", "Berserk", "Berserk", "剣風伝奇ベルセルク"]);
+    }
+
+    /// 聚合 merge 不合并 title（对齐 Kotlin，恒 None）：
+    /// 主标题由 postProcess 决定——seriesTitle=true 按语言从全量候选选择，
+    /// seriesTitle=false 不写入。
+    #[test]
+    fn merge_does_not_merge_title() {
+        use komf_core::model::{SeriesMetadata, SeriesTitle};
+        let merger = MetadataMerger::new(false, false);
+        let original = SeriesAndBookMetadata::new(
+            SeriesMetadata {
+                title: Some(SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }),
+                titles: vec![SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }],
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+        );
+        let new = SeriesAndBookMetadata::new(
+            SeriesMetadata {
+                title: Some(SeriesTitle { name: "Berserk".into(), r#type: None, language: None }),
+                titles: vec![SeriesTitle { name: "Berserk".into(), r#type: None, language: None }],
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+        );
+        let (merged, _all) = merge_series_metadata_with_exclusions(&merger, &original, &new);
+        // title 不合并（恒 None）：主标题由 postProcess 决定
+        assert!(merged.title.is_none());
+    }
+
+    /// 端到端复现用户场景：聚合下主 provider 禁写备选（alternativeTitles=false）时，
+    /// 其他 provider（备选开启）的备选标题仍应写入。
+    /// 全链路 = merge_series_metadata_with_exclusions（来源剔除）→ merge_metadata 收尾
+    /// （all_series_titles 覆盖全量、excluded_alt_titles 置空）→ postProcess。
+    #[test]
+    fn aggregate_primary_alt_disabled_others_alt_still_written() {
+        use crate::metadata_post_processor::MetadataPostProcessor;
+        use komf_core::model::{SeriesMetadata, SeriesTitle};
+        let merger = MetadataMerger::new(false, false);
+        // 主 provider（bangumi）：alternativeTitles=false → excluded = 全量标题名
+        let original_titles = vec![
+            SeriesTitle { name: "葬送のフリーレン".into(), r#type: None, language: None },
+            SeriesTitle { name: "葬送的芙莉莲".into(), r#type: None, language: Some("zh".into()) },
+            SeriesTitle { name: "Frieren".into(), r#type: None, language: Some("en".into()) },
+        ];
+        let mut original = SeriesAndBookMetadata::new(
+            SeriesMetadata {
+                titles: original_titles.clone(),
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+        );
+        original.excluded_alt_titles = original_titles.iter().map(|t| t.name.clone()).collect();
+        // 其他 provider（anilist）：备选开启 → excluded 空
+        let new_titles = vec![
+            SeriesTitle { name: "Frieren".into(), r#type: None, language: Some("en".into()) },
+            SeriesTitle { name: "葬送のフリーレン 第二部".into(), r#type: None, language: Some("ja".into()) },
+        ];
+        let new = SeriesAndBookMetadata::new(
+            SeriesMetadata {
+                titles: new_titles.clone(),
+                ..Default::default()
+            },
+            std::collections::HashMap::new(),
+        );
+        let (merged_series, all) = merge_series_metadata_with_exclusions(&merger, &original, &new);
+        // merge 后：主 provider 标题被自身名单剔除，其他 provider 标题保留
+        let merged_names: Vec<&str> = merged_series.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(merged_names, vec!["Frieren", "葬送のフリーレン 第二部"]);
+        // 模拟 merge_metadata 收尾：全量候选覆盖、excluded 置空（不再透传后处理）
+        let mut merged = SeriesAndBookMetadata::new(merged_series, std::collections::HashMap::new());
+        merged.all_series_titles = all;
+        merged.excluded_alt_titles = Vec::new();
+        // 聚合配置：seriesTitle=true、seriesTitleLanguage=zh、alternativeSeriesTitles=true
+        let p = MetadataPostProcessor::new(
+            komf_core::model::MediaType::Manga,
+            true,
+            Some("zh".into()),
+            true,
+            vec!["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec![],
+        );
+        let out = p.process(&merged);
+        // 主标题 = zh（来自禁写备选的主 provider，全量候选仍含其标题 → 不受影响）
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        // 其他 provider 的备选写入（不连坐、不被主 provider 名单剔除）
+        let names: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["Frieren", "葬送のフリーレン 第二部"]);
     }
 }

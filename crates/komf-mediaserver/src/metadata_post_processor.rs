@@ -62,8 +62,11 @@ impl MetadataPostProcessor {
 
     /// 对应 `process`。
     pub fn process(&self, metadata: &SeriesAndBookMetadata) -> SeriesAndBookMetadata {
-        let series_metadata =
-            self.post_process_series(&metadata.series_metadata, &metadata.excluded_alt_titles);
+        let series_metadata = self.post_process_series(
+            &metadata.series_metadata,
+            &metadata.all_series_titles,
+            &metadata.excluded_alt_titles,
+        );
         let book_metadata = self.post_process_books(&metadata.book_metadata);
         self.handle_komga_oneshot(
             series_metadata,
@@ -73,7 +76,12 @@ impl MetadataPostProcessor {
         )
     }
 
-    fn post_process_series(&self, series: &SeriesMetadata, excluded_alt_titles: &[String]) -> SeriesMetadata {
+    fn post_process_series(
+        &self,
+        series: &SeriesMetadata,
+        all_titles: &[SeriesTitle],
+        excluded_alt_titles: &[String],
+    ) -> SeriesMetadata {
         let alt_titles: Vec<SeriesTitle> = if self.alternative_series_titles {
             let mut titles: Vec<SeriesTitle> = series.titles.iter().cloned().collect();
             // 配置列表中的语言按配置位置排前（替代按语言名字母序——
@@ -100,10 +108,15 @@ impl MetadataPostProcessor {
         };
 
         let chosen_title: Option<SeriesTitle> = if self.series_title {
-            self.choose_series_title(series)
+            // seriesTitle=true：主标题从全量候选（all_titles）按 seriesTitleLanguage 选择。
+            // provider 禁用备选写入只影响备选（series.titles 已按来源剔除），
+            // 不影响主标题从全量候选选择；语言不匹配时 choose_series_title 返回 None
+            // （不写入主标题，保持媒体服务器旧标题），除非显式开启 fallback_to_alt_title。
+            self.choose_series_title(all_titles)
                 .or_else(|| if self.fallback_to_alt_title { alt_titles.first().cloned() } else { None })
         } else {
-            series.title.clone()
+            // seriesTitle=false：不写入系列主标题（保持媒体服务器旧标题）。
+            None
         };
 
         let alts_without_series_title: Vec<SeriesTitle> = match &chosen_title {
@@ -226,27 +239,30 @@ impl MetadataPostProcessor {
         &self.alternative_series_title_languages
     }
 
-    fn choose_series_title(&self, series: &SeriesMetadata) -> Option<SeriesTitle> {
-        let chosen = match &self.series_title_language {
+    fn choose_series_title(&self, all_titles: &[SeriesTitle]) -> Option<SeriesTitle> {
+        // 主标题选择基于全量候选（all_titles）：即使 provider 禁写备选
+        // （其标题已从备选剔除），主标题候选仍包含它的标题。
+        // 语言不匹配返回 None（不写入主标题）——不回退 provider 预设 title，
+        // 保证写入的主标题符合 seriesTitleLanguage 偏好。
+        match &self.series_title_language {
             Some(lang) => {
                 // 优先语言标识完全匹配；未命中再前缀匹配（如 zh 命中 zh-Hant/zh-CN），
                 // 前缀匹配排除罗马音变体（归一后以 -ro 结尾，避免 ja 命中 ja-ro）。
-                series
-                    .titles
+                all_titles
                     .iter()
                     .find(|t| t.language.as_deref() == Some(lang.as_str()))
                     .or_else(|| {
-                        series.titles.iter().find(|t| {
+                        all_titles.iter().find(|t| {
                             t.language
                                 .as_deref()
                                 .map(|l| l.starts_with(lang.as_str()) && !l.ends_with("-ro"))
                                 .unwrap_or(false)
                         })
                     })
+                    .cloned()
             }
-            None => series.titles.first(),
-        };
-        chosen.cloned().or_else(|| series.title.clone())
+            None => all_titles.first().cloned(),
+        }
     }
 
     /// 对应 `handleKomgaOneshot`。
@@ -459,9 +475,10 @@ mod tests {
         assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送のフリーレン");
     }
 
-    /// seriesTitle 关闭时保留 provider 原 title（对齐 Kotlin else 分支，非置 None）
+    /// seriesTitle 关闭时永不写入系列主标题（保持媒体服务器旧标题，
+    /// 即使 provider 预设了主标题也不写入）。
     #[test]
-    fn series_title_disabled_keeps_provider_title() {
+    fn series_title_disabled_never_sets_main_title() {
         let mut series = bangumi_series();
         series.title = Some(SeriesTitle {
             name: "オリジナル名".into(),
@@ -483,8 +500,8 @@ mod tests {
             vec![],
         );
         let out = processor.process(&SeriesAndBookMetadata::new(series, HashMap::new()));
-        // 主标题保留 provider 原值（不被 seriesTitleLanguage 选择逻辑替换）
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "オリジナル名");
+        // seriesTitle=false：主标题不写入（provider 原值被忽略，保持旧标题）
+        assert!(out.series_metadata.title.is_none());
     }
 
     /// 主标题（名字级）从备选中剔除，但同名不同语言的 name_cn 若未成为主标题则保留
@@ -604,5 +621,59 @@ mod tests {
         assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
         let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(alts, vec!["葬送のフリーレン"]);
+    }
+
+    /// 聚合后：series.titles 已按来源剔除（主 provider 禁写备选，其标题不在其中），
+    /// 主标题候选仍全量（all_series_titles）——主标题从全量候选选择不受影响，
+    /// 即使该标题（ベルセルク）只存在于全量候选、已从备选剔除。
+    #[test]
+    fn main_title_candidates_are_full_even_when_series_titles_excluded() {
+        // 聚合合并后的 series：主 provider 标题已被剔除，只剩其他 provider 的
+        let series = SeriesMetadata {
+            titles: vec![
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: Some("en".into()),
+                },
+                SeriesTitle {
+                    name: "剣風伝奇ベルセルク".into(),
+                    r#type: None,
+                    language: Some("ja-ro".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut input = SeriesAndBookMetadata::new(series, HashMap::new());
+        // 全量候选 = 主 provider（禁写备选）+ 其他 provider 的标题（不剔除累积）
+        input.all_series_titles = vec![
+            SeriesTitle {
+                name: "ベルセルク".into(),
+                r#type: None,
+                language: Some("ja".into()),
+            },
+            SeriesTitle {
+                name: "Berserk".into(),
+                r#type: None,
+                language: Some("en".into()),
+            },
+            SeriesTitle {
+                name: "Berserk".into(),
+                r#type: None,
+                language: Some("en".into()),
+            },
+            SeriesTitle {
+                name: "剣風伝奇ベルセルク".into(),
+                r#type: None,
+                language: Some("ja-ro".into()),
+            },
+        ];
+        input.excluded_alt_titles = Vec::new(); // 聚合下名单已置空
+        let out = processor(None).process(&input); // 未配置系列标题语言 → 取全量候选第一个
+        // 主标题 = 全量候选第一个（ベルセルク，来自禁写备选的 provider，仍可作主标题）
+        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
+        // 备选 = series.titles（已剔除主 provider 标题）剔除主标题 → Berserk + 剣風伝奇ベルセルク
+        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(alts, vec!["Berserk", "剣風伝奇ベルセルク"]);
     }
 }
