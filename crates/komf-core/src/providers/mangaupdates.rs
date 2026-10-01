@@ -34,6 +34,17 @@ pub struct Genre {
 
 pub const BASE_URL: &str = "https://api.mangaupdates.com/v1";
 
+/// 真实 API 对部分无数据的条目返回 `null` 而非 `[]`（如 "Grand Bank" 的 genres），
+/// 需要按 null → 默认值处理，否则整条响应反序列化失败（搜索无结果，日志仅报
+/// "error decoding response body"）。
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct SearchResultPage {
@@ -59,6 +70,7 @@ pub struct SeriesRecord {
     pub title: String,
     pub description: Option<String>,
     pub image: Option<SeriesImage>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub genres: Vec<Genre>,
     pub year: Option<String>,
     pub url: String,
@@ -83,11 +95,17 @@ pub struct MangaUpdatesSeries {
     pub type_: Option<String>,
     pub licensed: Option<bool>,
     pub completed: Option<bool>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub associated: Vec<Associated>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub genres: Vec<Genre>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub categories: Vec<Category>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub authors: Vec<SeriesAuthor>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub publishers: Vec<SeriesPublisher>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub recommendations: Vec<serde_json::Value>,
     pub bayesian_rating: Option<f64>,
 }
@@ -835,6 +853,33 @@ impl MetadataProvider for MangaUpdatesMetadataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真实 API 对无数据条目返回 `"genres": null`（如 "Grand Bank"）：必须能解析，
+    /// 否则整条搜索响应反序列化失败导致该 provider 搜索无结果。
+    #[test]
+    fn search_record_null_genres_deserializes() {
+        let json = r#"{"total_hits":2,"page":1,"per_page":20,"results":[
+            {"record":{"series_id":65672018770,"title":"Grand Blue","type":"Manga","year":"2014","url":"https://www.mangaupdates.com/series/u63f9zm/grand-blue","description":"desc","image":null,"genres":[{"genre":"Comedy"}]}},
+            {"record":{"series_id":1,"title":"Grand Bank","type":"Manga","year":"","url":"https://www.mangaupdates.com/series/x/grand-bank","description":"","image":{"url":{"original":null,"thumb":null},"height":null,"width":null},"genres":null}}
+        ]}"#;
+        let page: SearchResultPage = serde_json::from_str(json).unwrap();
+        assert_eq!(page.results.len(), 2);
+        assert_eq!(page.results[0].record.genres.len(), 1);
+        assert!(page.results[1].record.genres.is_empty());
+    }
+
+    /// 系列详情同样可能对数组字段返回 null。
+    #[test]
+    fn series_detail_null_arrays_deserialize() {
+        let json = r#"{"series_id":1,"title":"T","associated":null,"genres":null,"categories":null,"authors":null,"publishers":null,"recommendations":null}"#;
+        let series: MangaUpdatesSeries = serde_json::from_str(json).unwrap();
+        assert!(series.associated.is_empty());
+        assert!(series.genres.is_empty());
+        assert!(series.categories.is_empty());
+        assert!(series.authors.is_empty());
+        assert!(series.publishers.is_empty());
+        assert!(series.recommendations.is_empty());
+    }
 
     /// MangaUpdates 类型字符串 → MediaType 映射（对齐 MAL 归类）。
     #[test]
