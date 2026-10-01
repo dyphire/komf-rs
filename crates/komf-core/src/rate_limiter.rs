@@ -123,11 +123,20 @@ mod tests {
         let limiter = ThroughputLimiter::new(2, Duration::from_millis(100));
         let start = Instant::now();
         limiter.acquire().await;
-        assert!(start.elapsed() < Duration::from_millis(30), "first permit should be immediate");
+        assert!(
+            start.elapsed() < Duration::from_millis(30),
+            "first permit should be immediate"
+        );
         limiter.acquire().await;
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(40), "second permit waits for its slot, got {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(130), "second permit within interval, got {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "second permit waits for its slot, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(130),
+            "second permit within interval, got {elapsed:?}"
+        );
     }
 
     #[tokio::test]
@@ -136,13 +145,22 @@ mod tests {
         let limiter = IntervalLimiter::new(10, Duration::from_secs(1));
         let start = Instant::now();
         for _ in 0..10 {
-            assert!(limiter.try_acquire().await, "first 10 should pass immediately");
+            assert!(
+                limiter.try_acquire().await,
+                "first 10 should pass immediately"
+            );
         }
         assert!(!limiter.try_acquire().await, "window exhausted");
-        assert!(start.elapsed() < Duration::from_millis(50), "burst should be instant");
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "burst should be instant"
+        );
         // acquire 阻塞到下一窗口边界
         limiter.acquire().await;
-        assert!(start.elapsed() >= Duration::from_millis(900), "waits for next window");
+        assert!(
+            start.elapsed() >= Duration::from_millis(900),
+            "waits for next window"
+        );
     }
 
     #[tokio::test]
@@ -151,9 +169,15 @@ mod tests {
         let limiter = ThroughputLimiter::new(1, Duration::from_secs(2));
         let start = Instant::now();
         limiter.acquire().await;
-        assert!(start.elapsed() < Duration::from_millis(30), "first permit should be immediate");
+        assert!(
+            start.elapsed() < Duration::from_millis(30),
+            "first permit should be immediate"
+        );
         limiter.acquire().await;
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(1900), "2s/1 slot, got {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(1900),
+            "2s/1 slot, got {elapsed:?}"
+        );
     }
 }

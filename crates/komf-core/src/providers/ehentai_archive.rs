@@ -114,9 +114,7 @@ impl EHentaiArchiveStore {
         self.conn
             .lock()
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM gallery", [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row("SELECT COUNT(*) FROM gallery", [], |r| r.get::<_, i64>(0))
             .map(|n| n > 0)
             .unwrap_or(false)
     }
@@ -151,29 +149,29 @@ impl EHentaiArchiveStore {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let params: Vec<rusqlite::types::Value> =
-            gids.iter().map(|g| rusqlite::types::Value::Integer(*g as i64)).collect();
-        let mut rows = match stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-                Ok(GalleryRow {
-                    gid: r.get(0)?,
-                    token: r.get(1)?,
-                    title: r.get(2)?,
-                    title_jpn: r.get(3)?,
-                    category: r.get(4)?,
-                    thumb: r.get(5)?,
-                    uploader: r.get(6)?,
-                    posted: r.get(7)?,
-                    file_count: r.get(8)?,
-                    file_size: r.get(9)?,
-                    expunged: r.get::<_, i64>(10)? != 0,
-                    removed: r.get::<_, i64>(11)? != 0,
-                    replaced: r.get::<_, i64>(12)? != 0,
-                    rating: r.get(13)?,
-                    tags: Vec::new(),
-                })
+        let params: Vec<rusqlite::types::Value> = gids
+            .iter()
+            .map(|g| rusqlite::types::Value::Integer(*g as i64))
+            .collect();
+        let mut rows = match stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            Ok(GalleryRow {
+                gid: r.get(0)?,
+                token: r.get(1)?,
+                title: r.get(2)?,
+                title_jpn: r.get(3)?,
+                category: r.get(4)?,
+                thumb: r.get(5)?,
+                uploader: r.get(6)?,
+                posted: r.get(7)?,
+                file_count: r.get(8)?,
+                file_size: r.get(9)?,
+                expunged: r.get::<_, i64>(10)? != 0,
+                removed: r.get::<_, i64>(11)? != 0,
+                replaced: r.get::<_, i64>(12)? != 0,
+                rating: r.get(13)?,
+                tags: Vec::new(),
             })
-        {
+        }) {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
@@ -220,12 +218,18 @@ impl EHentaiArchiveStore {
         );
         let mut params: Vec<String> = vec![format!("%{query}%")];
         if !category_filter.is_empty() {
-            let ph: Vec<String> = (params.len() + 1..).take(category_filter.len()).map(|i| format!("?{i}")).collect();
+            let ph: Vec<String> = (params.len() + 1..)
+                .take(category_filter.len())
+                .map(|i| format!("?{i}"))
+                .collect();
             sql.push_str(&format!(" AND category IN ({})", ph.join(",")));
             params.extend(category_filter.iter().cloned());
         }
         if !uploader_filter.is_empty() {
-            let ph: Vec<String> = (params.len() + 1..).take(uploader_filter.len()).map(|i| format!("?{i}")).collect();
+            let ph: Vec<String> = (params.len() + 1..)
+                .take(uploader_filter.len())
+                .map(|i| format!("?{i}"))
+                .collect();
             sql.push_str(&format!(" AND uploader IN ({})", ph.join(",")));
             params.extend(uploader_filter.iter().cloned());
         }
@@ -236,10 +240,9 @@ impl EHentaiArchiveStore {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let mut rows = match stmt.query_map(
-            rusqlite::params_from_iter(params.iter()),
-            |r| r.get::<_, i32>(0),
-        ) {
+        let mut rows = match stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            r.get::<_, i32>(0)
+        }) {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };
@@ -268,7 +271,11 @@ impl EHentaiArchiveStore {
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            let _ = self.conn.lock().unwrap().execute_batch("PRAGMA shrink_memory;");
+            let _ = self
+                .conn
+                .lock()
+                .unwrap()
+                .execute_batch("PRAGMA shrink_memory;");
             tracing::debug!("ehentai archive: released sqlite page cache");
         }
     }
@@ -299,7 +306,9 @@ impl EHentaiFtsStore {
             .map_err(|e| ProviderError::message(format!("ehentai fts pragma failed: {e}")))?;
         conn.pragma_update(None, "cache_size", -32000)
             .map_err(|e| ProviderError::message(format!("ehentai fts pragma failed: {e}")))?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// FTS 索引有效（表存在且非空；contentless 下 count(*) 依赖内容列，改用 LIMIT 1）。
@@ -366,7 +375,11 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
     // 只读 URI 打开主库（避免 ATTACH 以读写模式打开产生 WAL/-shm 残留）
     let db_uri = format!(
         "file:{}?mode=ro",
-        db_path.to_string_lossy().replace('\\', "/").replace('?', "%3f").replace('#', "%23")
+        db_path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('?', "%3f")
+            .replace('#', "%23")
     );
     conn.execute_batch(&format!("ATTACH DATABASE '{db_uri}' AS src;"))
         .map_err(|e| ProviderError::message(format!("ehentai fts attach failed: {e}")))?;
@@ -541,15 +554,17 @@ async fn download_and_extract(
             let c = chunk.map_err(|e| {
                 ProviderError::message(format!("ehentai archive download interrupted: {e}"))
             })?;
-            out.write_all(&c)
-                .map_err(|e| ProviderError::message(format!("ehentai archive tmp write failed: {e}")))?;
+            out.write_all(&c).map_err(|e| {
+                ProviderError::message(format!("ehentai archive tmp write failed: {e}"))
+            })?;
             written += c.len() as u64;
             if let Some(on_progress) = on_progress {
                 on_progress(existing + written, progress_total.unwrap_or(0));
             }
         }
-        out.flush()
-            .map_err(|e| ProviderError::message(format!("ehentai archive tmp flush failed: {e}")))?;
+        out.flush().map_err(|e| {
+            ProviderError::message(format!("ehentai archive tmp flush failed: {e}"))
+        })?;
         // 完整性校验：
         // 200（全量）：written == Content-Length
         // 206（续传）：Content-Length 是剩余字节，完整大小 = existing + written，
@@ -577,19 +592,20 @@ async fn download_and_extract(
     {
         let input = std::fs::File::open(&zst_tmp)
             .map_err(|e| ProviderError::message(format!("ehentai archive tmp open failed: {e}")))?;
-        let mut decoder = zstd::stream::read::Decoder::new(input)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&zst_tmp);
-                ProviderError::message(format!("ehentai archive zstd decode failed: {e}"))
-            })?;
-        let mut out = std::fs::File::create(&db_tmp)
-            .map_err(|e| ProviderError::message(format!("ehentai archive tmp write failed: {e}")))?;
+        let mut decoder = zstd::stream::read::Decoder::new(input).map_err(|e| {
+            let _ = std::fs::remove_file(&zst_tmp);
+            ProviderError::message(format!("ehentai archive zstd decode failed: {e}"))
+        })?;
+        let mut out = std::fs::File::create(&db_tmp).map_err(|e| {
+            ProviderError::message(format!("ehentai archive tmp write failed: {e}"))
+        })?;
         std::io::copy(&mut decoder, &mut out).map_err(|e| {
             let _ = std::fs::remove_file(&zst_tmp);
             ProviderError::message(format!("ehentai archive extract failed: {e}"))
         })?;
-        out.flush()
-            .map_err(|e| ProviderError::message(format!("ehentai archive tmp flush failed: {e}")))?;
+        out.flush().map_err(|e| {
+            ProviderError::message(format!("ehentai archive tmp flush failed: {e}"))
+        })?;
     }
     let _ = std::fs::remove_file(&zst_tmp);
     // ③ 校验 SQLite 有效
@@ -743,7 +759,9 @@ impl EHentaiArchiveService {
         // 1GB+ 下载必须用长超时 client（共享 client 60s 总超时必断；失败回退共享 client）。
         // HEAD 检查等小请求仍用 http_client。
         let dl_client = crate::util::download::long_download_client()
-            .map_err(|e| tracing::warn!("ehentai archive long client build failed: {e}; falling back"))
+            .map_err(|e| {
+                tracing::warn!("ehentai archive long client build failed: {e}; falling back")
+            })
             .unwrap_or_else(|_| http_client.clone());
         let svc = Arc::new(Self {
             store: store.clone(),
@@ -848,10 +866,20 @@ impl EHentaiArchiveService {
             };
             match fts_hit {
                 Some(gids) => gids,
-                None => store.like_search_gids(query, limit.saturating_mul(4).max(50), category_filter, uploader_filter),
+                None => store.like_search_gids(
+                    query,
+                    limit.saturating_mul(4).max(50),
+                    category_filter,
+                    uploader_filter,
+                ),
             }
         } else {
-            store.like_search_gids(query, limit.saturating_mul(4).max(50), category_filter, uploader_filter)
+            store.like_search_gids(
+                query,
+                limit.saturating_mul(4).max(50),
+                category_filter,
+                uploader_filter,
+            )
         };
         if gids.is_empty() {
             return Vec::new();
@@ -862,8 +890,7 @@ impl EHentaiArchiveService {
             rows.retain(|r| {
                 (category_filter.is_empty() || category_filter.iter().any(|c| c == &r.category))
                     && (uploader_filter.is_empty()
-                        || r
-                            .uploader
+                        || r.uploader
                             .as_deref()
                             .map(|u| uploader_filter.iter().any(|x| x == u))
                             .unwrap_or(false))
@@ -906,12 +933,7 @@ impl EHentaiArchiveService {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         if self
             .download_in_progress
-            .compare_exchange(
-                false,
-                true,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
             {
@@ -924,12 +946,9 @@ impl EHentaiArchiveService {
                 // 失败必须发射 ErrorEvent 终态，否则路由层 watch 流等不到 Finished/Error 会一直挂起
                 if let Err(e) = &result {
                     tracing::error!("ehentai archive update failed: {e}");
-                    let _ = sender.send(Some(DownloadProgress::ErrorEvent {
-                        message: e.clone(),
-                    }));
+                    let _ = sender.send(Some(DownloadProgress::ErrorEvent { message: e.clone() }));
                 }
-                this.download_in_progress
-                    .store(false, Ordering::SeqCst);
+                this.download_in_progress.store(false, Ordering::SeqCst);
                 let _ = result;
             });
         } else {
@@ -1019,9 +1038,14 @@ impl EHentaiArchiveService {
                 },
             )
         };
-        download_with_retry(&self.dl_client, &self.url, &self.db_path, Some(progress_emitter))
-            .await
-            .map_err(|e| format!("ehentai archive download: {e}"))?;
+        download_with_retry(
+            &self.dl_client,
+            &self.url,
+            &self.db_path,
+            Some(progress_emitter),
+        )
+        .await
+        .map_err(|e| format!("ehentai archive download: {e}"))?;
         // 4. commit（释放旧连接 → rename → 重开）→ meta → FTS
         let db_tmp = self.db_path.with_extension("db.tmp");
         let mut current: Option<Arc<EHentaiArchiveStore>> = None;
@@ -1062,7 +1086,9 @@ fn ensure_fts(
     let m = meta_read(meta);
     let fts_ok = m.fts_version == Some(FTS_VERSION)
         && m.fts_built_for == Some(stamp)
-        && EHentaiFtsStore::open(&fts_path).map(|f| f.validate()).unwrap_or(false);
+        && EHentaiFtsStore::open(&fts_path)
+            .map(|f| f.validate())
+            .unwrap_or(false);
     if fts_ok {
         if let Ok(f) = EHentaiFtsStore::open(&fts_path) {
             *fts.write().unwrap() = Some(Arc::new(f));
@@ -1084,12 +1110,7 @@ fn ensure_fts(
                     *fts2.write().unwrap() = Some(Arc::new(f));
                     let stamp = file_stamp(&db_path2);
                     let m = meta_read(&meta2);
-                    meta_write(
-                        &meta2,
-                        m.asset_stamp.as_deref(),
-                        stamp,
-                        Some(FTS_VERSION),
-                    );
+                    meta_write(&meta2, m.asset_stamp.as_deref(), stamp, Some(FTS_VERSION));
                     tracing::info!("ehentai fts index ready (rebuilt)");
                 }
                 _ => {
@@ -1144,10 +1165,14 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("INSERT INTO tag (name) VALUES ('language:chinese')", []).unwrap();
-        conn.execute("INSERT INTO tag (name) VALUES ('group:test circle')", []).unwrap();
-        conn.execute("INSERT INTO gid_tid (gid, tid) VALUES (4190146, 1)", []).unwrap();
-        conn.execute("INSERT INTO gid_tid (gid, tid) VALUES (4190146, 2)", []).unwrap();
+        conn.execute("INSERT INTO tag (name) VALUES ('language:chinese')", [])
+            .unwrap();
+        conn.execute("INSERT INTO tag (name) VALUES ('group:test circle')", [])
+            .unwrap();
+        conn.execute("INSERT INTO gid_tid (gid, tid) VALUES (4190146, 1)", [])
+            .unwrap();
+        conn.execute("INSERT INTO gid_tid (gid, tid) VALUES (4190146, 2)", [])
+            .unwrap();
         // 已删除（expunged）→ 不应命中
         conn.execute(
             "INSERT INTO gallery (gid, token, title, title_jpn, category, thumb, uploader,
@@ -1172,7 +1197,10 @@ mod tests {
     }
 
     fn test_db_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ehentai_archive_test_{tag}_{}.db", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "ehentai_archive_test_{tag}_{}.db",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -1228,10 +1256,8 @@ mod tests {
 
     #[test]
     fn meta_stamp_roundtrip() {
-        let path = std::env::temp_dir().join(format!(
-            "ehentai_archive_meta_{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ehentai_archive_meta_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let m = meta_read(&path);
         assert!(m.asset_stamp.is_none());

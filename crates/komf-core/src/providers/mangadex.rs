@@ -114,7 +114,10 @@ impl MangaDexClient {
     pub fn new(http: reqwest::Client) -> Self {
         Self {
             http,
-            limiter: crate::rate_limiter::IntervalLimiter::new(15, std::time::Duration::from_secs(10)),
+            limiter: crate::rate_limiter::IntervalLimiter::new(
+                15,
+                std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -315,11 +318,8 @@ impl MangaDexMetadataMapper {
         let cfg = &self.series_metadata_config;
 
         // 写入侧不干涉标题语言：postProcessing.seriesTitleLanguage 由后处理阶段应用。
-        let (primary_title, title_type, language) = pick_title(
-            &manga.attributes.title,
-            &manga.attributes.alt_titles,
-            None,
-        );
+        let (primary_title, title_type, language) =
+            pick_title(&manga.attributes.title, &manga.attributes.alt_titles, None);
         let title = SeriesTitle {
             name: primary_title.clone(),
             r#type: title_type,
@@ -799,7 +799,6 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for MangaDexMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"mangadex\.org/title/([0-9a-fA-F-]{8,})").ok()?;
         re.captures(query)
@@ -810,7 +809,9 @@ impl MetadataProvider for MangaDexMetadataProvider {
     }
 
     fn alternative_titles_enabled(&self) -> bool {
-        self.metadata_mapper.series_metadata_config.alternative_titles
+        self.metadata_mapper
+            .series_metadata_config
+            .alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
@@ -935,7 +936,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn title_map(entries: &[(&str, &str)]) -> HashMap<String, String> {
-        entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -944,7 +948,10 @@ mod tests {
         let (name, ttype, lang) = pick_title(&t, &[], Some("zh"));
         assert_eq!(name, "剑风传奇");
         assert_eq!(lang.as_deref(), Some("zh"));
-        assert_eq!(ttype.map(|x| format!("{x:?}")), Some("Localized".to_string()));
+        assert_eq!(
+            ttype.map(|x| format!("{x:?}")),
+            Some("Localized".to_string())
+        );
     }
 
     #[test]

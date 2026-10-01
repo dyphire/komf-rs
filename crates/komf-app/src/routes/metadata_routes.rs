@@ -7,19 +7,29 @@ use axum::routing::get;
 use axum::{Json, Router};
 use komf_api_models::common::{KomfErrorResponse, KomfProviderSeriesId, KomfProviders};
 use komf_api_models::metadata::{
-    KomfIdentifyRequest, KomfMetadataJobIdResponse, KomfMetadataJobResponse, KomfMetadataSeriesSearchResult,
+    KomfIdentifyRequest, KomfMetadataJobIdResponse, KomfMetadataJobResponse,
+    KomfMetadataSeriesSearchResult,
 };
 use komf_core::model::ProviderSeriesId;
-use std::sync::Arc;
 use komf_core::providers::CoreProviders;
 use komf_mediaserver::model::{MediaServerLibraryId, MediaServerSeriesId};
 use komf_mediaserver::MediaServerError;
+use std::sync::Arc;
 
 pub fn router(kind: ServerKind) -> Router<SharedState> {
     Router::new()
-        .route("/metadata/providers", get(move |s, q| get_providers(kind, s, q)))
-        .route("/metadata/search", get(move |s, q| search_series(kind, s, q)))
-        .route("/metadata/series-cover", get(move |s, q| get_series_cover(kind, s, q)))
+        .route(
+            "/metadata/providers",
+            get(move |s, q| get_providers(kind, s, q)),
+        )
+        .route(
+            "/metadata/search",
+            get(move |s, q| search_series(kind, s, q)),
+        )
+        .route(
+            "/metadata/series-cover",
+            get(move |s, q| get_series_cover(kind, s, q)),
+        )
         .route(
             "/metadata/identify",
             axum::routing::post(move |s, j| identify_series(kind, s, j)),
@@ -108,14 +118,18 @@ async fn search_series(
         },
     };
     let results = match &library_id {
-        Some(library_id) => services
-            .metadata_service_for(&library_id.0)
-            .search_series_metadata(&name, Some(library_id))
-            .await,
-        None => services
-            .default_metadata_service()
-            .search_series_metadata(&name, None)
-            .await,
+        Some(library_id) => {
+            services
+                .metadata_service_for(&library_id.0)
+                .search_series_metadata(&name, Some(library_id))
+                .await
+        }
+        None => {
+            services
+                .default_metadata_service()
+                .search_series_metadata(&name, None)
+                .await
+        }
     };
     let dto: Vec<KomfMetadataSeriesSearchResult> = results
         .into_iter()
@@ -152,11 +166,18 @@ async fn get_series_cover(
     };
     let image = services
         .metadata_service_for(&library_id.0)
-        .get_series_cover(&library_id, provider, &ProviderSeriesId(query.provider_series_id))
+        .get_series_cover(
+            &library_id,
+            provider,
+            &ProviderSeriesId(query.provider_series_id),
+        )
         .await;
     match image {
         Ok(Some(image)) => {
-            let mime = image.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+            let mime = image
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string());
             (
                 StatusCode::OK,
                 [(axum::http::header::CONTENT_TYPE, mime.as_str())],
@@ -167,7 +188,9 @@ async fn get_series_cover(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KomfErrorResponse { message: error.to_string() }),
+            Json(KomfErrorResponse {
+                message: error.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -190,7 +213,9 @@ async fn identify_series(
                 Err(error) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(KomfErrorResponse { message: error.to_string() }),
+                        Json(KomfErrorResponse {
+                            message: error.to_string(),
+                        }),
                     )
                         .into_response();
                 }
@@ -328,7 +353,9 @@ async fn reset_library(
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KomfErrorResponse { message: error.to_string() }),
+            Json(KomfErrorResponse {
+                message: error.to_string(),
+            }),
         )
             .into_response(),
     }

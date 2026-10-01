@@ -34,25 +34,43 @@ impl MediaServerError {
 
 #[async_trait::async_trait]
 pub trait MediaServerClient: Send + Sync {
-    async fn get_series(&self, series_id: &MediaServerSeriesId) -> Result<MediaServerSeries, MediaServerError>;
+    async fn get_series(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<MediaServerSeries, MediaServerError>;
     async fn get_series_page(
         &self,
         library_id: &MediaServerLibraryId,
         page_number: i32,
     ) -> Result<Page<MediaServerSeries>, MediaServerError>;
-    async fn get_series_thumbnail(&self, series_id: &MediaServerSeriesId) -> Result<Option<Image>, MediaServerError>;
+    async fn get_series_thumbnail(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Option<Image>, MediaServerError>;
     async fn get_series_thumbnails(
         &self,
         series_id: &MediaServerSeriesId,
     ) -> Result<Vec<MediaServerSeriesThumbnail>, MediaServerError>;
-    async fn get_book(&self, book_id: &MediaServerBookId) -> Result<MediaServerBook, MediaServerError>;
-    async fn get_books(&self, series_id: &MediaServerSeriesId) -> Result<Vec<MediaServerBook>, MediaServerError>;
+    async fn get_book(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<MediaServerBook, MediaServerError>;
+    async fn get_books(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Vec<MediaServerBook>, MediaServerError>;
     async fn get_book_thumbnails(
         &self,
         book_id: &MediaServerBookId,
     ) -> Result<Vec<MediaServerBookThumbnail>, MediaServerError>;
-    async fn get_book_thumbnail(&self, book_id: &MediaServerBookId) -> Result<Option<Image>, MediaServerError>;
-    async fn get_library(&self, library_id: &MediaServerLibraryId) -> Result<MediaServerLibrary, MediaServerError>;
+    async fn get_book_thumbnail(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<Option<Image>, MediaServerError>;
+    async fn get_library(
+        &self,
+        library_id: &MediaServerLibraryId,
+    ) -> Result<MediaServerLibrary, MediaServerError>;
     async fn get_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError>;
 
     /// 收藏夹列表（Rust 扩展，Auto-Identify 失败归集用）。默认不支持。

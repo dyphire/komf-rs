@@ -192,11 +192,7 @@ fn person_aliases(infobox: Option<&str>) -> Vec<String> {
                     for item in block.split('[').skip(1) {
                         // 截断到行尾 / '}'（别名块可能尾随换行与 '}'）
                         let item = item.trim();
-                        let item = item
-                            .split(['\r', '\n', '}'])
-                            .next()
-                            .unwrap_or(item)
-                            .trim();
+                        let item = item.split(['\r', '\n', '}']).next().unwrap_or(item).trim();
                         let item = item.trim_end_matches(']').trim();
                         let item = item.strip_suffix(']').unwrap_or(item).trim();
                         if let Some((_, val)) = item.split_once('|') {
@@ -301,7 +297,11 @@ fn parse_list_item(seg: &str) -> Option<(Option<String>, String)> {
 /// 解析 archive infobox Wiki 模板字符串 → [{key,value}]。
 /// 支持：`|key= value`、`|key={ [item] [item] }` 列表、跨行值。
 pub(crate) fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
-    fn make_item(key: &str, value: Option<&str>, list: &[(Option<String>, String)]) -> BangumiInfoBoxItem {
+    fn make_item(
+        key: &str,
+        value: Option<&str>,
+        list: &[(Option<String>, String)],
+    ) -> BangumiInfoBoxItem {
         if list.is_empty() {
             BangumiInfoBoxItem {
                 key: Some(key.to_string()),
@@ -348,7 +348,9 @@ pub(crate) fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
                 if value == "{" {
                     in_list = true;
                     current_key = Some(key);
-                } else if let Some(inner) = value.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+                } else if let Some(inner) =
+                    value.strip_prefix('{').and_then(|v| v.strip_suffix('}'))
+                {
                     // 单行列表 { [a] [b] } / { [k|v] }
                     let items: Vec<(Option<String>, String)> = inner
                         .split(']')
@@ -371,10 +373,7 @@ pub(crate) fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
                 in_list = false;
                 continue;
             }
-            let s = trimmed
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim();
+            let s = trimmed.trim_start_matches('[').trim_end_matches(']').trim();
             if !s.is_empty() {
                 if let Some(item) = parse_list_item(s) {
                     current_list.push(item);
@@ -482,9 +481,8 @@ impl BangumiArchiveStore {
         subjects_path: &Path,
         idle_release_secs: u64,
     ) -> Result<Self, ProviderError> {
-        let conn = rusqlite::Connection::open(db_path).map_err(|e| {
-            ProviderError::message(format!("archive sqlite open failed: {e}"))
-        })?;
+        let conn = rusqlite::Connection::open(db_path)
+            .map_err(|e| ProviderError::message(format!("archive sqlite open failed: {e}")))?;
         // 读写在应用层已串行（同一把 Mutex，重建期共享槽位置 None），WAL 无收益；
         // 改用 DELETE：单事务构建的 rollback journal 随 COMMIT 自动删除，无遗留大文件、
         // 无需手动 checkpoint。journal_mode 持久化于 db 文件头，旧 WAL 库首次打开时
@@ -495,9 +493,9 @@ impl BangumiArchiveStore {
              PRAGMA cache_size=-32000;",
         )
         .map_err(|e| ProviderError::message(format!("archive pragma failed: {e}")))?;
-        let mm = std::fs::File::open(subjects_path).ok().and_then(|f| unsafe {
-            memmap2::Mmap::map(&f).ok()
-        });
+        let mm = std::fs::File::open(subjects_path)
+            .ok()
+            .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
         Ok(Self {
             conn: Mutex::new(conn),
             mm,
@@ -568,8 +566,10 @@ impl BangumiArchiveStore {
             Err(_) => false,
         };
         if !has_alias {
-            c.execute_batch("DROP TABLE IF EXISTS subjects_fts; DROP TABLE IF EXISTS subjects_idx;")
-                .map_err(|e| ProviderError::message(format!("archive schema migrate: {e}")))?;
+            c.execute_batch(
+                "DROP TABLE IF EXISTS subjects_fts; DROP TABLE IF EXISTS subjects_idx;",
+            )
+            .map_err(|e| ProviderError::message(format!("archive schema migrate: {e}")))?;
         }
         // v4 → v5：缺 persons 表（person 实体数据未入库）→ 清空索引强制下次 build 全量重建
         let has_persons = c
@@ -610,7 +610,9 @@ impl BangumiArchiveStore {
         };
         if !has_p_aliases {
             c.execute_batch("ALTER TABLE persons ADD COLUMN aliases TEXT")
-                .map_err(|e| ProviderError::message(format!("archive schema migrate aliases: {e}")))?;
+                .map_err(|e| {
+                    ProviderError::message(format!("archive schema migrate aliases: {e}"))
+                })?;
         }
         c.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| ProviderError::message(format!("archive version failed: {e}")))?;
@@ -627,7 +629,10 @@ impl BangumiArchiveStore {
         subject_persons_path: &Path,
     ) -> Result<(usize, usize, usize, usize), ProviderError> {
         let c = self.conn.lock().unwrap();
-        let tx = |s: &str| c.execute_batch(s).map_err(|e| ProviderError::message(format!("archive build {e}")));
+        let tx = |s: &str| {
+            c.execute_batch(s)
+                .map_err(|e| ProviderError::message(format!("archive build {e}")))
+        };
         tx("BEGIN")?;
         let result = (|| -> Result<(usize, usize, usize, usize), ProviderError> {
             tx("DELETE FROM subjects_idx")?;
@@ -660,10 +665,7 @@ impl BangumiArchiveStore {
         }
     }
 
-    fn import_subjects(
-        c: &rusqlite::Connection,
-        path: &Path,
-    ) -> Result<usize, ProviderError> {
+    fn import_subjects(c: &rusqlite::Connection, path: &Path) -> Result<usize, ProviderError> {
         let file = std::fs::File::open(path)
             .map_err(|e| ProviderError::message(format!("archive subjects open: {e}")))?;
         let reader = std::io::BufReader::new(file);
@@ -778,13 +780,14 @@ impl BangumiArchiveStore {
             .map_err(|e| ProviderError::message(format!("archive persons open: {e}")))?;
         let reader = std::io::BufReader::new(file);
         let mut lines = reader.lines();
-        let mut batch: Vec<(u64, String, Option<String>, Option<i64>, String, String)> =
-            Vec::new();
+        let mut batch: Vec<(u64, String, Option<String>, Option<i64>, String, String)> = Vec::new();
         let mut count = 0usize;
         loop {
             let Some(line) = lines.next() else { break };
             let line = line.map_err(|e| ProviderError::message(format!("archive read: {e}")))?;
-            let Ok(p) = serde_json::from_str::<ArchivePerson>(&line) else { continue };
+            let Ok(p) = serde_json::from_str::<ArchivePerson>(&line) else {
+                continue;
+            };
             let career = serde_json::to_string(&p.career).unwrap_or_default();
             batch.push((
                 p.id,
@@ -834,7 +837,9 @@ impl BangumiArchiveStore {
         loop {
             let Some(line) = lines.next() else { break };
             let line = line.map_err(|e| ProviderError::message(format!("archive read: {e}")))?;
-            let Ok(r) = serde_json::from_str::<SubjectPersonRel>(&line) else { continue };
+            let Ok(r) = serde_json::from_str::<SubjectPersonRel>(&line) else {
+                continue;
+            };
             batch.push((
                 r.subject_id,
                 r.person_id,
@@ -871,10 +876,14 @@ impl BangumiArchiveStore {
     pub fn validate(&self) -> bool {
         let c = self.conn.lock().unwrap();
         let subj = c
-            .query_row("SELECT COUNT(*) FROM subjects_idx", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM subjects_idx", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(0);
         let rel = c
-            .query_row("SELECT COUNT(*) FROM relations_idx", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM relations_idx", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(0);
         subj > 0 && rel > 0
     }
@@ -918,9 +927,7 @@ impl BangumiArchiveStore {
             return Vec::new();
         }
         let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!(
-            "SELECT id, row_offset FROM subjects_idx WHERE id IN ({placeholders})"
-        );
+        let sql = format!("SELECT id, row_offset FROM subjects_idx WHERE id IN ({placeholders})");
         let mut stmt = match c.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1117,8 +1124,7 @@ fn archive_aliases_str(item: &ArchiveSubject) -> String {
     }
     let mut out: Vec<String> = Vec::new();
     for it in item.infobox_items() {
-        let is_alias_key =
-            it.key.as_deref() == Some("别名") || it.key.as_deref() == Some("別名");
+        let is_alias_key = it.key.as_deref() == Some("别名") || it.key.as_deref() == Some("別名");
         if let Some(v) = it.value.as_ref() {
             if is_alias_key {
                 collect(v, &mut out);
@@ -1148,10 +1154,7 @@ fn fts_query(user_input: &str) -> String {
     if q.is_empty() {
         return "\"\"".to_string();
     }
-    let terms: Vec<String> = q
-        .split_whitespace()
-        .map(|t| format!("\"{t}\"*"))
-        .collect();
+    let terms: Vec<String> = q.split_whitespace().map(|t| format!("\"{t}\"*")).collect();
     if terms.is_empty() {
         "\"\"".to_string()
     } else {
@@ -1190,8 +1193,7 @@ impl BangumiArchiveService {
         http_client: reqwest::Client,
         dir: PathBuf,
     ) -> Arc<Self> {
-        let store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>> =
-            Arc::new(RwLock::new(None));
+        let store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>> = Arc::new(RwLock::new(None));
         let ready = Arc::new(AtomicBool::new(false));
         let opened = Arc::new(AtomicBool::new(false));
         let svc = Arc::new(Self {
@@ -1293,12 +1295,7 @@ impl BangumiArchiveService {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         if self
             .download_in_progress
-            .compare_exchange(
-                false,
-                true,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
             {
@@ -1311,12 +1308,9 @@ impl BangumiArchiveService {
                 // 失败必须发射 ErrorEvent 终态，否则路由层 watch 流等不到 Finished/Error 会一直挂起
                 if let Err(e) = &result {
                     tracing::error!("bangumi archive update failed: {e}");
-                    let _ = sender.send(Some(DownloadProgress::ErrorEvent {
-                        message: e.clone(),
-                    }));
+                    let _ = sender.send(Some(DownloadProgress::ErrorEvent { message: e.clone() }));
                 }
-                this.download_in_progress
-                    .store(false, Ordering::SeqCst);
+                this.download_in_progress.store(false, Ordering::SeqCst);
                 let _ = result;
             });
         } else {
@@ -1490,18 +1484,19 @@ async fn download_zip(
     } else {
         response.content_length().or(expected_size)
     };
-    let mut file = std::io::BufWriter::new(if resumed {
-        std::fs::OpenOptions::new().append(true).open(tmp_zip)
-    } else {
-        std::fs::File::create(tmp_zip)
-    }
-    .map_err(|e| ProviderError::message(format!("archive create: {e}")))?);
+    let mut file = std::io::BufWriter::new(
+        if resumed {
+            std::fs::OpenOptions::new().append(true).open(tmp_zip)
+        } else {
+            std::fs::File::create(tmp_zip)
+        }
+        .map_err(|e| ProviderError::message(format!("archive create: {e}")))?,
+    );
     let mut stream = response.bytes_stream();
     let mut written = 0u64;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            ProviderError::message(format!("archive body interrupted: {e}"))
-        })?;
+        let chunk =
+            chunk.map_err(|e| ProviderError::message(format!("archive body interrupted: {e}")))?;
         written += chunk.len() as u64;
         file.write_all(&chunk)
             .map_err(|e| ProviderError::message(format!("archive write: {e}")))?;
@@ -1584,7 +1579,12 @@ fn build_db_then_swap(
         .init_schema()
         .map_err(|e| ProviderError::message(format!("archive schema: {e}")))?;
     let counts = tmp_store
-        .build(subjects_path, relations_path, persons_path, subject_persons_path)
+        .build(
+            subjects_path,
+            relations_path,
+            persons_path,
+            subject_persons_path,
+        )
         .map_err(|e| ProviderError::message(format!("archive build: {e}")))?;
     tmp_store.set_meta("last_updated", meta_updated_at);
     // Windows：SQLite 打开的 tmp 文件无 FILE_SHARE_DELETE 共享标志，rename 前必须
@@ -1644,8 +1644,7 @@ async fn download_and_rebuild(
         .unwrap_or(false);
     if !cached_ok {
         tracing::info!("downloading bangumi archive ({url})");
-        let dl = crate::util::download::long_download_client()
-            .map_err(ProviderError::message)?;
+        let dl = crate::util::download::long_download_client().map_err(ProviderError::message)?;
         let tmp_zip = zip_path.with_extension("tmp");
         // 字节进度 → ProgressEvent（闭包借用 emit/url，生命周期与本次调用一致）
         let emit_c = emit;
@@ -1659,12 +1658,14 @@ async fn download_and_rebuild(
                 });
             }
         };
-        download_zip_with_retry(&dl, &url, &tmp_zip, expected_size, Some(progress_emitter))
-            .await?;
+        download_zip_with_retry(&dl, &url, &tmp_zip, expected_size, Some(progress_emitter)).await?;
         std::fs::rename(&tmp_zip, &zip_path)
             .map_err(|e| ProviderError::message(format!("archive move: {e}")))?;
     } else {
-        tracing::info!("bangumi archive zip cache hit ({} bytes)", expected_size.unwrap_or(0));
+        tracing::info!(
+            "bangumi archive zip cache hit ({} bytes)",
+            expected_size.unwrap_or(0)
+        );
     }
     // 解压（zip crate 读取时自动校验 CRC）
     if let Some(emit) = emit {
@@ -1776,8 +1777,13 @@ mod tests {
         let ib = "{{Infobox Crt\r\n|简体中文名= 水树奈奈\r\n|别名={\r\n[第二中文名|]\r\n[英文名|]\r\n[日文名|近藤奈々 (こんどう なな)]\r\n[纯假名|みずき なな]\r\n[罗马字|Mizuki Nana]\r\n[昵称|奈々ちゃん、奈々さん、奈々様]\r\n}\r\n|性别= 女\r\n}}";
         let a = person_aliases(Some(ib));
         for w in [
-            "近藤奈々 (こんどう なな)", "こんどう なな", "みずき なな", "Mizuki Nana",
-            "奈々ちゃん", "奈々さん", "奈々様",
+            "近藤奈々 (こんどう なな)",
+            "こんどう なな",
+            "みずき なな",
+            "Mizuki Nana",
+            "奈々ちゃん",
+            "奈々さん",
+            "奈々様",
         ] {
             assert!(a.contains(&w.to_string()), "missing alias: {w}");
         }
@@ -1798,7 +1804,8 @@ mod tests {
     }
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("komf-archive-test-{tag}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("komf-archive-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1818,13 +1825,25 @@ mod tests {
         let items = parse_archive_infobox(
             "{{Infobox animanga/Manga\r\n|别名={\r\n[台版|無能力者娜娜]\r\n[韩版|]\r\n}\r\n|出版社= スクウェア・エニックス\r\n}}",
         );
-        let alias = items.iter().find(|i| i.key.as_deref() == Some("别名")).unwrap();
+        let alias = items
+            .iter()
+            .find(|i| i.key.as_deref() == Some("别名"))
+            .unwrap();
         let arr = alias.value.as_ref().unwrap().as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("k").and_then(|k| k.as_str()), Some("台版"));
-        assert_eq!(arr[0].get("v").and_then(|v| v.as_str()), Some("無能力者娜娜"));
-        let pub_ = items.iter().find(|i| i.key.as_deref() == Some("出版社")).unwrap();
-        assert_eq!(pub_.value.as_ref().unwrap().as_str(), Some("スクウェア・エニックス"));
+        assert_eq!(
+            arr[0].get("v").and_then(|v| v.as_str()),
+            Some("無能力者娜娜")
+        );
+        let pub_ = items
+            .iter()
+            .find(|i| i.key.as_deref() == Some("出版社"))
+            .unwrap();
+        assert_eq!(
+            pub_.value.as_ref().unwrap().as_str(),
+            Some("スクウェア・エニックス")
+        );
     }
 
     #[test]
@@ -1842,9 +1861,7 @@ mod tests {
         );
         write_subjects(
             &relations,
-            &[
-                r#"{"subject_id":1,"relation_type":"单行本","related_subject_id":2}"#,
-            ],
+            &[r#"{"subject_id":1,"relation_type":"单行本","related_subject_id":2}"#],
         );
         let persons = dir.join("person.jsonlines");
         let sp = dir.join("subject-persons.jsonlines");
@@ -1890,7 +1907,9 @@ mod tests {
         let relations = dir.join("subject-relations.jsonlines");
         write_subjects(
             &subjects,
-            &[r#"{"id":42,"type":1,"name":"魔法少女まどか","name_cn":"魔法少女小圆","series":true}"#],
+            &[
+                r#"{"id":42,"type":1,"name":"魔法少女まどか","name_cn":"魔法少女小圆","series":true}"#,
+            ],
         );
         std::fs::write(&relations, "").unwrap();
         let persons = dir.join("person.jsonlines");
@@ -1944,19 +1963,33 @@ mod tests {
             .iter()
             .find(|i| i.key.as_deref() == Some("别名"))
             .expect("别名 key");
-        let alias_v = alias.value.as_ref().and_then(|v| v.as_array()).expect("alias array");
+        let alias_v = alias
+            .value
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .expect("alias array");
         assert_eq!(alias_v.len(), 2);
         // 纯值列表项 → {"v": ..}（无 k，对齐在线 API → Localized 语言 None）
         assert_eq!(alias_v[0]["v"], "次元魔女");
         assert!(alias_v[0].get("k").is_none());
-        let author = items.iter().find(|i| i.key.as_deref() == Some("作者")).expect("作者 key");
-        assert_eq!(author.value.as_ref().and_then(|v| v.as_str()), Some("CLAMP"));
+        let author = items
+            .iter()
+            .find(|i| i.key.as_deref() == Some("作者"))
+            .expect("作者 key");
+        assert_eq!(
+            author.value.as_ref().and_then(|v| v.as_str()),
+            Some("CLAMP")
+        );
         // kv 列表项（版本:* 形式）→ {"k": .., "v": ..}
         let version = items
             .iter()
             .find(|i| i.key.as_deref() == Some("版本:东立版"))
             .expect("版本:东立版 key");
-        let version_v = version.value.as_ref().and_then(|v| v.as_array()).expect("version array");
+        let version_v = version
+            .value
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .expect("version array");
         assert_eq!(version_v[0]["k"], "版本名");
         assert_eq!(version_v[0]["v"], "xxxHOLiC 東立");
         // 数字 relation_type → 单行本
@@ -1990,7 +2023,10 @@ mod tests {
         let relations = dir.join("subject-relations.jsonlines");
         let persons = dir.join("person.jsonlines");
         let sp = dir.join("subject-persons.jsonlines");
-        write_subjects(&subjects, &[r#"{"id":268279,"type":1,"name":"チェンソーマン","name_cn":"链锯人","series":true}"#]);
+        write_subjects(
+            &subjects,
+            &[r#"{"id":268279,"type":1,"name":"チェンソーマン","name_cn":"链锯人","series":true}"#],
+        );
         std::fs::write(&relations, "").unwrap();
         write_subjects(
             &persons,
@@ -2050,7 +2086,10 @@ mod tests {
         let sp = dir.join("subject-persons.jsonlines");
         // 正式库：坏文件（随机字节，open 阶段即失败）；数据文件正常
         std::fs::write(&db, vec![0xabu8; 4096]).unwrap();
-        write_subjects(&subjects, &[r#"{"id":42,"type":1,"name":"Test","series":true}"#]);
+        write_subjects(
+            &subjects,
+            &[r#"{"id":42,"type":1,"name":"Test","series":true}"#],
+        );
         write_subjects(
             &relations,
             &[r#"{"subject_id":42,"relation_type":1003,"related_subject_id":9}"#],

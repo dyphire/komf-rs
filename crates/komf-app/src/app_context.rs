@@ -38,7 +38,12 @@ impl AppContext {
         let work_dir = work_dir_from(config_path.as_deref());
         let oauth_manager =
             komf_core::oauth::OAuthManager::new(Some(&work_dir), http_client.clone());
-        let state = build_state(&config, &http_client, config_path.as_deref(), oauth_manager.clone());
+        let state = build_state(
+            &config,
+            &http_client,
+            config_path.as_deref(),
+            oauth_manager.clone(),
+        );
 
         Self {
             state: Arc::new(std::sync::RwLock::new(state)),
@@ -246,9 +251,8 @@ pub fn init_logging(level: &str, config_path: Option<&std::path::Path>) {
     }
     .join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
-    let file_writer: LogWriter = LogWriter(Arc::new(std::sync::Mutex::new(DailyLogFile::new(
-        log_dir,
-    ))));
+    let file_writer: LogWriter =
+        LogWriter(Arc::new(std::sync::Mutex::new(DailyLogFile::new(log_dir))));
 
     // 同一过滤器（配置 logLevel / RUST_LOG），控制台与文件分别输出。
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -378,7 +382,10 @@ impl DailyLogFile {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            let Some(date_str) = name.strip_prefix("komf.").and_then(|s| s.strip_suffix(".log")) else {
+            let Some(date_str) = name
+                .strip_prefix("komf.")
+                .and_then(|s| s.strip_suffix(".log"))
+            else {
                 continue;
             };
             let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
@@ -407,7 +414,6 @@ impl std::io::Write for DailyLogFile {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -446,15 +452,24 @@ mod tests {
         log.flush().unwrap();
 
         // 旧日志被备份，新日志写入当日文件
-        assert!(dir.join(format!("komf.{yesterday}.log")).exists(), "backup missing");
+        assert!(
+            dir.join(format!("komf.{yesterday}.log")).exists(),
+            "backup missing"
+        );
         let cur = std::fs::read_to_string(dir.join("komf.log")).unwrap();
         assert!(cur.contains("new line"), "current file missing new content");
-        assert!(!cur.contains("old line"), "old content leaked into current file");
+        assert!(
+            !cur.contains("old line"),
+            "old content leaked into current file"
+        );
 
         // 同日再次写入：不重复备份
         log.write_all(b"more\n").unwrap();
         log.flush().unwrap();
-        assert!(!dir.join(format!("komf.{today}.log")).exists(), "unexpected same-day backup");
+        assert!(
+            !dir.join(format!("komf.{today}.log")).exists(),
+            "unexpected same-day backup"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -470,8 +485,7 @@ mod tests {
         std::fs::write(dir.join("komf.log"), b"stale\n").unwrap();
         let yesterday_dt = chrono::Local::now() - chrono::Duration::days(1);
         let stale: chrono::DateTime<chrono::Local> = yesterday_dt.into();
-        let filetime = std::fs::FileTimes::new()
-            .set_modified(stale.into());
+        let filetime = std::fs::FileTimes::new().set_modified(stale.into());
         std::fs::OpenOptions::new()
             .write(true)
             .open(dir.join("komf.log"))
@@ -506,9 +520,15 @@ mod tests {
 
         // 构造：旧备份（60 天前）、近期备份（5 天前）、当日文件
         let now = chrono::Local::now();
-        let old_date = (now - chrono::Duration::days(60)).format("%Y-%m-%d").to_string();
-        let recent_date = (now - chrono::Duration::days(5)).format("%Y-%m-%d").to_string();
-        let yesterday = (now - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        let old_date = (now - chrono::Duration::days(60))
+            .format("%Y-%m-%d")
+            .to_string();
+        let recent_date = (now - chrono::Duration::days(5))
+            .format("%Y-%m-%d")
+            .to_string();
+        let yesterday = (now - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
         std::fs::write(dir.join(format!("komf.{old_date}.log")), b"old\n").unwrap();
         std::fs::write(dir.join(format!("komf.{recent_date}.log")), b"recent\n").unwrap();
         std::fs::write(dir.join("komf.log"), b"today\n").unwrap();
@@ -520,10 +540,19 @@ mod tests {
         log.write_all(b"new\n").unwrap();
         log.flush().unwrap();
 
-        assert!(!dir.join(format!("komf.{old_date}.log")).exists(), "old backup not pruned");
-        assert!(dir.join(format!("komf.{recent_date}.log")).exists(), "recent backup lost");
+        assert!(
+            !dir.join(format!("komf.{old_date}.log")).exists(),
+            "old backup not pruned"
+        );
+        assert!(
+            dir.join(format!("komf.{recent_date}.log")).exists(),
+            "recent backup lost"
+        );
         assert!(dir.join("komf.log").exists(), "current log lost");
-        assert!(dir.join(format!("komf.{yesterday}.log")).exists(), "yesterday backup missing");
+        assert!(
+            dir.join(format!("komf.{yesterday}.log")).exists(),
+            "yesterday backup missing"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

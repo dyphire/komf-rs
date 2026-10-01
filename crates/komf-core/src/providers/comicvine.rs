@@ -1184,7 +1184,6 @@ impl ComicVineMetadataProvider {
 
 #[async_trait::async_trait]
 impl MetadataProvider for ComicVineMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"comicvine\.gamespot\.com/[^/]+/(\d+)-(\d+)").ok()?;
         re.captures(query)

@@ -132,8 +132,7 @@ impl AniListTracker {
         let send = |token: Option<&str>| {
             let mut request = self.http.post(GRAPHQL_URL);
             if let Some(t) = token {
-                request =
-                    request.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+                request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
             }
             request
                 .json(&json!({ "query": query, "variables": variables }))
@@ -255,7 +254,12 @@ impl AniListTracker {
     /// 读取用户媒体列表评分格式（带会话级缓存）。
     /// POINT_10 时读写需在 0-10 与 0-100（scoreRaw）间转换，其余格式直接使用 0-100。
     async fn store_score_format(&self) -> String {
-        if let Some(format) = self.score_format.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(format) = self
+            .score_format
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             return format.clone();
         }
         let format = match self.graphql(VIEWER_QUERY, json!({})).await {
@@ -324,9 +328,7 @@ impl TrackerService for AniListTracker {
 
     fn is_logged_in(&self) -> bool {
         match &self.oauth {
-            Some(manager) => manager
-                .status(OAuthProvider::Anilist)
-                .logged_in,
+            Some(manager) => manager.status(OAuthProvider::Anilist).logged_in,
             None => false,
         }
     }
@@ -344,7 +346,10 @@ impl TrackerService for AniListTracker {
         let (graphql_query, variables) = if nsfw {
             (SEARCH_QUERY_ALL, json!({ "search": query }))
         } else {
-            (SEARCH_QUERY_SFW, json!({ "search": query, "isAdult": false }))
+            (
+                SEARCH_QUERY_SFW,
+                json!({ "search": query, "isAdult": false }),
+            )
         };
         let data = self.graphql(graphql_query, variables).await?;
         let media = data
@@ -359,15 +364,12 @@ impl TrackerService for AniListTracker {
             .collect())
     }
 
-
     async fn get_state(&self, track_id: &str) -> Result<TrackState, String> {
         self.require_token().await?;
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid anilist id: {track_id}"))?;
-        let data = self
-            .graphql(STATE_QUERY, json!({ "id": id }))
-            .await?;
+        let data = self.graphql(STATE_QUERY, json!({ "id": id })).await?;
         let media = data
             .get("Media")
             .ok_or_else(|| "anilist media not found".to_string())?;
@@ -418,7 +420,11 @@ impl TrackerService for AniListTracker {
         // POINT_10 用户输入 0-10，写入 scoreRaw 前放大为 0-100。
         let score = if let Some(score) = update.score {
             let score_format = self.store_score_format().await;
-            Some(if score_format == "POINT_10" { score * 10 } else { score })
+            Some(if score_format == "POINT_10" {
+                score * 10
+            } else {
+                score
+            })
         } else {
             None
         };

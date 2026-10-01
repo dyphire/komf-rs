@@ -59,9 +59,7 @@ pub fn is_local_or_lan(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unicast_link_local()
-                || (v6.segments()[0] & 0xfe00 == 0xfc00)
+            v6.is_loopback() || v6.is_unicast_link_local() || (v6.segments()[0] & 0xfe00 == 0xfc00)
         }
     }
 }
@@ -156,7 +154,9 @@ pub async fn auth_guard(
         Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"unauthorized","hint":"请输入 KOMF_AUTH_KEY 配置的密钥"}"#))
+            .body(Body::from(
+                r#"{"error":"unauthorized","hint":"请输入 KOMF_AUTH_KEY 配置的密钥"}"#,
+            ))
             .unwrap()
             .into_response()
     } else {
@@ -189,7 +189,10 @@ pub async fn login(Json(body): Json<LoginRequest>) -> Response {
     }
     Response::builder()
         .status(StatusCode::NO_CONTENT)
-        .header(header::SET_COOKIE, cookie_header(&cookie_value(&key), false))
+        .header(
+            header::SET_COOKIE,
+            cookie_header(&cookie_value(&key), false),
+        )
         .body(Body::empty())
         .unwrap()
 }

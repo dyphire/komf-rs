@@ -1,7 +1,7 @@
 //! 应用配置 —— 对应 `AppConfig.kt`、`ConfigLoader.kt`、`ConfigWriter.kt`。
+use komf_core::config::MetadataProvidersConfig;
 use komf_mediaserver::config::{DatabaseConfig, KavitaConfig, KomgaConfig, StumpConfig};
 use komf_notifications::NotificationsConfig;
-use komf_core::config::MetadataProvidersConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,9 +104,8 @@ fn read_config_file(path: &std::path::Path) -> Option<AppConfig> {
 
 /// 环境变量覆盖 —— 对应 `ConfigLoader.overrideConfigDirAndEnvVars`。
 fn override_with_env(mut config: AppConfig, config_dir: Option<&std::path::Path>) -> AppConfig {
-    let env = |key: &str| -> Option<String> {
-        std::env::var(key).ok().filter(|v| !v.trim().is_empty())
-    };
+    let env =
+        |key: &str| -> Option<String> { std::env::var(key).ok().filter(|v| !v.trim().is_empty()) };
 
     let database_file = config_dir
         .map(|dir| dir.join("database.sqlite").to_string_lossy().to_string())
@@ -117,10 +116,12 @@ fn override_with_env(mut config: AppConfig, config_dir: Option<&std::path::Path>
         .unwrap_or_else(|| config.notifications.templates_directory.clone());
 
     if let Some(urls) = env("KOMF_APPRISE_URLS") {
-        config.notifications.apprise.urls = Some(urls.split(',').map(|s| s.trim().to_string()).collect());
+        config.notifications.apprise.urls =
+            Some(urls.split(',').map(|s| s.trim().to_string()).collect());
     }
     if let Some(webhooks) = env("KOMF_DISCORD_WEBHOOKS") {
-        config.notifications.discord.webhooks = Some(webhooks.split(',').map(|s| s.trim().to_string()).collect());
+        config.notifications.discord.webhooks =
+            Some(webhooks.split(',').map(|s| s.trim().to_string()).collect());
     }
     if let Some(uri) = env("KOMF_KOMGA_BASE_URI") {
         config.komga.base_uri = uri;
@@ -167,7 +168,9 @@ fn override_with_env(mut config: AppConfig, config_dir: Option<&std::path::Path>
     if let Some(api_key) = env("KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY") {
         config.metadata_providers.comic_vine_api_key = Some(api_key);
     }
-    if let Some(limit) = env("KOMF_METADATA_PROVIDERS_COMIC_VINE_SEARCH_LIMIT").and_then(|l| l.parse().ok()) {
+    if let Some(limit) =
+        env("KOMF_METADATA_PROVIDERS_COMIC_VINE_SEARCH_LIMIT").and_then(|l| l.parse().ok())
+    {
         config.metadata_providers.comic_vine_search_limit = Some(limit);
     }
     if let Some(token) = env("KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN") {
@@ -293,10 +296,7 @@ metadataProviders:
 "#;
         let config: AppConfig = serde_yaml::from_str(yml).unwrap();
         let bangumi = &config.metadata_providers.default_providers.bangumi.provider;
-        assert_eq!(
-            bangumi.tag_whitelist,
-            vec!["热血", "搞笑", "自定义标签"]
-        );
+        assert_eq!(bangumi.tag_whitelist, vec!["热血", "搞笑", "自定义标签"]);
     }
 
     /// bangumi.tagWhitelist 同时兼容数组形式

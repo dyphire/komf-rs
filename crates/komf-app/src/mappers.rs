@@ -1,15 +1,18 @@
 //! 配置 DTO 映射 —— 对应 `AppConfigMapper.kt` / `AppConfigUpdateMapper.kt`。
+use crate::config::AppConfig;
 use komf_api_models::common::*;
 use komf_api_models::config::*;
-use komf_core::config::{BangumiConfig, BookWalkerConfig, EHentaiArchiveConfig, EHentaiConfig, MetadataProvidersConfig, ProviderConfig, ProvidersConfig};
+use komf_core::config::{
+    BangumiConfig, BookWalkerConfig, EHentaiArchiveConfig, EHentaiConfig, MetadataProvidersConfig,
+    ProviderConfig, ProvidersConfig,
+};
 use komf_core::model::{AuthorRole, MediaType, ReadingDirection, UpdateMode};
 use komf_core::util::NameSimilarityMatcher;
 use komf_mediaserver::config::{
-    AlternateTitleLabelsConfig, EventListenerConfig, KavitaConfig, KomgaConfig, StumpConfig,
-    MetadataProcessingConfig, MetadataPostProcessingConfig, MetadataUpdateConfig,
+    AlternateTitleLabelsConfig, EventListenerConfig, KavitaConfig, KomgaConfig,
+    MetadataPostProcessingConfig, MetadataProcessingConfig, MetadataUpdateConfig, StumpConfig,
 };
 use komf_notifications::NotificationsConfig;
-use crate::config::AppConfig;
 
 /// `AppConfig` → `KomfConfig`（/api/config GET）。
 ///
@@ -122,21 +125,17 @@ fn to_notifications_dto(config: &NotificationsConfig) -> NotificationConfigDto {
     NotificationConfigDto {
         apprise: Some(AppriseConfigDto {
             // 对齐 Kotlin AppConfigMapper.toDto(AppriseConfig)：每个 url 取前 7 字符 + 50 个 '*'。
-            urls: config
-                .apprise
-                .urls
-                .clone()
-                .map(|urls| IndexedUrlList::from_vec(urls.iter().map(|u| mask_apprise_url(u)).collect())),
+            urls: config.apprise.urls.clone().map(|urls| {
+                IndexedUrlList::from_vec(urls.iter().map(|u| mask_apprise_url(u)).collect())
+            }),
             series_cover: Some(config.apprise.series_cover),
         }),
         discord: Some(DiscordConfigDto {
             // 对齐 Kotlin AppConfigMapper.toDto(DiscordConfig)：webhook 长度 <110 → "********"，
             // 否则保留前 34 与后 10、中间打码。
-            webhooks: config
-                .discord
-                .webhooks
-                .clone()
-                .map(|webhooks| IndexedUrlList::from_vec(webhooks.iter().map(|w| mask_discord_webhook(w)).collect())),
+            webhooks: config.discord.webhooks.clone().map(|webhooks| {
+                IndexedUrlList::from_vec(webhooks.iter().map(|w| mask_discord_webhook(w)).collect())
+            }),
             series_cover: Some(config.discord.series_cover),
         }),
     }
@@ -178,7 +177,13 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
         series_covers: Some(config.series_covers),
         override_existing_covers: Some(config.override_existing_covers),
         lock_covers: Some(config.lock_covers),
-        update_modes: Some(config.update_modes.iter().map(|m| to_update_mode_dto(*m)).collect()),
+        update_modes: Some(
+            config
+                .update_modes
+                .iter()
+                .map(|m| to_update_mode_dto(*m))
+                .collect(),
+        ),
         // 对齐 Kotlin GET（AppConfigMapper 不输出 overrideComicInfo）：PATCH 专用，GET 不输出
         override_comic_info: None,
         mylar_covers: Some(config.mylar_covers),
@@ -186,10 +191,17 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
         mylar_output_dir: config.mylar_output_dir.clone().map(Some),
         post_processing: Some(MetadataPostProcessingConfigDto {
             series_title: Some(config.post_processing.series_title),
-            series_title_language: config.post_processing.series_title_language.clone().map(Some),
+            series_title_language: config
+                .post_processing
+                .series_title_language
+                .clone()
+                .map(Some),
             alternative_series_titles: Some(config.post_processing.alternative_series_titles),
             alternative_series_title_languages: Some(
-                config.post_processing.alternative_series_title_languages.clone(),
+                config
+                    .post_processing
+                    .alternative_series_title_languages
+                    .clone(),
             ),
             order_books: Some(config.post_processing.order_books),
             reading_direction_value: config
@@ -199,7 +211,11 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
             language_value: config.post_processing.language_value.clone().map(Some),
             fallback_to_alt_title: Some(config.post_processing.fallback_to_alt_title),
             score_tag_name: config.post_processing.score_tag_name.clone().map(Some),
-            original_publisher_tag_name: config.post_processing.original_publisher_tag_name.clone().map(Some),
+            original_publisher_tag_name: config
+                .post_processing
+                .original_publisher_tag_name
+                .clone()
+                .map(Some),
             publisher_tag_names: Some(
                 config
                     .post_processing
@@ -237,7 +253,9 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
         // Rust 扩展：GET 输出失败收藏夹名（Kotlin 无）。
         failed_match_collection_name: config.failed_match_collection_name.clone().map(Some),
         // Rust 扩展：搜索标题提取配置（Kotlin 无）。
-        search_title_extraction: Some(to_search_title_extraction_dto(&config.search_title_extraction)),
+        search_title_extraction: Some(to_search_title_extraction_dto(
+            &config.search_title_extraction,
+        )),
         // Rust 扩展：简繁转换配置（Kotlin 无）。
         chinese_conversion: Some(to_chinese_conversion_dto(&config.chinese_conversion)),
     }
@@ -269,7 +287,14 @@ fn to_chinese_conversion_dto(
         matching: Some(config.matching),
         update: Some(komf_api_models::config::ChineseUpdateConfigDto {
             enabled: Some(config.update.enabled),
-            fields: Some(config.update.fields.iter().map(|f| to_chinese_field_dto(*f)).collect()),
+            fields: Some(
+                config
+                    .update
+                    .fields
+                    .iter()
+                    .map(|f| to_chinese_field_dto(*f))
+                    .collect(),
+            ),
         }),
     }
 }
@@ -278,8 +303,12 @@ fn to_chinese_direction_dto(
     d: komf_core::util::ChineseDirection,
 ) -> komf_api_models::config::KomfChineseDirection {
     match d {
-        komf_core::util::ChineseDirection::T2s => komf_api_models::config::KomfChineseDirection::T2s,
-        komf_core::util::ChineseDirection::S2t => komf_api_models::config::KomfChineseDirection::S2t,
+        komf_core::util::ChineseDirection::T2s => {
+            komf_api_models::config::KomfChineseDirection::T2s
+        }
+        komf_core::util::ChineseDirection::S2t => {
+            komf_api_models::config::KomfChineseDirection::S2t
+        }
     }
 }
 
@@ -287,8 +316,12 @@ fn from_chinese_direction_dto(
     d: komf_api_models::config::KomfChineseDirection,
 ) -> komf_core::util::ChineseDirection {
     match d {
-        komf_api_models::config::KomfChineseDirection::T2s => komf_core::util::ChineseDirection::T2s,
-        komf_api_models::config::KomfChineseDirection::S2t => komf_core::util::ChineseDirection::S2t,
+        komf_api_models::config::KomfChineseDirection::T2s => {
+            komf_core::util::ChineseDirection::T2s
+        }
+        komf_api_models::config::KomfChineseDirection::S2t => {
+            komf_core::util::ChineseDirection::S2t
+        }
     }
 }
 
@@ -296,10 +329,18 @@ fn to_chinese_field_dto(
     f: komf_mediaserver::config::ChineseField,
 ) -> komf_api_models::config::KomfChineseField {
     match f {
-        komf_mediaserver::config::ChineseField::Title => komf_api_models::config::KomfChineseField::Title,
-        komf_mediaserver::config::ChineseField::Genres => komf_api_models::config::KomfChineseField::Genres,
-        komf_mediaserver::config::ChineseField::Tags => komf_api_models::config::KomfChineseField::Tags,
-        komf_mediaserver::config::ChineseField::Summary => komf_api_models::config::KomfChineseField::Summary,
+        komf_mediaserver::config::ChineseField::Title => {
+            komf_api_models::config::KomfChineseField::Title
+        }
+        komf_mediaserver::config::ChineseField::Genres => {
+            komf_api_models::config::KomfChineseField::Genres
+        }
+        komf_mediaserver::config::ChineseField::Tags => {
+            komf_api_models::config::KomfChineseField::Tags
+        }
+        komf_mediaserver::config::ChineseField::Summary => {
+            komf_api_models::config::KomfChineseField::Summary
+        }
     }
 }
 
@@ -307,10 +348,18 @@ fn from_chinese_field_dto(
     f: komf_api_models::config::KomfChineseField,
 ) -> komf_mediaserver::config::ChineseField {
     match f {
-        komf_api_models::config::KomfChineseField::Title => komf_mediaserver::config::ChineseField::Title,
-        komf_api_models::config::KomfChineseField::Genres => komf_mediaserver::config::ChineseField::Genres,
-        komf_api_models::config::KomfChineseField::Tags => komf_mediaserver::config::ChineseField::Tags,
-        komf_api_models::config::KomfChineseField::Summary => komf_mediaserver::config::ChineseField::Summary,
+        komf_api_models::config::KomfChineseField::Title => {
+            komf_mediaserver::config::ChineseField::Title
+        }
+        komf_api_models::config::KomfChineseField::Genres => {
+            komf_mediaserver::config::ChineseField::Genres
+        }
+        komf_api_models::config::KomfChineseField::Tags => {
+            komf_mediaserver::config::ChineseField::Tags
+        }
+        komf_api_models::config::KomfChineseField::Summary => {
+            komf_mediaserver::config::ChineseField::Summary
+        }
     }
 }
 
@@ -381,10 +430,27 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             series_metadata: Some(to_series_metadata_dto(&config.manga_baka.series_metadata)),
             // komf ≤0.12 兼容：输出默认 bookMetadata（脚本对所有 provider 读取，缺失会崩）
             book_metadata: Some(default_book_metadata_config_dto()),
-            name_matching_mode: config.manga_baka.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+            name_matching_mode: config
+                .manga_baka
+                .name_matching_mode
+                .map(|m| Some(to_name_matching_mode_dto(m))),
             media_type: Some(to_media_type_dto(config.manga_baka.media_type)),
-            author_roles: Some(config.manga_baka.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
-            artist_roles: Some(config.manga_baka.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+            author_roles: Some(
+                config
+                    .manga_baka
+                    .author_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
+            artist_roles: Some(
+                config
+                    .manga_baka
+                    .artist_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
             mode: Some(to_manga_baka_mode_dto(config.manga_baka.mode)),
             cover_languages: Some(config.manga_baka.cover_languages.clone()),
             update_interval_hours: Some(config.manga_baka.update_interval_hours),
@@ -395,12 +461,36 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             enabled: Some(config.manga_dex.enabled),
             series_metadata: Some(to_series_metadata_dto(&config.manga_dex.series_metadata)),
             book_metadata: Some(to_book_metadata_dto(&config.manga_dex.book_metadata)),
-            name_matching_mode: config.manga_dex.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+            name_matching_mode: config
+                .manga_dex
+                .name_matching_mode
+                .map(|m| Some(to_name_matching_mode_dto(m))),
             media_type: Some(to_media_type_dto(config.manga_dex.media_type)),
-            author_roles: Some(config.manga_dex.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
-            artist_roles: Some(config.manga_dex.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+            author_roles: Some(
+                config
+                    .manga_dex
+                    .author_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
+            artist_roles: Some(
+                config
+                    .manga_dex
+                    .artist_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
             cover_languages: Some(config.manga_dex.cover_languages.clone()),
-            links: Some(config.manga_dex.links.iter().map(|l| to_mangadex_link_dto(*l)).collect()),
+            links: Some(
+                config
+                    .manga_dex
+                    .links
+                    .iter()
+                    .map(|l| to_mangadex_link_dto(*l))
+                    .collect(),
+            ),
         }),
         manga_updates: Some(to_provider_dto(&config.manga_updates)),
         ani_list: Some(AniListConfigDto {
@@ -409,10 +499,27 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             series_metadata: Some(to_series_metadata_dto(&config.ani_list.series_metadata)),
             // komf ≤0.12 兼容：输出默认 bookMetadata（脚本对所有 provider 读取，缺失会崩）
             book_metadata: Some(default_book_metadata_config_dto()),
-            name_matching_mode: config.ani_list.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+            name_matching_mode: config
+                .ani_list
+                .name_matching_mode
+                .map(|m| Some(to_name_matching_mode_dto(m))),
             media_type: Some(to_media_type_dto(config.ani_list.media_type)),
-            author_roles: Some(config.ani_list.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
-            artist_roles: Some(config.ani_list.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+            author_roles: Some(
+                config
+                    .ani_list
+                    .author_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
+            artist_roles: Some(
+                config
+                    .ani_list
+                    .artist_roles
+                    .iter()
+                    .map(|r| to_author_role_dto(*r))
+                    .collect(),
+            ),
             tags_score_threshold: Some(config.ani_list.tags_score_threshold),
             tags_size_limit: Some(config.ani_list.tags_size_limit),
         }),
@@ -425,7 +532,9 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
         bangumi: Some(BangumiConfigDto {
             priority: Some(config.bangumi.provider.priority),
             enabled: Some(config.bangumi.provider.enabled),
-            series_metadata: Some(to_series_metadata_dto(&config.bangumi.provider.series_metadata)),
+            series_metadata: Some(to_series_metadata_dto(
+                &config.bangumi.provider.series_metadata,
+            )),
             book_metadata: Some(to_book_metadata_dto(&config.bangumi.provider.book_metadata)),
             name_matching_mode: config
                 .bangumi
@@ -529,10 +638,24 @@ fn to_provider_dto(config: &ProviderConfig) -> ProviderConfigDto {
         enabled: Some(config.enabled),
         series_metadata: Some(to_series_metadata_dto(&config.series_metadata)),
         book_metadata: Some(to_book_metadata_dto(&config.book_metadata)),
-        name_matching_mode: config.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+        name_matching_mode: config
+            .name_matching_mode
+            .map(|m| Some(to_name_matching_mode_dto(m))),
         media_type: Some(to_media_type_dto(config.media_type)),
-        author_roles: Some(config.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
-        artist_roles: Some(config.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+        author_roles: Some(
+            config
+                .author_roles
+                .iter()
+                .map(|r| to_author_role_dto(*r))
+                .collect(),
+        ),
+        artist_roles: Some(
+            config
+                .artist_roles
+                .iter()
+                .map(|r| to_author_role_dto(*r))
+                .collect(),
+        ),
         tag_whitelist: Some(config.tag_whitelist.clone()),
         tag_whitelist_file: config.tag_whitelist_file.clone(),
     }
@@ -545,10 +668,24 @@ fn to_book_walker_dto(config: &BookWalkerConfig) -> BookWalkerConfigDto {
         enabled: Some(config.enabled),
         series_metadata: Some(to_series_metadata_dto(&config.series_metadata)),
         book_metadata: Some(to_book_metadata_dto(&config.book_metadata)),
-        name_matching_mode: config.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+        name_matching_mode: config
+            .name_matching_mode
+            .map(|m| Some(to_name_matching_mode_dto(m))),
         media_type: Some(to_media_type_dto(config.media_type)),
-        author_roles: Some(config.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
-        artist_roles: Some(config.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+        author_roles: Some(
+            config
+                .author_roles
+                .iter()
+                .map(|r| to_author_role_dto(*r))
+                .collect(),
+        ),
+        artist_roles: Some(
+            config
+                .artist_roles
+                .iter()
+                .map(|r| to_author_role_dto(*r))
+                .collect(),
+        ),
         tag_whitelist: Some(config.tag_whitelist.clone()),
         tag_whitelist_file: config.tag_whitelist_file.clone(),
         update_interval_hours: Some(config.update_interval_hours),
@@ -561,10 +698,24 @@ fn to_ehentai_dto(config: &EHentaiConfig) -> EHentaiConfigDto {
         enabled: Some(config.enabled),
         series_metadata: Some(to_series_metadata_dto(&config.series_metadata)),
         book_metadata: Some(to_book_metadata_dto(&config.book_metadata)),
-        name_matching_mode: config.name_matching_mode.map(|m| Some(to_name_matching_mode_dto(m))),
+        name_matching_mode: config
+            .name_matching_mode
+            .map(|m| Some(to_name_matching_mode_dto(m))),
         media_type: Some(to_media_type_dto(config.media_type)),
-        author_roles: Some(config.author_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
-        artist_roles: Some(config.artist_roles.iter().map(|r| to_author_role_dto(*r)).collect()),
+        author_roles: Some(
+            config
+                .author_roles
+                .iter()
+                .map(|r| to_author_role_dto(*r))
+                .collect(),
+        ),
+        artist_roles: Some(
+            config
+                .artist_roles
+                .iter()
+                .map(|r| to_author_role_dto(*r))
+                .collect(),
+        ),
         preferred_languages: Some(config.preferred_languages.clone()),
         tag_whitelist: Some(Vec::new()),
         title_priority: Some(config.title_priority.clone()),
@@ -589,7 +740,9 @@ fn to_ehentai_dto(config: &EHentaiConfig) -> EHentaiConfigDto {
     }
 }
 
-fn to_series_metadata_dto(config: &komf_core::config::SeriesMetadataConfig) -> SeriesMetadataConfigDto {
+fn to_series_metadata_dto(
+    config: &komf_core::config::SeriesMetadataConfig,
+) -> SeriesMetadataConfigDto {
     SeriesMetadataConfigDto {
         status: Some(config.status),
         title: Some(config.title),
@@ -655,7 +808,8 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
             config.komga.api_key = api_key.clone();
         }
         if let Some(event_listener) = &komga.event_listener {
-            config.komga.event_listener = from_event_listener_dto(event_listener, &config.komga.event_listener);
+            config.komga.event_listener =
+                from_event_listener_dto(event_listener, &config.komga.event_listener);
         }
         // komf ≤0.12 兼容：旧位置 notifications.libraries → eventListener.notificationsLibraryFilter
         if let Some(notifications) = &komga.notifications {
@@ -664,7 +818,8 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
             }
         }
         if let Some(metadata_update) = &komga.metadata_update {
-            config.komga.metadata_update = from_metadata_update_dto(metadata_update, &config.komga.metadata_update);
+            config.komga.metadata_update =
+                from_metadata_update_dto(metadata_update, &config.komga.metadata_update);
         }
     }
     if let Some(kavita) = &request.kavita {
@@ -676,7 +831,8 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
             config.kavita.api_key = api_key.clone();
         }
         if let Some(event_listener) = &kavita.event_listener {
-            config.kavita.event_listener = from_event_listener_dto(event_listener, &config.kavita.event_listener);
+            config.kavita.event_listener =
+                from_event_listener_dto(event_listener, &config.kavita.event_listener);
         }
         // komf ≤0.12 兼容：旧位置 notifications.libraries → eventListener.notificationsLibraryFilter
         if let Some(notifications) = &kavita.notifications {
@@ -685,7 +841,8 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
             }
         }
         if let Some(metadata_update) = &kavita.metadata_update {
-            config.kavita.metadata_update = from_metadata_update_dto(metadata_update, &config.kavita.metadata_update);
+            config.kavita.metadata_update =
+                from_metadata_update_dto(metadata_update, &config.kavita.metadata_update);
         }
     }
     if let Some(stump) = &request.stump {
@@ -703,17 +860,24 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
             config.stump.api_key = api_key.clone();
         }
         if let Some(event_listener) = &stump.event_listener {
-            config.stump.event_listener = from_event_listener_dto(event_listener, &config.stump.event_listener);
+            config.stump.event_listener =
+                from_event_listener_dto(event_listener, &config.stump.event_listener);
         }
         if let Some(metadata_update) = &stump.metadata_update {
-            config.stump.metadata_update = from_metadata_update_dto(metadata_update, &config.stump.metadata_update);
+            config.stump.metadata_update =
+                from_metadata_update_dto(metadata_update, &config.stump.metadata_update);
         }
     }
     if let Some(notifications) = &request.notifications {
         if let Some(apprise) = &notifications.apprise {
             if let Some(urls) = &apprise.urls {
                 // 索引合并（对齐 Kotlin `old + patch → values.filterNotNull()`）
-                let base = config.notifications.apprise.urls.clone().unwrap_or_default();
+                let base = config
+                    .notifications
+                    .apprise
+                    .urls
+                    .clone()
+                    .unwrap_or_default();
                 config.notifications.apprise.urls = Some(urls.apply_merge(&base));
             }
             if let Some(series_cover) = apprise.series_cover {
@@ -723,7 +887,12 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
         if let Some(discord) = &notifications.discord {
             if let Some(webhooks) = &discord.webhooks {
                 // 索引合并（对齐 Kotlin `old + patch → values.filterNotNull()`）
-                let base = config.notifications.discord.webhooks.clone().unwrap_or_default();
+                let base = config
+                    .notifications
+                    .discord
+                    .webhooks
+                    .clone()
+                    .unwrap_or_default();
                 config.notifications.discord.webhooks = Some(webhooks.apply_merge(&base));
             }
             if let Some(series_cover) = discord.series_cover {
@@ -753,11 +922,14 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
         }
         if let Some(name_matching_mode) = providers.name_matching_mode {
             // Kotlin getOrNull()：Some=设置；缺省/None=保持（无清空语义）
-            config.metadata_providers.name_matching_mode = from_name_matching_mode_dto(name_matching_mode);
+            config.metadata_providers.name_matching_mode =
+                from_name_matching_mode_dto(name_matching_mode);
         }
         if let Some(default_providers) = &providers.default_providers {
-            config.metadata_providers.default_providers =
-                from_providers_dto(default_providers, &config.metadata_providers.default_providers);
+            config.metadata_providers.default_providers = from_providers_dto(
+                default_providers,
+                &config.metadata_providers.default_providers,
+            );
         }
         if let Some(library_providers) = &providers.library_providers {
             // Kotlin `Map<String, ProvidersConfigUpdateRequest?>`：value null = 删除该库
@@ -768,10 +940,7 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
                         merged.remove(library_id);
                     }
                     Some(dto) => {
-                        let base = merged
-                            .get(library_id)
-                            .cloned()
-                            .unwrap_or_default();
+                        let base = merged.get(library_id).cloned().unwrap_or_default();
                         merged.insert(library_id.clone(), from_providers_dto(dto, &base));
                     }
                 }
@@ -782,7 +951,10 @@ pub fn apply_config_update(mut config: AppConfig, request: &KomfConfigUpdateRequ
     config
 }
 
-fn from_event_listener_dto(dto: &EventListenerConfigDto, base: &EventListenerConfig) -> EventListenerConfig {
+fn from_event_listener_dto(
+    dto: &EventListenerConfigDto,
+    base: &EventListenerConfig,
+) -> EventListenerConfig {
     EventListenerConfig {
         enabled: dto.enabled.unwrap_or(base.enabled),
         metadata_library_filter: dto
@@ -804,7 +976,10 @@ fn from_event_listener_dto(dto: &EventListenerConfigDto, base: &EventListenerCon
     }
 }
 
-fn from_metadata_update_dto(dto: &MetadataUpdateConfigDto, base: &MetadataUpdateConfig) -> MetadataUpdateConfig {
+fn from_metadata_update_dto(
+    dto: &MetadataUpdateConfigDto,
+    base: &MetadataUpdateConfig,
+) -> MetadataUpdateConfig {
     MetadataUpdateConfig {
         default: dto
             .default
@@ -827,7 +1002,10 @@ fn from_metadata_update_dto(dto: &MetadataUpdateConfigDto, base: &MetadataUpdate
                                 .get(library_id)
                                 .cloned()
                                 .unwrap_or_else(|| base.default.clone());
-                            merged.insert(library_id.clone(), from_processing_dto(d, &base_processing));
+                            merged.insert(
+                                library_id.clone(),
+                                from_processing_dto(d, &base_processing),
+                            );
                         }
                     }
                 }
@@ -837,15 +1015,23 @@ fn from_metadata_update_dto(dto: &MetadataUpdateConfigDto, base: &MetadataUpdate
     }
 }
 
-fn from_processing_dto(dto: &MetadataProcessingConfigDto, base: &MetadataProcessingConfig) -> MetadataProcessingConfig {
+fn from_processing_dto(
+    dto: &MetadataProcessingConfigDto,
+    base: &MetadataProcessingConfig,
+) -> MetadataProcessingConfig {
     MetadataProcessingConfig {
-        library_type: dto.library_type.map(from_media_type_dto).unwrap_or(base.library_type),
+        library_type: dto
+            .library_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.library_type),
         aggregate: dto.aggregate.unwrap_or(base.aggregate),
         merge_tags: dto.merge_tags.unwrap_or(base.merge_tags),
         merge_genres: dto.merge_genres.unwrap_or(base.merge_genres),
         book_covers: dto.book_covers.unwrap_or(base.book_covers),
         series_covers: dto.series_covers.unwrap_or(base.series_covers),
-        override_existing_covers: dto.override_existing_covers.unwrap_or(base.override_existing_covers),
+        override_existing_covers: dto
+            .override_existing_covers
+            .unwrap_or(base.override_existing_covers),
         lock_covers: dto.lock_covers.unwrap_or(base.lock_covers),
         update_modes: dto
             .update_modes
@@ -951,7 +1137,9 @@ fn from_post_processing_dto(
             Some(v) => v.clone(),
             None => base.series_title_language.clone(),
         },
-        alternative_series_titles: dto.alternative_series_titles.unwrap_or(base.alternative_series_titles),
+        alternative_series_titles: dto
+            .alternative_series_titles
+            .unwrap_or(base.alternative_series_titles),
         alternative_series_title_languages: dto
             .alternative_series_title_languages
             .clone()
@@ -965,7 +1153,9 @@ fn from_post_processing_dto(
             Some(v) => v.clone(),
             None => base.language_value.clone(),
         },
-        fallback_to_alt_title: dto.fallback_to_alt_title.unwrap_or(base.fallback_to_alt_title),
+        fallback_to_alt_title: dto
+            .fallback_to_alt_title
+            .unwrap_or(base.fallback_to_alt_title),
         score_tag_name: match &dto.score_tag_name {
             Some(v) => v.clone(),
             None => base.score_tag_name.clone(),
@@ -1084,8 +1274,12 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
                 .map(|a| komf_core::config::BangumiArchiveConfig {
                     enabled: a.enabled.unwrap_or(base.bangumi.archive.enabled),
                     dir: a.dir.clone().or_else(|| base.bangumi.archive.dir.clone()),
-                    update_interval_hours: a.update_interval_hours.unwrap_or(base.bangumi.archive.update_interval_hours),
-                    idle_release_secs: a.idle_release_secs.or(base.bangumi.archive.idle_release_secs),
+                    update_interval_hours: a
+                        .update_interval_hours
+                        .unwrap_or(base.bangumi.archive.update_interval_hours),
+                    idle_release_secs: a
+                        .idle_release_secs
+                        .or(base.bangumi.archive.idle_release_secs),
                 })
                 .unwrap_or_else(|| base.bangumi.archive.clone()),
             series_title_language: dto
@@ -1125,7 +1319,10 @@ fn from_provider_dto(dto: &ProviderConfigDto, base: &ProviderConfig) -> Provider
             Some(v) => v.map(from_name_matching_mode_dto),
             None => base.name_matching_mode,
         },
-        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        media_type: dto
+            .media_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.media_type),
         author_roles: dto
             .author_roles
             .as_ref()
@@ -1136,15 +1333,18 @@ fn from_provider_dto(dto: &ProviderConfigDto, base: &ProviderConfig) -> Provider
             .as_ref()
             .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
             .unwrap_or_else(|| base.artist_roles.clone()),
-        tag_whitelist: dto.tag_whitelist.clone().unwrap_or_else(|| base.tag_whitelist.clone()),
-        tag_whitelist_file: dto.tag_whitelist_file.clone().or_else(|| base.tag_whitelist_file.clone()),
+        tag_whitelist: dto
+            .tag_whitelist
+            .clone()
+            .unwrap_or_else(|| base.tag_whitelist.clone()),
+        tag_whitelist_file: dto
+            .tag_whitelist_file
+            .clone()
+            .or_else(|| base.tag_whitelist_file.clone()),
     }
 }
 
-fn from_book_walker_dto(
-    dto: &BookWalkerConfigDto,
-    base: &BookWalkerConfig,
-) -> BookWalkerConfig {
+fn from_book_walker_dto(dto: &BookWalkerConfigDto, base: &BookWalkerConfig) -> BookWalkerConfig {
     BookWalkerConfig {
         priority: dto.priority.unwrap_or(base.priority),
         enabled: dto.enabled.unwrap_or(base.enabled),
@@ -1162,7 +1362,10 @@ fn from_book_walker_dto(
             Some(v) => v.map(from_name_matching_mode_dto),
             None => base.name_matching_mode,
         },
-        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        media_type: dto
+            .media_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.media_type),
         author_roles: dto
             .author_roles
             .as_ref()
@@ -1205,7 +1408,10 @@ fn from_ehentai_dto(dto: &EHentaiConfigDto, base: &EHentaiConfig) -> EHentaiConf
             Some(v) => v.map(from_name_matching_mode_dto),
             None => base.name_matching_mode,
         },
-        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        media_type: dto
+            .media_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.media_type),
         author_roles: dto
             .author_roles
             .as_ref()
@@ -1248,8 +1454,14 @@ fn from_ehentai_dto(dto: &EHentaiConfigDto, base: &EHentaiConfig) -> EHentaiConf
             .clone()
             .unwrap_or_else(|| base.search_domain.clone()),
         gid_only_match: dto.gid_only_match.unwrap_or(base.gid_only_match),
-        ipb_member_id: dto.ipb_member_id.clone().or_else(|| base.ipb_member_id.clone()),
-        ipb_pass_hash: dto.ipb_pass_hash.clone().or_else(|| base.ipb_pass_hash.clone()),
+        ipb_member_id: dto
+            .ipb_member_id
+            .clone()
+            .or_else(|| base.ipb_member_id.clone()),
+        ipb_pass_hash: dto
+            .ipb_pass_hash
+            .clone()
+            .or_else(|| base.ipb_pass_hash.clone()),
         archive: dto
             .archive
             .as_ref()
@@ -1260,9 +1472,7 @@ fn from_ehentai_dto(dto: &EHentaiConfigDto, base: &EHentaiConfig) -> EHentaiConf
                 update_interval_hours: d
                     .update_interval_hours
                     .unwrap_or(base.archive.update_interval_hours),
-                idle_release_secs: d
-                    .idle_release_secs
-                    .or(base.archive.idle_release_secs),
+                idle_release_secs: d.idle_release_secs.or(base.archive.idle_release_secs),
                 search_category_filter: d
                     .search_category_filter
                     .clone()
@@ -1276,7 +1486,10 @@ fn from_ehentai_dto(dto: &EHentaiConfigDto, base: &EHentaiConfig) -> EHentaiConf
     }
 }
 
-fn from_anilist_dto(dto: &AniListConfigDto, base: &komf_core::config::AniListConfig) -> komf_core::config::AniListConfig {
+fn from_anilist_dto(
+    dto: &AniListConfigDto,
+    base: &komf_core::config::AniListConfig,
+) -> komf_core::config::AniListConfig {
     komf_core::config::AniListConfig {
         priority: dto.priority.unwrap_or(base.priority),
         enabled: dto.enabled.unwrap_or(base.enabled),
@@ -1289,7 +1502,10 @@ fn from_anilist_dto(dto: &AniListConfigDto, base: &komf_core::config::AniListCon
             Some(v) => v.map(from_name_matching_mode_dto),
             None => base.name_matching_mode,
         },
-        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        media_type: dto
+            .media_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.media_type),
         author_roles: dto
             .author_roles
             .as_ref()
@@ -1300,12 +1516,17 @@ fn from_anilist_dto(dto: &AniListConfigDto, base: &komf_core::config::AniListCon
             .as_ref()
             .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
             .unwrap_or_else(|| base.artist_roles.clone()),
-        tags_score_threshold: dto.tags_score_threshold.unwrap_or(base.tags_score_threshold),
+        tags_score_threshold: dto
+            .tags_score_threshold
+            .unwrap_or(base.tags_score_threshold),
         tags_size_limit: dto.tags_size_limit.unwrap_or(base.tags_size_limit),
     }
 }
 
-fn from_mangadex_dto(dto: &MangaDexConfigDto, base: &komf_core::config::MangaDexConfig) -> komf_core::config::MangaDexConfig {
+fn from_mangadex_dto(
+    dto: &MangaDexConfigDto,
+    base: &komf_core::config::MangaDexConfig,
+) -> komf_core::config::MangaDexConfig {
     komf_core::config::MangaDexConfig {
         priority: dto.priority.unwrap_or(base.priority),
         enabled: dto.enabled.unwrap_or(base.enabled),
@@ -1323,7 +1544,10 @@ fn from_mangadex_dto(dto: &MangaDexConfigDto, base: &komf_core::config::MangaDex
             Some(v) => v.map(from_name_matching_mode_dto),
             None => base.name_matching_mode,
         },
-        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        media_type: dto
+            .media_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.media_type),
         author_roles: dto
             .author_roles
             .as_ref()
@@ -1334,7 +1558,10 @@ fn from_mangadex_dto(dto: &MangaDexConfigDto, base: &komf_core::config::MangaDex
             .as_ref()
             .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
             .unwrap_or_else(|| base.artist_roles.clone()),
-        cover_languages: dto.cover_languages.clone().unwrap_or_else(|| base.cover_languages.clone()),
+        cover_languages: dto
+            .cover_languages
+            .clone()
+            .unwrap_or_else(|| base.cover_languages.clone()),
         links: dto
             .links
             .as_ref()
@@ -1343,7 +1570,10 @@ fn from_mangadex_dto(dto: &MangaDexConfigDto, base: &komf_core::config::MangaDex
     }
 }
 
-fn from_manga_baka_dto(dto: &MangaBakaConfigDto, base: &komf_core::config::MangaBakaConfig) -> komf_core::config::MangaBakaConfig {
+fn from_manga_baka_dto(
+    dto: &MangaBakaConfigDto,
+    base: &komf_core::config::MangaBakaConfig,
+) -> komf_core::config::MangaBakaConfig {
     komf_core::config::MangaBakaConfig {
         priority: dto.priority.unwrap_or(base.priority),
         enabled: dto.enabled.unwrap_or(base.enabled),
@@ -1356,7 +1586,10 @@ fn from_manga_baka_dto(dto: &MangaBakaConfigDto, base: &komf_core::config::Manga
             Some(v) => v.map(from_name_matching_mode_dto),
             None => base.name_matching_mode,
         },
-        media_type: dto.media_type.map(from_media_type_dto).unwrap_or(base.media_type),
+        media_type: dto
+            .media_type
+            .map(from_media_type_dto)
+            .unwrap_or(base.media_type),
         author_roles: dto
             .author_roles
             .as_ref()
@@ -1406,7 +1639,9 @@ fn from_series_metadata_dto(
         books: dto.books.unwrap_or(base.books),
         links: dto.links.unwrap_or(base.links),
         score: dto.score.unwrap_or(base.score),
-        use_original_publisher: dto.use_original_publisher.unwrap_or(base.use_original_publisher),
+        use_original_publisher: dto
+            .use_original_publisher
+            .unwrap_or(base.use_original_publisher),
     }
 }
 
@@ -1586,7 +1821,8 @@ mod tests {
     fn patch_saves_komga_password_and_get_hides_it() {
         // 脚本 32089-32092：user 变更时发 komgaUser；密码框启用且非空时发 komgaPassword
         let request: KomfConfigUpdateRequest =
-            serde_json::from_str(r#"{"komga":{"komgaUser":"alice","komgaPassword":"s3cret"}}"#).unwrap();
+            serde_json::from_str(r#"{"komga":{"komgaUser":"alice","komgaPassword":"s3cret"}}"#)
+                .unwrap();
         let config = apply_config_update(AppConfig::default(), &request);
         assert_eq!(config.komga.komga_user, "alice");
         assert_eq!(config.komga.komga_password, "s3cret");
@@ -1613,12 +1849,30 @@ mod tests {
         let mut config = AppConfig::default();
         config.metadata_providers.mal_client_id = Some("secret-mal".to_string());
         config.metadata_providers.comic_vine_api_key = Some("secret-cv".to_string());
-        config.metadata_providers.default_providers.bangumi.provider.name_matching_mode =
-            Some(NameSimilarityMatcher::ClosestMatch);
-        config.metadata_providers.default_providers.bangumi.provider.media_type = MediaType::Manga;
-        config.metadata_providers.default_providers.bangumi.provider.priority = 10;
-        config.komga.metadata_update.default.post_processing.series_title_language =
-            Some("en".to_string());
+        config
+            .metadata_providers
+            .default_providers
+            .bangumi
+            .provider
+            .name_matching_mode = Some(NameSimilarityMatcher::ClosestMatch);
+        config
+            .metadata_providers
+            .default_providers
+            .bangumi
+            .provider
+            .media_type = MediaType::Manga;
+        config
+            .metadata_providers
+            .default_providers
+            .bangumi
+            .provider
+            .priority = 10;
+        config
+            .komga
+            .metadata_update
+            .default
+            .post_processing
+            .series_title_language = Some("en".to_string());
 
         // null → 清空
         let request: KomfConfigUpdateRequest = serde_json::from_str(
@@ -1628,8 +1882,24 @@ mod tests {
         let updated = apply_config_update(config.clone(), &request);
         assert_eq!(updated.metadata_providers.mal_client_id, None);
         assert_eq!(updated.metadata_providers.comic_vine_api_key, None);
-        assert_eq!(updated.metadata_providers.default_providers.bangumi.provider.name_matching_mode, None);
-        assert_eq!(updated.komga.metadata_update.default.post_processing.series_title_language, None);
+        assert_eq!(
+            updated
+                .metadata_providers
+                .default_providers
+                .bangumi
+                .provider
+                .name_matching_mode,
+            None
+        );
+        assert_eq!(
+            updated
+                .komga
+                .metadata_update
+                .default
+                .post_processing
+                .series_title_language,
+            None
+        );
 
         // 有值 → 设置
         let request: KomfConfigUpdateRequest = serde_json::from_str(
@@ -1637,37 +1907,85 @@ mod tests {
         )
         .unwrap();
         let updated = apply_config_update(config.clone(), &request);
-        assert_eq!(updated.metadata_providers.mal_client_id.as_deref(), Some("new-mal"));
         assert_eq!(
-            updated.metadata_providers.default_providers.bangumi.provider.name_matching_mode,
+            updated.metadata_providers.mal_client_id.as_deref(),
+            Some("new-mal")
+        );
+        assert_eq!(
+            updated
+                .metadata_providers
+                .default_providers
+                .bangumi
+                .provider
+                .name_matching_mode,
             Some(NameSimilarityMatcher::Exact)
         );
         assert_eq!(
-            updated.komga.metadata_update.default.post_processing.series_title_language.as_deref(),
+            updated
+                .komga
+                .metadata_update
+                .default
+                .post_processing
+                .series_title_language
+                .as_deref(),
             Some("fr")
         );
 
         // 缺省 → 保持（PATCH 增量语义）
-        let request: KomfConfigUpdateRequest = serde_json::from_str(r#"{"metadataProviders":{}}"#).unwrap();
+        let request: KomfConfigUpdateRequest =
+            serde_json::from_str(r#"{"metadataProviders":{}}"#).unwrap();
         let updated = apply_config_update(config.clone(), &request);
-        assert_eq!(updated.metadata_providers.mal_client_id.as_deref(), Some("secret-mal"));
         assert_eq!(
-            updated.metadata_providers.default_providers.bangumi.provider.name_matching_mode,
+            updated.metadata_providers.mal_client_id.as_deref(),
+            Some("secret-mal")
+        );
+        assert_eq!(
+            updated
+                .metadata_providers
+                .default_providers
+                .bangumi
+                .provider
+                .name_matching_mode,
             Some(NameSimilarityMatcher::ClosestMatch)
         );
         assert_eq!(
-            updated.komga.metadata_update.default.post_processing.series_title_language.as_deref(),
+            updated
+                .komga
+                .metadata_update
+                .default
+                .post_processing
+                .series_title_language
+                .as_deref(),
             Some("en")
         );
         // 缺省不触碰无关字段
-        assert_eq!(updated.metadata_providers.default_providers.bangumi.provider.media_type, MediaType::Manga);
-        assert_eq!(updated.metadata_providers.default_providers.bangumi.provider.priority, 10);
+        assert_eq!(
+            updated
+                .metadata_providers
+                .default_providers
+                .bangumi
+                .provider
+                .media_type,
+            MediaType::Manga
+        );
+        assert_eq!(
+            updated
+                .metadata_providers
+                .default_providers
+                .bangumi
+                .provider
+                .priority,
+            10
+        );
 
         // 顶层 nameMatchingMode：Kotlin getOrNull() 语义 —— null 不生效（保持原值）
         let request: KomfConfigUpdateRequest =
             serde_json::from_str(r#"{"metadataProviders":{"nameMatchingMode":null}}"#).unwrap();
         let updated = apply_config_update(config.clone(), &request);
-        assert_eq!(updated.metadata_providers.name_matching_mode, config.metadata_providers.name_matching_mode);
+        assert_eq!(
+            updated.metadata_providers.name_matching_mode,
+            config.metadata_providers.name_matching_mode
+        );
     }
 
     /// PATCH 库级配置删除：libraryProviders / metadataUpdate.library 的 value 为 null → 删除该库。
@@ -1688,9 +2006,24 @@ mod tests {
         )
         .unwrap();
         let updated = apply_config_update(config, &request);
-        assert!(!updated.metadata_providers.library_providers.contains_key("lib-a"));
-        assert_eq!(updated.metadata_providers.library_providers["lib-b"].bangumi.provider.priority, 7);
-        assert_eq!(updated.metadata_providers.library_providers["lib-c"].bangumi.provider.priority, 3);
+        assert!(!updated
+            .metadata_providers
+            .library_providers
+            .contains_key("lib-a"));
+        assert_eq!(
+            updated.metadata_providers.library_providers["lib-b"]
+                .bangumi
+                .provider
+                .priority,
+            7
+        );
+        assert_eq!(
+            updated.metadata_providers.library_providers["lib-c"]
+                .bangumi
+                .provider
+                .priority,
+            3
+        );
         assert!(!updated.komga.metadata_update.library.contains_key("lib-a"));
         assert_eq!(
             updated.komga.metadata_update.library["lib-b"].library_type,
@@ -1735,7 +2068,10 @@ mod tests {
         .unwrap();
         let updated = apply_config_update(config, &request);
         assert!(updated.komga.metadata_update.default.override_comic_info);
-        assert_eq!(updated.komga.event_listener.metadata_series_exclude_filter, vec!["excluded-series"]);
+        assert_eq!(
+            updated.komga.event_listener.metadata_series_exclude_filter,
+            vec!["excluded-series"]
+        );
 
         // GET 输出仍用 metadataSeriesExcludeFilter，且不带 PATCH 专用字段
         let dto = to_config_dto(&updated, None, None, None, None, None);
@@ -1774,7 +2110,13 @@ mod tests {
         let config = AppConfig::default();
         let updated = apply_config_update(config.clone(), &request);
         assert_eq!(
-            updated.komga.metadata_update.default.post_processing.series_title_language.as_deref(),
+            updated
+                .komga
+                .metadata_update
+                .default
+                .post_processing
+                .series_title_language
+                .as_deref(),
             Some("en")
         );
         // GET DTO 输出 en（序列化链路）
@@ -1790,13 +2132,25 @@ mod tests {
         )
         .unwrap();
         let updated = apply_config_update(updated, &request);
-        assert_eq!(updated.komga.metadata_update.default.post_processing.series_title_language, None);
+        assert_eq!(
+            updated
+                .komga
+                .metadata_update
+                .default
+                .post_processing
+                .series_title_language,
+            None
+        );
         let dto = to_config_dto(&updated, None, None, None, None, None);
         let value = serde_json::to_value(&dto).unwrap();
-        let komga_lang = value["komga"]["metadataUpdate"]["default"]["postProcessing"]["seriesTitleLanguage"]
+        let komga_lang = value["komga"]["metadataUpdate"]["default"]["postProcessing"]
+            ["seriesTitleLanguage"]
             .as_str()
             .map(|s| s.to_string());
-        assert_eq!(komga_lang, None, "komga seriesTitleLanguage must be cleared");
+        assert_eq!(
+            komga_lang, None,
+            "komga seriesTitleLanguage must be cleared"
+        );
     }
 
     /// Stump PATCH 应用：凭据/事件/元数据更新写入配置；缺省保持；GET 不输出凭据。
@@ -1826,7 +2180,10 @@ mod tests {
         // GET：输出 stump 段、不输出凭据
         let dto = to_config_dto(&config2, None, None, None, None, None);
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"stump\""), "GET must output stump section, got {json}");
+        assert!(
+            json.contains("\"stump\""),
+            "GET must output stump section, got {json}"
+        );
         assert!(!json.contains("s3cret"));
         assert!(!json.contains("key-123"));
     }
@@ -1847,17 +2204,29 @@ mod tests {
             Some("2025-09-30T12:00:00Z"),
         );
         assert_eq!(
-            dto.metadata_providers.bangumi_database.as_ref().map(|d| d.download_timestamp.as_str()),
+            dto.metadata_providers
+                .bangumi_database
+                .as_ref()
+                .map(|d| d.download_timestamp.as_str()),
             Some("2025-09-30T12:00:00Z")
         );
         assert_eq!(
-            dto.metadata_providers.ehentai_database.as_ref().map(|d| d.download_timestamp.as_str()),
+            dto.metadata_providers
+                .ehentai_database
+                .as_ref()
+                .map(|d| d.download_timestamp.as_str()),
             Some("2025-09-30T12:00:00Z")
         );
 
         // GET JSON 字段名 camelCase
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"bangumiDatabase\":{\"downloadTimestamp\":\"2025-09-30T12:00:00Z\"}"), "{json}");
-        assert!(json.contains("\"ehentaiDatabase\":{\"downloadTimestamp\":\"2025-09-30T12:00:00Z\"}"), "{json}");
+        assert!(
+            json.contains("\"bangumiDatabase\":{\"downloadTimestamp\":\"2025-09-30T12:00:00Z\"}"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"ehentaiDatabase\":{\"downloadTimestamp\":\"2025-09-30T12:00:00Z\"}"),
+            "{json}"
+        );
     }
 }

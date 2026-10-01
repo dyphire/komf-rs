@@ -173,7 +173,10 @@ impl MangaUpdatesClient {
     pub fn new(http: reqwest::Client) -> Self {
         Self {
             http,
-            limiter: crate::rate_limiter::IntervalLimiter::new(15, std::time::Duration::from_secs(10)),
+            limiter: crate::rate_limiter::IntervalLimiter::new(
+                15,
+                std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -685,11 +688,14 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for MangaUpdatesMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"mangaupdates\.com/(?:series/(\d+)|series\.html\?id=(\d+))").ok()?;
-        re.captures(query)
-            .and_then(|c| c.get(1).or_else(|| c.get(2)).map(|m| m.as_str().to_string()))
+        let re =
+            regex::Regex::new(r"mangaupdates\.com/(?:series/(\d+)|series\.html\?id=(\d+))").ok()?;
+        re.captures(query).and_then(|c| {
+            c.get(1)
+                .or_else(|| c.get(2))
+                .map(|m| m.as_str().to_string())
+        })
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::MangaUpdates
@@ -832,8 +838,7 @@ mod tests {
     #[test]
     #[ignore]
     fn debug_parse_real_search_response() {
-        let raw =
-            std::fs::read_to_string(r"G:\Github\komf\.smoke-komga\search.json").unwrap();
+        let raw = std::fs::read_to_string(r"G:\Github\komf\.smoke-komga\search.json").unwrap();
         let page: SearchResultPage = serde_json::from_str(&raw).unwrap();
         assert!(!page.results.is_empty());
         assert!(page.total_hits > 0);
@@ -844,8 +849,7 @@ mod tests {
     #[test]
     #[ignore]
     fn debug_parse_real_series_response() {
-        let raw =
-            std::fs::read_to_string(r"G:\Github\komf\.smoke-komga\series.json").unwrap();
+        let raw = std::fs::read_to_string(r"G:\Github\komf\.smoke-komga\series.json").unwrap();
         let series: MangaUpdatesSeries = serde_json::from_str(&raw).unwrap();
         assert_eq!(series.series_id, 55099564912);
         assert!(series.status.is_some());

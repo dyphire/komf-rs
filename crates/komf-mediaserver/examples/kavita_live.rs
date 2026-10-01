@@ -15,7 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let libs = client.get_libraries().await?;
     println!("[1] libraries: {} 个", libs.len());
     for lib in &libs {
-        println!("    id={} name={} type={} folders={:?}", lib.id, lib.name, lib.r#type, lib.folders);
+        println!(
+            "    id={} name={} type={} folders={:?}",
+            lib.id, lib.name, lib.r#type, lib.folders
+        );
     }
 
     // 2. 第一个库的分页系列（series/v2 statements field=19）
@@ -29,9 +32,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // 3. 第一系列的详情 / 元数据 / 卷
         if let Some(s) = series.first() {
-            println!("[3] series: id={} name={} sort={} pages={} format={}", s.id, s.name, s.sort_name, s.pages, s.format);
+            println!(
+                "[3] series: id={} name={} sort={} pages={} format={}",
+                s.id, s.name, s.sort_name, s.pages, s.format
+            );
             let details = client.get_series_details(s.id).await?;
-            println!("    details: total_count={} volumes={:?}", details.total_count, details.volumes.as_ref().map(|v| v.len()));
+            println!(
+                "    details: total_count={} volumes={:?}",
+                details.total_count,
+                details.volumes.as_ref().map(|v| v.len())
+            );
             let metadata = client.get_series_metadata(s.id).await?;
             println!(
                 "    metadata: id={} summary_len={} genres={} writers={} coverArtists={} tags={} ageRating={}",
@@ -47,16 +57,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let volumes = client.get_volumes(s.id).await?;
             println!("    volumes: {} 个", volumes.len());
             for v in volumes.iter().take(3) {
-                println!("      volume id={} min={} max={} name={} pages={} chapters={}", v.id, v.min_number, v.max_number, v.name, v.pages, v.chapters.len());
+                println!(
+                    "      volume id={} min={} max={} name={} pages={} chapters={}",
+                    v.id,
+                    v.min_number,
+                    v.max_number,
+                    v.name,
+                    v.pages,
+                    v.chapters.len()
+                );
                 if let Some(ch) = v.chapters.first() {
-                    println!("        chapter id={} title={} number={:?} pages={} created={}", ch.id, ch.title, ch.number, ch.pages, ch.created_utc);
+                    println!(
+                        "        chapter id={} title={} number={:?} pages={} created={}",
+                        ch.id, ch.title, ch.number, ch.pages, ch.created_utc
+                    );
                     let chap = client.get_chapter(ch.id).await?;
-                    println!("        get_chapter -> id={} title={} files={}", chap.id, chap.title, chap.files.len());
+                    println!(
+                        "        get_chapter -> id={} title={} files={}",
+                        chap.id,
+                        chap.title,
+                        chap.files.len()
+                    );
                 }
             }
             // 5. 封面下载（apiKey 查询参数）
             let cover = client.get_series_cover(s.id).await?;
-            println!("[5] series_cover: {} bytes, mime={:?}", cover.bytes.len(), cover.mime_type);
+            println!(
+                "[5] series_cover: {} bytes, mime={:?}",
+                cover.bytes.len(),
+                cover.mime_type
+            );
         }
     }
 
@@ -65,7 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (series, _) = client.get_series_page(lib.id, 0).await?;
         if let Some(s) = series.first() {
             let direct = client.get_series(s.id).await?;
-            println!("[6] get_series({}) -> name={} folder={}", s.id, direct.name, direct.folder_path);
+            println!(
+                "[6] get_series({}) -> name={} folder={}",
+                s.id, direct.name, direct.folder_path
+            );
         }
     }
 

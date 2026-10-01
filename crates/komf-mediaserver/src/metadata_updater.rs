@@ -1,11 +1,11 @@
 //! 元数据更新器 —— 对应 `MetadataUpdater.kt`。
 use crate::client::{MediaServerClient, MediaServerError};
 use crate::comic_info::{comic_info_from_metadata, series_comic_info, ComicInfoWriter};
-use crate::mylar::{mylar_series_json_from_metadata, write_series_json};
 use crate::jobs::{BookThumbnail, KomfJobsRepository, SeriesThumbnail};
 use crate::metadata_mapper::{authors_to_comic_info_fields, MetadataMapper};
 use crate::metadata_post_processor::MetadataPostProcessor;
 use crate::model::*;
+use crate::mylar::{mylar_series_json_from_metadata, write_series_json};
 use crate::tag_translator::TagTranslator;
 use komf_core::model::{BookMetadata, Image, SeriesMetadata, UpdateMode};
 use komf_core::providers::CoreProviders;
@@ -88,11 +88,14 @@ impl MetadataUpdater {
     ) -> Result<(), MediaServerError> {
         let translated = self.translate_metadata(metadata, provider);
         let processed = self.post_processor.process(&translated);
-        self.update_series_metadata(series, &processed.series_metadata).await?;
-        self.update_book_metadata(series, &translated, &processed).await?;
+        self.update_series_metadata(series, &processed.series_metadata)
+            .await?;
+        self.update_book_metadata(series, &translated, &processed)
+            .await?;
 
         if self.update_modes.contains(&UpdateMode::MylarSeriesJson) {
-            self.write_mylar_series_json(series, &processed.series_metadata).await?;
+            self.write_mylar_series_json(series, &processed.series_metadata)
+                .await?;
         }
 
         if self.update_modes.contains(&UpdateMode::ComicInfo) {
@@ -133,9 +136,13 @@ impl MetadataUpdater {
     ) -> Result<(), MediaServerError> {
         let mut page_number = 1;
         loop {
-            let page = self.media_server_client.get_series_page(library_id, page_number).await?;
+            let page = self
+                .media_server_client
+                .get_series_page(library_id, page_number)
+                .await?;
             for series in &page.content {
-                self.reset_series_metadata(&series.id, remove_comic_info).await?;
+                self.reset_series_metadata(&series.id, remove_comic_info)
+                    .await?;
             }
             if page.page_number >= page.total_pages - 1 {
                 break;
@@ -151,7 +158,9 @@ impl MetadataUpdater {
         remove_comic_info: bool,
     ) -> Result<(), MediaServerError> {
         let series = self.media_server_client.get_series(series_id).await?;
-        self.media_server_client.reset_series_metadata(&series).await?;
+        self.media_server_client
+            .reset_series_metadata(&series)
+            .await?;
 
         let mut books = self.media_server_client.get_books(series_id).await?;
         books.sort_by(|a, b| case_insensitive_nat_sort(&a.name, &b.name));
@@ -162,11 +171,14 @@ impl MetadataUpdater {
                     .remove_comic_info(&book.url)
                     .map_err(|e| MediaServerError::ComicInfo(e.to_string()))?;
             }
-            self.reset_book_metadata(book, Some(index as i32 + 1)).await?;
+            self.reset_book_metadata(book, Some(index as i32 + 1))
+                .await?;
         }
 
         self.replace_series_thumbnail(series_id, None).await?;
-        let _ = self.repository.delete_series_thumbnail(series_id, self.media_server);
+        let _ = self
+            .repository
+            .delete_series_thumbnail(series_id, self.media_server);
         Ok(())
     }
 
@@ -179,7 +191,9 @@ impl MetadataUpdater {
             .reset_book_metadata(book, sort_number)
             .await?;
         self.replace_book_thumbnail(&book.id, None).await?;
-        let _ = self.repository.delete_book_thumbnail(&book.id, self.media_server);
+        let _ = self
+            .repository
+            .delete_book_thumbnail(&book.id, self.media_server);
         Ok(())
     }
 
@@ -202,7 +216,9 @@ impl MetadataUpdater {
         } else {
             None
         };
-        let thumbnail_id = self.replace_series_thumbnail(&series.id, new_thumbnail.as_ref()).await?;
+        let thumbnail_id = self
+            .replace_series_thumbnail(&series.id, new_thumbnail.as_ref())
+            .await?;
 
         match thumbnail_id {
             Some(thumbnail_id) => {
@@ -213,7 +229,9 @@ impl MetadataUpdater {
                 });
             }
             None => {
-                let _ = self.repository.delete_series_thumbnail(&series.id, self.media_server);
+                let _ = self
+                    .repository
+                    .delete_series_thumbnail(&series.id, self.media_server);
             }
         }
         Ok(())
@@ -273,9 +291,14 @@ impl MetadataUpdater {
             };
             let cover_path = dir.join(&cover_name);
             if !cover_path.exists() {
-                if let Some(image) = self.media_server_client.get_series_thumbnail(&series.id).await? {
-                    std::fs::write(&cover_path, &image.bytes)
-                        .map_err(|e| MediaServerError::Mylar(format!("write {}: {e}", cover_path.display())))?;
+                if let Some(image) = self
+                    .media_server_client
+                    .get_series_thumbnail(&series.id)
+                    .await?
+                {
+                    std::fs::write(&cover_path, &image.bytes).map_err(|e| {
+                        MediaServerError::Mylar(format!("write {}: {e}", cover_path.display()))
+                    })?;
                 }
             }
         }
@@ -290,14 +313,11 @@ impl MetadataUpdater {
     ) -> Result<(), MediaServerError> {
         // 重新拉取书籍列表以获取最新书名（对应 Kotlin 中按书名排序）
         let books = self.media_server_client.get_books(&series.id).await?;
-        let write_series_id = self.book_to_write_series_metadata(&unprocessed.book_metadata, &books);
+        let write_series_id =
+            self.book_to_write_series_metadata(&unprocessed.book_metadata, &books);
 
         for book in books.iter() {
-            let raw_metadata = processed
-                .book_metadata
-                .get(&book.id)
-                .cloned()
-                .flatten();
+            let raw_metadata = processed.book_metadata.get(&book.id).cloned().flatten();
             // 对齐 Kotlin `postProcessBooks`：orderBooks 开启时所有书都经 orderBook
             // （metadata null 的书用空 BookMetadata 解析书名卷/章号，结果非 null）。
             let metadata = if self.post_processor.order_books_enabled() {
@@ -313,22 +333,37 @@ impl MetadataUpdater {
             for mode in &self.update_modes {
                 match mode {
                     UpdateMode::Api => {
-                        let update = self
-                            .metadata_update_mapper
-                            .to_book_metadata_update(metadata.as_ref(), Some(&processed.series_metadata), book);
-                        self.media_server_client.update_book_metadata(&book.id, &update).await?;
+                        let update = self.metadata_update_mapper.to_book_metadata_update(
+                            metadata.as_ref(),
+                            Some(&processed.series_metadata),
+                            book,
+                        );
+                        self.media_server_client
+                            .update_book_metadata(&book.id, &update)
+                            .await?;
                     }
                     UpdateMode::ComicInfo => {
                         if book.deleted {
                             continue;
                         }
                         let comic_info = if write_series_metadata {
-                            let author_fields = authors_to_comic_info_fields(&processed.series_metadata.authors);
-                            Some(series_comic_info(&processed.series_metadata, metadata.as_ref(), author_fields))
+                            let author_fields =
+                                authors_to_comic_info_fields(&processed.series_metadata.authors);
+                            Some(series_comic_info(
+                                &processed.series_metadata,
+                                metadata.as_ref(),
+                                author_fields,
+                            ))
                         } else {
                             let authors = metadata
                                 .as_ref()
-                                .and_then(|m| if m.authors.is_empty() { None } else { Some(m.authors.clone()) })
+                                .and_then(|m| {
+                                    if m.authors.is_empty() {
+                                        None
+                                    } else {
+                                        Some(m.authors.clone())
+                                    }
+                                })
                                 .or_else(|| {
                                     if processed.series_metadata.authors.is_empty() {
                                         None
@@ -338,7 +373,11 @@ impl MetadataUpdater {
                                 })
                                 .unwrap_or_default();
                             let author_fields = authors_to_comic_info_fields(&authors);
-                            comic_info_from_metadata(metadata.as_ref(), Some(&processed.series_metadata), author_fields)
+                            comic_info_from_metadata(
+                                metadata.as_ref(),
+                                Some(&processed.series_metadata),
+                                author_fields,
+                            )
                         };
                         if let Some(comic_info) = comic_info {
                             // 对齐 Kotlin：writeMetadata 内部 runCatching 后 rethrow → job FAILED
@@ -358,7 +397,9 @@ impl MetadataUpdater {
             } else {
                 None
             };
-            let thumbnail_id = self.replace_book_thumbnail(&book.id, new_thumbnail.as_ref()).await?;
+            let thumbnail_id = self
+                .replace_book_thumbnail(&book.id, new_thumbnail.as_ref())
+                .await?;
             match thumbnail_id {
                 Some(thumbnail_id) => {
                     let _ = self.repository.save_book_thumbnail(&BookThumbnail {
@@ -369,7 +410,9 @@ impl MetadataUpdater {
                     });
                 }
                 None => {
-                    let _ = self.repository.delete_book_thumbnail(&book.id, self.media_server);
+                    let _ = self
+                        .repository
+                        .delete_book_thumbnail(&book.id, self.media_server);
                 }
             }
         }
@@ -386,11 +429,18 @@ impl MetadataUpdater {
             .find_book_thumbnail(book_id, self.media_server)
             .ok()
             .flatten();
-        let thumbnails = self.media_server_client.get_book_thumbnails(book_id).await?;
+        let thumbnails = self
+            .media_server_client
+            .get_book_thumbnails(book_id)
+            .await?;
 
         let select_thumbnail = self.override_existing_covers
             || thumbnails.iter().all(|t| {
-                t.r#type == "GENERATED" || existing_match.as_ref().map(|m| m.thumbnail_id == t.id.0).unwrap_or(false)
+                t.r#type == "GENERATED"
+                    || existing_match
+                        .as_ref()
+                        .map(|m| m.thumbnail_id == t.id.0)
+                        .unwrap_or(false)
             });
 
         let uploaded = match thumbnail {
@@ -419,7 +469,10 @@ impl MetadataUpdater {
         if let Some(existing) = &existing_match {
             if thumbnails.iter().any(|t| t.id.0 == existing.thumbnail_id) {
                 self.media_server_client
-                    .delete_book_thumbnail(book_id, &MediaServerThumbnailId(existing.thumbnail_id.clone()))
+                    .delete_book_thumbnail(
+                        book_id,
+                        &MediaServerThumbnailId(existing.thumbnail_id.clone()),
+                    )
                     .await?;
             }
         }
@@ -437,7 +490,10 @@ impl MetadataUpdater {
             .find_series_thumbnail(series_id, self.media_server)
             .ok()
             .flatten();
-        let thumbnails = self.media_server_client.get_series_thumbnails(series_id).await?;
+        let thumbnails = self
+            .media_server_client
+            .get_series_thumbnails(series_id)
+            .await?;
 
         let select_thumbnail = self.override_existing_covers || thumbnails.is_empty();
 
@@ -458,7 +514,12 @@ impl MetadataUpdater {
                     }),
                     None => {
                         self.media_server_client
-                            .upload_series_thumbnail(series_id, thumbnail, select_thumbnail, self.lock_covers)
+                            .upload_series_thumbnail(
+                                series_id,
+                                thumbnail,
+                                select_thumbnail,
+                                self.lock_covers,
+                            )
                             .await?
                     }
                 }
@@ -469,7 +530,10 @@ impl MetadataUpdater {
         if let Some(matched) = &matched {
             if thumbnails.iter().any(|t| t.id.0 == matched.thumbnail_id) {
                 self.media_server_client
-                    .delete_series_thumbnail(series_id, &MediaServerThumbnailId(matched.thumbnail_id.clone()))
+                    .delete_series_thumbnail(
+                        series_id,
+                        &MediaServerThumbnailId(matched.thumbnail_id.clone()),
+                    )
                     .await?;
             }
         }
@@ -510,7 +574,10 @@ impl MetadataUpdater {
 /// 对系列（genres + tags）与书籍元数据（tags）做英文 → 中文翻译
 /// （精确匹配，未命中保留原文）。score/publisher 等合成标签由 post_processor
 /// 在翻译之后追加，天然不参与翻译。
-fn translate_tags(metadata: &SeriesAndBookMetadata, translator: &TagTranslator) -> SeriesAndBookMetadata {
+fn translate_tags(
+    metadata: &SeriesAndBookMetadata,
+    translator: &TagTranslator,
+) -> SeriesAndBookMetadata {
     let mut out = metadata.clone();
     out.series_metadata.genres = metadata
         .series_metadata
@@ -543,7 +610,11 @@ mod tests {
 
     fn series_with(genres: Vec<String>, tags: Vec<String>) -> SeriesMetadata {
         SeriesMetadata {
-            title: Some(SeriesTitle { name: "X".into(), r#type: None, language: None }),
+            title: Some(SeriesTitle {
+                name: "X".into(),
+                r#type: None,
+                language: None,
+            }),
             genres,
             tags,
             ..Default::default()
@@ -569,7 +640,12 @@ mod tests {
         let out = translate_tags(&metadata, &tr);
         assert_eq!(out.series_metadata.genres, vec!["动作", "Unknown Genre"]);
         assert_eq!(out.series_metadata.tags, vec!["恋爱", "Score: 8"]);
-        let book = out.book_metadata.get(&MediaServerBookId("b1".into())).unwrap().as_ref().unwrap();
+        let book = out
+            .book_metadata
+            .get(&MediaServerBookId("b1".into()))
+            .unwrap()
+            .as_ref()
+            .unwrap();
         assert_eq!(book.tags, vec!["冒险", "四格漫画"]);
         // 原对象不被修改（clone 语义）
         assert_eq!(metadata.series_metadata.genres[0], "Action");

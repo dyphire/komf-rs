@@ -169,7 +169,8 @@ pub struct Page<T> {
 #[derive(Debug, Clone)]
 pub struct SeriesAndBookMetadata {
     pub series_metadata: komf_core::model::SeriesMetadata,
-    pub book_metadata: std::collections::HashMap<MediaServerBookId, Option<komf_core::model::BookMetadata>>,
+    pub book_metadata:
+        std::collections::HashMap<MediaServerBookId, Option<komf_core::model::BookMetadata>>,
     /// book_id -> oneshot（对齐 Kotlin `SeriesAndBookMetadata.bookMetadata` 的 key
     /// 是 `MediaServerBook` 对象，含 oneshot 字段；Rust 侧单独携带）。
     pub book_oneshots: std::collections::HashMap<MediaServerBookId, bool>,
@@ -188,7 +189,10 @@ pub struct SeriesAndBookMetadata {
 impl SeriesAndBookMetadata {
     pub fn new(
         series_metadata: komf_core::model::SeriesMetadata,
-        book_metadata: std::collections::HashMap<MediaServerBookId, Option<komf_core::model::BookMetadata>>,
+        book_metadata: std::collections::HashMap<
+            MediaServerBookId,
+            Option<komf_core::model::BookMetadata>,
+        >,
     ) -> Self {
         let all_series_titles = series_metadata.titles.clone();
         Self {
@@ -201,10 +205,7 @@ impl SeriesAndBookMetadata {
     }
 
     /// 携带每个 book 的 oneshot 信息（对齐 Kotlin key 为 MediaServerBook）。
-    pub fn with_oneshots(
-        mut self,
-        books: &[MediaServerBook],
-    ) -> Self {
+    pub fn with_oneshots(mut self, books: &[MediaServerBook]) -> Self {
         self.book_oneshots = books
             .iter()
             .map(|book| (book.id.clone(), book.oneshot))
@@ -246,7 +247,8 @@ pub struct MediaServerSeriesMetadataUpdate {
     pub status: Option<SeriesStatus>,
     pub title: Option<komf_core::model::SeriesTitle>,
     pub title_sort: Option<komf_core::model::SeriesTitle>,
-    pub alternative_titles: Option<Vec<(String, Option<komf_core::model::TitleType>, Option<String>)>>,
+    pub alternative_titles:
+        Option<Vec<(String, Option<komf_core::model::TitleType>, Option<String>)>>,
     pub summary: Option<String>,
     pub publisher: Option<String>,
     pub alternative_publishers: Option<Vec<String>>,

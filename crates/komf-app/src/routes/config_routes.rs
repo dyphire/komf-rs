@@ -6,14 +6,20 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use komf_api_models::config::{DownloadProgress, KomfConfigUpdateRequest};
 use komf_api_models::common::KomfErrorResponse;
+use komf_api_models::config::{DownloadProgress, KomfConfigUpdateRequest};
 
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/config", get(get_config).patch(update_config))
-        .route("/update-manga-baka-db", axum::routing::post(update_manga_baka_db))
-        .route("/update-book-walker-db", axum::routing::post(update_book_walker_db))
+        .route(
+            "/update-manga-baka-db",
+            axum::routing::post(update_manga_baka_db),
+        )
+        .route(
+            "/update-book-walker-db",
+            axum::routing::post(update_book_walker_db),
+        )
         .route("/update-bangumi-db", axum::routing::post(update_bangumi_db))
         .route("/update-ehentai-db", axum::routing::post(update_ehentai_db))
 }
@@ -31,8 +37,14 @@ async fn get_config(State(state): State<SharedState>) -> impl IntoResponse {
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty());
     let book_walker_timestamp = state.book_walker_db_downloader.download_timestamp();
-    let bangumi_timestamp = state.bangumi_archive.as_ref().and_then(|a| a.download_timestamp());
-    let ehentai_timestamp = state.ehentai_archive.as_ref().and_then(|a| a.download_timestamp());
+    let bangumi_timestamp = state
+        .bangumi_archive
+        .as_ref()
+        .and_then(|a| a.download_timestamp());
+    let ehentai_timestamp = state
+        .ehentai_archive
+        .as_ref()
+        .and_then(|a| a.download_timestamp());
     Json(mappers::to_config_dto(
         &state.config,
         manga_baka_timestamp.as_deref(),
@@ -175,7 +187,10 @@ mod tests {
             lines[0],
             r#"{"type":"ProgressEvent","total":100,"completed":40,"info":"https://example.com/db.zst"}"#
         );
-        assert_eq!(lines[1], r#"{"type":"ProgressEvent","total":100,"completed":100,"info":null}"#);
+        assert_eq!(
+            lines[1],
+            r#"{"type":"ProgressEvent","total":100,"completed":100,"info":null}"#
+        );
         assert_eq!(lines[2], r#"{"type":"FinishedEvent"}"#);
     }
 

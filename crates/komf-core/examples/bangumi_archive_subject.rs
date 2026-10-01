@@ -17,7 +17,9 @@ fn compact_thumbnail(v: &mut serde_json::Value) {
     let Some(tb) = v.get_mut("metadata").and_then(|x| x.get_mut("thumbnail")) else {
         return;
     };
-    let Some(obj) = tb.as_object_mut() else { return };
+    let Some(obj) = tb.as_object_mut() else {
+        return;
+    };
     if let Some(bytes) = obj.get("bytes").and_then(|b| b.as_array()) {
         let n = bytes.len();
         obj.remove("bytes");
@@ -47,7 +49,17 @@ async fn main() {
                         "subject: id={} name={:?} name_cn={:?} type={:?} platform={:?} series={:?} date={:?} nsfw={:?}",
                         arch.id, arch.name, arch.name_cn, arch.subject_type, arch.platform, arch.series, arch.date, arch.nsfw
                     );
-                    println!("         tags={:?} infobox_len={}", arch.tags.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), arch.infobox.as_ref().map(|i| i.to_string().len()).unwrap_or(0));
+                    println!(
+                        "         tags={:?} infobox_len={}",
+                        arch.tags
+                            .iter()
+                            .map(|t| t.name.as_str())
+                            .collect::<Vec<_>>(),
+                        arch.infobox
+                            .as_ref()
+                            .map(|i| i.to_string().len())
+                            .unwrap_or(0)
+                    );
                 }
                 None => println!("NOT FOUND in offline archive!"),
             }
@@ -66,7 +78,11 @@ async fn main() {
                 persons.len(),
                 persons
                     .iter()
-                    .map(|p| (p.name.as_str(), p.name_cn.as_deref().unwrap_or(""), p.career.join("/")))
+                    .map(|p| (
+                        p.name.as_str(),
+                        p.name_cn.as_deref().unwrap_or(""),
+                        p.career.join("/")
+                    ))
                     .collect::<Vec<_>>()
             );
         }
@@ -74,16 +90,18 @@ async fn main() {
     }
 
     // provider（archive enabled）：全局服务现由 ProvidersModule 创建，example 自行创建后传入
-    let archive = Some(komf_core::providers::bangumi_archive::BangumiArchiveService::start(
-        &BangumiArchiveConfig {
-            enabled: true,
-            dir: Some(ARCHIVE_DIR.to_string()),
-            update_interval_hours: 0,
-            idle_release_secs: None,
-        },
-        http.clone(),
-        std::path::PathBuf::from(ARCHIVE_DIR),
-    ));
+    let archive = Some(
+        komf_core::providers::bangumi_archive::BangumiArchiveService::start(
+            &BangumiArchiveConfig {
+                enabled: true,
+                dir: Some(ARCHIVE_DIR.to_string()),
+                update_interval_hours: 0,
+                idle_release_secs: None,
+            },
+            http.clone(),
+            std::path::PathBuf::from(ARCHIVE_DIR),
+        ),
+    );
     let p = komf_core::providers::bangumi::create_provider(
         &BangumiConfig {
             provider: ProviderConfig {

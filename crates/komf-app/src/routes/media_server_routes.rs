@@ -5,15 +5,21 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use std::sync::Arc;
 use komf_api_models::mediaserver::{
     KomfMediaServerConnectionResponse, KomfMediaServerLibrary, KomfMediaServerLibraryId,
 };
+use std::sync::Arc;
 
 pub fn router(kind: ServerKind) -> Router<SharedState> {
     Router::new()
-        .route("/media-server/connected", get(move |s| check_connection(kind, s)))
-        .route("/media-server/libraries", get(move |s| get_libraries(kind, s)))
+        .route(
+            "/media-server/connected",
+            get(move |s| check_connection(kind, s)),
+        )
+        .route(
+            "/media-server/libraries",
+            get(move |s| get_libraries(kind, s)),
+        )
 }
 
 async fn check_connection(kind: ServerKind, State(state): State<SharedState>) -> impl IntoResponse {

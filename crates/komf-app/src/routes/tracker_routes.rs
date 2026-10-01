@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use komf_api_models::common::KomfErrorResponse;
-use komf_core::trackers::{TrackerService, TrackUpdate};
+use komf_core::trackers::{TrackUpdate, TrackerService};
 use serde::Deserialize;
 
 pub fn router() -> Router<SharedState> {
@@ -25,16 +25,24 @@ pub fn router() -> Router<SharedState> {
         .route("/tracker/links", axum::routing::get(list_links))
 }
 
-fn tracker_for<'a>(state: &'a SharedState, name: &str) -> Result<std::sync::Arc<dyn TrackerService>, Response> {
-    state.read().unwrap().tracker_services.get(name).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(KomfErrorResponse {
-                message: format!("Tracker provider '{name}' is not supported"),
-            }),
-        )
-            .into_response()
-    })
+fn tracker_for<'a>(
+    state: &'a SharedState,
+    name: &str,
+) -> Result<std::sync::Arc<dyn TrackerService>, Response> {
+    state
+        .read()
+        .unwrap()
+        .tracker_services
+        .get(name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(KomfErrorResponse {
+                    message: format!("Tracker provider '{name}' is not supported"),
+                }),
+            )
+                .into_response()
+        })
 }
 
 fn unauthorized(message: String) -> Response {
@@ -84,9 +92,14 @@ async fn search(
         Err(response) => return response,
     };
     if !tracker.is_logged_in() {
-        return unauthorized(format!("{provider} tracker: not logged in (see /api/oauth/{provider}/start)"));
+        return unauthorized(format!(
+            "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
+        ));
     }
-    match tracker.search(&query.name, query.nsfw.unwrap_or(true)).await {
+    match tracker
+        .search(&query.name, query.nsfw.unwrap_or(true))
+        .await
+    {
         Ok(results) => Json(results).into_response(),
         Err(error) => tracker_error(&provider, error),
     }
@@ -109,7 +122,9 @@ async fn get_state(
         Err(response) => return response,
     };
     if !tracker.is_logged_in() {
-        return unauthorized(format!("{provider} tracker: not logged in (see /api/oauth/{provider}/start)"));
+        return unauthorized(format!(
+            "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
+        ));
     }
     match tracker.get_state(&query.track_id).await {
         Ok(track_state) => Json(track_state).into_response(),
@@ -139,7 +154,9 @@ async fn update(
         Err(response) => return response,
     };
     if !tracker.is_logged_in() {
-        return unauthorized(format!("{provider} tracker: not logged in (see /api/oauth/{provider}/start)"));
+        return unauthorized(format!(
+            "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
+        ));
     }
     match tracker.update(&request.track_id, &request.update).await {
         Ok(()) => {
@@ -147,11 +164,13 @@ async fn update(
             let title = request.update.title.as_deref();
             let url = tracker_entry_url(&provider, &request.track_id);
             let cover_url = request.update.cover_url.as_deref();
-            state
-                .read()
-                .unwrap()
-                .oauth_manager
-                .record_tracker_link(&provider, &request.track_id, title, url.as_deref(), cover_url);
+            state.read().unwrap().oauth_manager.record_tracker_link(
+                &provider,
+                &request.track_id,
+                title,
+                url.as_deref(),
+                cover_url,
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(error) => tracker_error(&provider, error),
@@ -189,14 +208,16 @@ async fn list_links(State(state): State<SharedState>) -> Response {
         .oauth_manager
         .list_tracker_links()
         .into_iter()
-        .map(|(provider, track_id, title, url, cover_url, updated_at)| TrackerLinkItem {
-            provider,
-            track_id,
-            title,
-            url,
-            cover_url,
-            updated_at,
-        })
+        .map(
+            |(provider, track_id, title, url, cover_url, updated_at)| TrackerLinkItem {
+                provider,
+                track_id,
+                title,
+                url,
+                cover_url,
+                updated_at,
+            },
+        )
         .collect::<Vec<_>>();
     Json(links).into_response()
 }

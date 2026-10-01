@@ -67,7 +67,9 @@ impl MalTracker {
         if !status.is_success() {
             return Err(format!(
                 "mal API error (HTTP {status}): {}",
-                body.get("message").and_then(serde_json::Value::as_str).unwrap_or("")
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
             ));
         }
         Ok(body)
@@ -181,7 +183,9 @@ impl TrackerService for MalTracker {
             .unwrap_or_default();
         let mut futs = Vec::with_capacity(nodes.len());
         for node in &nodes {
-            let Some(entry) = node.get("node") else { continue };
+            let Some(entry) = node.get("node") else {
+                continue;
+            };
             let Some(id) = entry.get("id").and_then(serde_json::Value::as_i64) else {
                 continue;
             };
@@ -241,14 +245,15 @@ impl TrackerService for MalTracker {
                 "{BASE_URL}/manga/{id}?fields=num_volumes,num_chapters,my_list_status"
             ))
             .await?;
-        let status = body
-            .get("my_list_status")
-            .filter(|s| !s.is_null());
+        let status = body.get("my_list_status").filter(|s| !s.is_null());
         let Some(status) = status else {
             return Ok(TrackState::default());
         };
         Ok(TrackState {
-            score: status.get("score").and_then(serde_json::Value::as_i64).map(|v| v as i32),
+            score: status
+                .get("score")
+                .and_then(serde_json::Value::as_i64)
+                .map(|v| v as i32),
             status: status
                 .get("status")
                 .and_then(serde_json::Value::as_str)
@@ -316,7 +321,13 @@ impl TrackerService for MalTracker {
         }
         let form = params
             .iter()
-            .map(|(k, v)| format!("{}={}", url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(), url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()))
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(),
+                    url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()
+                )
+            })
             .collect::<Vec<_>>()
             .join("&");
         let mut token = self.token().await?;
@@ -324,7 +335,10 @@ impl TrackerService for MalTracker {
             .http
             .patch(format!("{BASE_URL}/manga/{id}/my_list_status"))
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body(form.clone())
             .send()
             .await
@@ -342,7 +356,10 @@ impl TrackerService for MalTracker {
                     .http
                     .patch(format!("{BASE_URL}/manga/{id}/my_list_status"))
                     .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
                     .body(form.clone())
                     .send()
                     .await
@@ -357,7 +374,9 @@ impl TrackerService for MalTracker {
             let body: serde_json::Value = response.json().await.unwrap_or_default();
             return Err(format!(
                 "mal update error (HTTP {status}): {}",
-                body.get("message").and_then(serde_json::Value::as_str).unwrap_or("")
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
             ));
         }
         Ok(())

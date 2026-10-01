@@ -72,18 +72,36 @@ impl AppriseVelocityTemplates {
         render_state(&state, context)
     }
 
-    pub fn render_with(&self, context: &NotificationContext, templates: &AppriseStringTemplates) -> AppriseRenderResult {
+    pub fn render_with(
+        &self,
+        context: &NotificationContext,
+        templates: &AppriseStringTemplates,
+    ) -> AppriseRenderResult {
         let state = AppriseTemplateState {
-            title: templates.title_template.as_deref().and_then(|t| Template::parse(t).ok()),
-            body: templates.body_template.as_deref().and_then(|t| Template::parse(t).ok()),
+            title: templates
+                .title_template
+                .as_deref()
+                .and_then(|t| Template::parse(t).ok()),
+            body: templates
+                .body_template
+                .as_deref()
+                .and_then(|t| Template::parse(t).ok()),
         };
         render_state(&state, context)
     }
 
     pub fn get_current_templates(&self) -> AppriseStringTemplates {
         AppriseStringTemplates {
-            title_template: Some(read_file_or(&self.directory, TITLE_FILE, &default_title_template())),
-            body_template: Some(read_file_or(&self.directory, BODY_FILE, &default_body_template())),
+            title_template: Some(read_file_or(
+                &self.directory,
+                TITLE_FILE,
+                &default_title_template(),
+            )),
+            body_template: Some(read_file_or(
+                &self.directory,
+                BODY_FILE,
+                &default_body_template(),
+            )),
         }
     }
 
@@ -100,7 +118,10 @@ impl AppriseVelocityTemplates {
     }
 }
 
-fn render_state(state: &AppriseTemplateState, context: &NotificationContext) -> AppriseRenderResult {
+fn render_state(
+    state: &AppriseTemplateState,
+    context: &NotificationContext,
+) -> AppriseRenderResult {
     let root: Value = to_value_tree(context);
     let title = state.title.as_ref().map(|t| t.render(root.clone()));
     let body = state
@@ -145,7 +166,11 @@ pub struct AppriseCliService {
 }
 
 impl AppriseCliService {
-    pub fn new(urls: Vec<String>, template_renderer: AppriseVelocityTemplates, series_cover: bool) -> Self {
+    pub fn new(
+        urls: Vec<String>,
+        template_renderer: AppriseVelocityTemplates,
+        series_cover: bool,
+    ) -> Self {
         Self {
             urls,
             template_renderer,
@@ -196,7 +221,10 @@ impl AppriseCliService {
         result
     }
 
-    fn get_cover_attachment(&self, context: &NotificationContext) -> anyhow::Result<Option<std::path::PathBuf>> {
+    fn get_cover_attachment(
+        &self,
+        context: &NotificationContext,
+    ) -> anyhow::Result<Option<std::path::PathBuf>> {
         if !self.series_cover {
             return Ok(None);
         }
@@ -210,7 +238,15 @@ impl AppriseCliService {
             .and_then(|exts| exts.first().copied())
             .unwrap_or("jpg");
         let tmp_dir = std::env::temp_dir();
-        let file_name = format!("{}_{}.{}", context.series.name.replace(|c: char| !c.is_alphanumeric(), "_"), std::process::id(), extension);
+        let file_name = format!(
+            "{}_{}.{}",
+            context
+                .series
+                .name
+                .replace(|c: char| !c.is_alphanumeric(), "_"),
+            std::process::id(),
+            extension
+        );
         let path = tmp_dir.join(file_name);
         std::fs::write(&path, cover)?;
         Ok(Some(path))

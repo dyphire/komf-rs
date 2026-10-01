@@ -23,7 +23,11 @@ impl MetadataMerger {
     /// - `titles` 为 original + new 拼接；
     /// - `links` 为 (old + new).distinctBy { label }；
     /// - tags/genres 在 merge 配置开启时为 (old + new).toSet().sorted()，否则 old.ifEmpty { new }。
-    pub fn merge_series_metadata(&self, original: &SeriesMetadata, new: &SeriesMetadata) -> SeriesMetadata {
+    pub fn merge_series_metadata(
+        &self,
+        original: &SeriesMetadata,
+        new: &SeriesMetadata,
+    ) -> SeriesMetadata {
         SeriesMetadata {
             status: original.status.or(new.status),
             title: None,
@@ -63,7 +67,10 @@ impl MetadataMerger {
             } else {
                 original.authors.clone()
             },
-            release_date: original.release_date.clone().or_else(|| new.release_date.clone()),
+            release_date: original
+                .release_date
+                .clone()
+                .or_else(|| new.release_date.clone()),
             links: distinct_by_label(
                 original
                     .links
@@ -107,13 +114,20 @@ impl MetadataMerger {
     ///
     /// 对齐 Kotlin：book tags 恒 `old.ifEmpty { new }`（不受 mergeTags 控制）；
     /// links 为 distinctBy { label } 去重（Rust 扩展）；storyArcs 不参与合并（结果恒 None）。
-    fn merge_book_metadata_fields(&self, original: &BookMetadata, new: &BookMetadata) -> BookMetadata {
+    fn merge_book_metadata_fields(
+        &self,
+        original: &BookMetadata,
+        new: &BookMetadata,
+    ) -> BookMetadata {
         BookMetadata {
             title: original.title.clone().or_else(|| new.title.clone()),
             summary: original.summary.clone().or_else(|| new.summary.clone()),
             number: original.number.clone().or(new.number.clone()),
             number_sort: original.number_sort.or(new.number_sort),
-            release_date: original.release_date.clone().or_else(|| new.release_date.clone()),
+            release_date: original
+                .release_date
+                .clone()
+                .or_else(|| new.release_date.clone()),
             authors: if original.authors.is_empty() {
                 new.authors.clone()
             } else {

@@ -564,13 +564,22 @@ pub struct IndexedUrlList(pub std::collections::BTreeMap<usize, Option<String>>)
 
 impl IndexedUrlList {
     pub fn from_vec(values: Vec<String>) -> Self {
-        IndexedUrlList(values.into_iter().enumerate().map(|(i, v)| (i, Some(v))).collect())
+        IndexedUrlList(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (i, Some(v)))
+                .collect(),
+        )
     }
 
     /// 应用 Kotlin `old + patch → values.filterNotNull()`：同索引覆盖、新索引追加、null 删除。
     pub fn apply_merge(&self, base: &[String]) -> Vec<String> {
-        let mut merged: std::collections::BTreeMap<usize, Option<String>> =
-            base.iter().enumerate().map(|(i, v)| (i, Some(v.clone()))).collect();
+        let mut merged: std::collections::BTreeMap<usize, Option<String>> = base
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, Some(v.clone())))
+            .collect();
         for (i, v) in &self.0 {
             merged.insert(*i, v.clone());
         }
@@ -591,7 +600,10 @@ where
     }
     Ok(match UrlsInput::deserialize(deserializer)? {
         UrlsInput::List(list) => Some(IndexedUrlList(
-            list.into_iter().enumerate().map(|(i, v)| (i, Some(v))).collect(),
+            list.into_iter()
+                .enumerate()
+                .map(|(i, v)| (i, Some(v)))
+                .collect(),
         )),
         UrlsInput::Map(map) => Some(IndexedUrlList(
             map.into_iter()
@@ -602,7 +614,10 @@ where
     })
 }
 
-fn serialize_indexed_urls<S>(value: &Option<IndexedUrlList>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_indexed_urls<S>(
+    value: &Option<IndexedUrlList>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -624,7 +639,11 @@ where
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DiscordConfigDto {
-    #[serde(default, deserialize_with = "deserialize_indexed_urls", serialize_with = "serialize_indexed_urls")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_indexed_urls",
+        serialize_with = "serialize_indexed_urls"
+    )]
     pub webhooks: Option<IndexedUrlList>,
     pub series_cover: Option<bool>,
 }
@@ -632,7 +651,11 @@ pub struct DiscordConfigDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppriseConfigDto {
-    #[serde(default, deserialize_with = "deserialize_indexed_urls", serialize_with = "serialize_indexed_urls")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_indexed_urls",
+        serialize_with = "serialize_indexed_urls"
+    )]
     pub urls: Option<IndexedUrlList>,
     pub series_cover: Option<bool>,
 }
@@ -680,7 +703,8 @@ mod tests {
     fn discord_webhooks_accepts_array_and_index_object() {
         // Kotlin main 契约：数组
         let dto: DiscordConfigDto =
-            serde_json::from_str(r#"{"webhooks":["https://a","https://b"],"seriesCover":true}"#).unwrap();
+            serde_json::from_str(r#"{"webhooks":["https://a","https://b"],"seriesCover":true}"#)
+                .unwrap();
         let list = dto.webhooks.unwrap();
         assert_eq!(
             list.0,
@@ -692,7 +716,8 @@ mod tests {
             .collect()
         );
         // komf userscript v0.12.2 PATCH 形态：索引对象（Object.fromEntries），按数字键升序取 value
-        let dto: DiscordConfigDto = serde_json::from_str(r#"{"webhooks":{"0":"https://a","1":"https://b"}}"#).unwrap();
+        let dto: DiscordConfigDto =
+            serde_json::from_str(r#"{"webhooks":{"0":"https://a","1":"https://b"}}"#).unwrap();
         let list = dto.webhooks.unwrap();
         assert_eq!(
             list.0,
@@ -704,7 +729,8 @@ mod tests {
             .collect()
         );
         // 乱序键也按 key 排序（脚本索引语义）
-        let dto: DiscordConfigDto = serde_json::from_str(r#"{"webhooks":{"1":"b","0":"a"}}"#).unwrap();
+        let dto: DiscordConfigDto =
+            serde_json::from_str(r#"{"webhooks":{"1":"b","0":"a"}}"#).unwrap();
         let list = dto.webhooks.unwrap();
         assert_eq!(
             list.0,
@@ -738,7 +764,10 @@ mod tests {
             metadata_update: None,
         };
         let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"baseUri\""), "GET must output baseUri, got {json}");
+        assert!(
+            json.contains("\"baseUri\""),
+            "GET must output baseUri, got {json}"
+        );
         assert!(!json.contains("password"));
         assert!(!json.contains("apiKey"));
         assert!(!json.contains("s3cret"));

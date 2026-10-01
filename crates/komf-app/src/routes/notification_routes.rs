@@ -16,9 +16,7 @@ use komf_notifications::context::{
     AlternativeTitleContext, AuthorContext, BookContext, BookMetadataContext, LibraryContext,
     NotificationContext, SeriesContext, SeriesMetadataContext, WebLinkContext,
 };
-use komf_notifications::discord::{
-    DiscordStringTemplates, FieldStringTemplates,
-};
+use komf_notifications::discord::{DiscordStringTemplates, FieldStringTemplates};
 
 pub fn router() -> Router<SharedState> {
     Router::new()
@@ -26,14 +24,26 @@ pub fn router() -> Router<SharedState> {
             "/notifications/discord/templates",
             get(discord_get_templates).post(discord_update_templates),
         )
-        .route("/notifications/discord/send", axum::routing::post(discord_send))
-        .route("/notifications/discord/render", axum::routing::post(discord_render))
+        .route(
+            "/notifications/discord/send",
+            axum::routing::post(discord_send),
+        )
+        .route(
+            "/notifications/discord/render",
+            axum::routing::post(discord_render),
+        )
         .route(
             "/notifications/apprise/templates",
             get(apprise_get_templates).post(apprise_update_templates),
         )
-        .route("/notifications/apprise/send", axum::routing::post(apprise_send))
-        .route("/notifications/apprise/render", axum::routing::post(apprise_render))
+        .route(
+            "/notifications/apprise/send",
+            axum::routing::post(apprise_send),
+        )
+        .route(
+            "/notifications/apprise/render",
+            axum::routing::post(apprise_render),
+        )
 }
 
 async fn discord_get_templates(State(state): State<SharedState>) -> impl IntoResponse {
@@ -91,7 +101,9 @@ async fn discord_send(
         }
         Err(error) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(KomfErrorResponse { message: error.to_string() }),
+            Json(KomfErrorResponse {
+                message: error.to_string(),
+            }),
         )),
     }
 }
@@ -169,7 +181,9 @@ async fn apprise_send(
         Ok(_) => Ok((StatusCode::OK, Json(""))),
         Err(error) => Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(KomfErrorResponse { message: error.to_string() }),
+            Json(KomfErrorResponse {
+                message: error.to_string(),
+            }),
         )),
     }
 }

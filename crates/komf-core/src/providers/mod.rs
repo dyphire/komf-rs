@@ -350,7 +350,11 @@ impl MetadataProviders {
                 _ => None,
             })
             .or_else(|| {
-                match self.default.provider(CoreProviders::Bangumi)?.offline_archive()? {
+                match self
+                    .default
+                    .provider(CoreProviders::Bangumi)?
+                    .offline_archive()?
+                {
                     OfflineArchive::Bangumi(svc) => Some(svc),
                     _ => None,
                 }
@@ -368,7 +372,11 @@ impl MetadataProviders {
                 _ => None,
             })
             .or_else(|| {
-                match self.default.provider(CoreProviders::EHentai)?.offline_archive()? {
+                match self
+                    .default
+                    .provider(CoreProviders::EHentai)?
+                    .offline_archive()?
+                {
                     OfflineArchive::EHentai(svc) => Some(svc),
                     _ => None,
                 }

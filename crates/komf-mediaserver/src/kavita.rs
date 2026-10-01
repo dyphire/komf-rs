@@ -591,7 +591,10 @@ impl RateLimiter {
             {
                 let mut queue = self.timestamps.lock().await;
                 let now = Instant::now();
-                while queue.front().is_some_and(|t| now.duration_since(*t) >= self.window) {
+                while queue
+                    .front()
+                    .is_some_and(|t| now.duration_since(*t) >= self.window)
+                {
                     queue.pop_front();
                 }
                 if queue.len() < self.max {
@@ -715,20 +718,32 @@ pub struct KavitaClient {
 }
 
 impl KavitaClient {
-    pub fn new(http: reqwest::Client, base_uri: &str, api_key: &str) -> Result<Self, MediaServerError> {
+    pub fn new(
+        http: reqwest::Client,
+        base_uri: &str,
+        api_key: &str,
+    ) -> Result<Self, MediaServerError> {
         let base_uri = base_uri.trim_end_matches('/').to_string();
         let auth_client = KavitaAuthClient::new(http.clone(), &base_uri);
-        let token_provider = std::sync::Arc::new(KavitaTokenProvider::new(auth_client, api_key.to_string()));
+        let token_provider =
+            std::sync::Arc::new(KavitaTokenProvider::new(auth_client, api_key.to_string()));
         Ok(Self {
             http,
             base_uri,
             api_key: api_key.to_string(),
             token_provider,
-            updates_rate_limiter: std::sync::Arc::new(RateLimiter::new(120, Duration::from_secs(60))),
+            updates_rate_limiter: std::sync::Arc::new(RateLimiter::new(
+                120,
+                Duration::from_secs(60),
+            )),
         })
     }
 
-    async fn authed_request(&self, method: reqwest::Method, path: &str) -> Result<reqwest::RequestBuilder, MediaServerError> {
+    async fn authed_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder, MediaServerError> {
         let token = self.token_provider.get_token().await?;
         let mut headers = reqwest::header::HeaderMap::new();
         if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
@@ -736,7 +751,10 @@ impl KavitaClient {
         }
         Ok(self
             .http
-            .request(method, format!("{}/{}", self.base_uri, path.trim_start_matches('/')))
+            .request(
+                method,
+                format!("{}/{}", self.base_uri, path.trim_start_matches('/')),
+            )
             .headers(headers))
     }
 
@@ -798,7 +816,10 @@ impl KavitaClient {
         let response = self
             .authed_request(reqwest::Method::POST, "api/series/v2")
             .await?
-            .query(&[("pageNumber", page.to_string()), ("pageSize", "500".to_string())])
+            .query(&[
+                ("pageNumber", page.to_string()),
+                ("pageSize", "500".to_string()),
+            ])
             .json(&serde_json::json!({
                 "statements": [{
                     "field": 19,
@@ -819,11 +840,16 @@ impl KavitaClient {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_string());
         let content: Vec<KavitaSeries> = response.json().await?;
-        let pagination = pagination_header.as_deref().and_then(parse_pagination_header);
+        let pagination = pagination_header
+            .as_deref()
+            .and_then(parse_pagination_header);
         Ok((content, pagination))
     }
 
-    pub async fn get_series_metadata(&self, series_id: i32) -> Result<KavitaSeriesMetadata, MediaServerError> {
+    pub async fn get_series_metadata(
+        &self,
+        series_id: i32,
+    ) -> Result<KavitaSeriesMetadata, MediaServerError> {
         self.send_json(
             self.authed_request(reqwest::Method::GET, "api/series/metadata")
                 .await?
@@ -832,7 +858,10 @@ impl KavitaClient {
         .await
     }
 
-    pub async fn get_series_details(&self, series_id: i32) -> Result<KavitaSeriesDetails, MediaServerError> {
+    pub async fn get_series_details(
+        &self,
+        series_id: i32,
+    ) -> Result<KavitaSeriesDetails, MediaServerError> {
         self.send_json(
             self.authed_request(reqwest::Method::GET, "api/series/series-detail")
                 .await?
@@ -890,7 +919,10 @@ impl KavitaClient {
         let response = self
             .http
             .get(format!("{}/api/image/series-cover", self.base_uri))
-            .query(&[("seriesId", series_id.to_string()), ("apiKey", self.api_key.clone())])
+            .query(&[
+                ("seriesId", series_id.to_string()),
+                ("apiKey", self.api_key.clone()),
+            ])
             .send()
             .await?;
         let status = response.status();
@@ -911,7 +943,10 @@ impl KavitaClient {
         let response = self
             .http
             .get(format!("{}/api/image/chapter-cover", self.base_uri))
-            .query(&[("chapterId", chapter_id.to_string()), ("apiKey", self.api_key.clone())])
+            .query(&[
+                ("chapterId", chapter_id.to_string()),
+                ("apiKey", self.api_key.clone()),
+            ])
             .send()
             .await?;
         let status = response.status();
@@ -938,7 +973,10 @@ impl KavitaClient {
 
     // -- 写入（受限流保护） ----------------------------------------------------
 
-    pub async fn update_series(&self, series_update: &KavitaSeriesUpdateRequest) -> Result<(), MediaServerError> {
+    pub async fn update_series(
+        &self,
+        series_update: &KavitaSeriesUpdateRequest,
+    ) -> Result<(), MediaServerError> {
         self.updates_rate_limiter.acquire().await;
         self.send_write(
             self.authed_request(reqwest::Method::POST, "api/series/update")
@@ -1034,7 +1072,11 @@ impl KavitaClient {
         Ok(())
     }
 
-    pub async fn scan_series(&self, library_id: i32, series_id: i32) -> Result<(), MediaServerError> {
+    pub async fn scan_series(
+        &self,
+        library_id: i32,
+        series_id: i32,
+    ) -> Result<(), MediaServerError> {
         self.send_write(
             self.authed_request(reqwest::Method::POST, "api/series/scan")
                 .await?
@@ -1168,10 +1210,12 @@ fn to_media_server_series(
         .localized_name
         .as_deref()
         .filter(|name| !name.is_empty())
-        .map(|name| vec![MediaServerAlternativeTitle {
-            label: "Localized".to_string(),
-            title: name.to_string(),
-        }])
+        .map(|name| {
+            vec![MediaServerAlternativeTitle {
+                label: "Localized".to_string(),
+                title: name.to_string(),
+            }]
+        })
         .unwrap_or_default();
     MediaServerSeries {
         id: MediaServerSeriesId(series.id.to_string()),
@@ -1249,7 +1293,11 @@ fn to_media_server_series(
 }
 
 fn to_media_server_book(chapter: &KavitaChapter, volume: &KavitaVolume) -> MediaServerBook {
-    let file_path = chapter.files.first().map(|f| f.file_path.clone()).unwrap_or_default();
+    let file_path = chapter
+        .files
+        .first()
+        .map(|f| f.file_path.clone())
+        .unwrap_or_default();
     let file_name = std::path::Path::new(&file_path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -1368,7 +1416,10 @@ fn to_kavita_series_metadata_update(
      -> Vec<KavitaAuthor> {
         match authors {
             Some(grouped) => {
-                let names = grouped.get(&role.to_lowercase()).cloned().unwrap_or_default();
+                let names = grouped
+                    .get(&role.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 if names.is_empty() {
                     current_set.clone()
                 } else {
@@ -1384,7 +1435,9 @@ fn to_kavita_series_metadata_update(
     let age_rating = metadata
         .age_rating
         .map(KavitaAgeRating::from_rating)
-        .unwrap_or_else(|| KavitaAgeRating::from_id(current.age_rating).unwrap_or(KavitaAgeRating::Unknown));
+        .unwrap_or_else(|| {
+            KavitaAgeRating::from_id(current.age_rating).unwrap_or(KavitaAgeRating::Unknown)
+        });
     let kavita_metadata = KavitaSeriesMetadata {
         id: current.id,
         series_id,
@@ -1479,7 +1532,10 @@ fn to_kavita_series_metadata_update(
         language: if current.language_locked {
             current.language.clone()
         } else {
-            metadata.language.clone().or_else(|| current.language.clone())
+            metadata
+                .language
+                .clone()
+                .or_else(|| current.language.clone())
         },
         max_count: current.max_count,
         total_count: current.total_count,
@@ -1487,13 +1543,22 @@ fn to_kavita_series_metadata_update(
             current.publication_status
         } else {
             status
-                .unwrap_or_else(|| KavitaPublicationStatus::from_id(current.publication_status).unwrap_or(KavitaPublicationStatus::Ongoing))
+                .unwrap_or_else(|| {
+                    KavitaPublicationStatus::from_id(current.publication_status)
+                        .unwrap_or(KavitaPublicationStatus::Ongoing)
+                })
                 .id()
         },
         web_links: metadata
             .links
             .as_ref()
-            .map(|links| links.iter().map(|l| l.url.clone()).collect::<Vec<_>>().join(","))
+            .map(|links| {
+                links
+                    .iter()
+                    .map(|l| l.url.clone())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
             .or_else(|| current.web_links.clone()),
         language_locked: current.language_locked,
         summary_locked: current.summary_locked,
@@ -1730,7 +1795,10 @@ fn to_kavita_chapter_metadata_update(
      -> Vec<KavitaAuthor> {
         match authors {
             Some(grouped) => {
-                let names = grouped.get(&role.to_lowercase()).cloned().unwrap_or_default();
+                let names = grouped
+                    .get(&role.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 if names.is_empty() {
                     current_set.clone()
                 } else {
@@ -1767,11 +1835,23 @@ fn to_kavita_chapter_metadata_update(
         weblinks: metadata
             .links
             .as_ref()
-            .map(|links| links.iter().map(|l| l.url.clone()).collect::<Vec<_>>().join(","))
+            .map(|links| {
+                links
+                    .iter()
+                    .map(|l| l.url.clone())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
             .unwrap_or_else(|| current.web_links.clone()),
-        isbn: metadata.isbn.clone().unwrap_or_else(|| current.isbn.clone()),
+        isbn: metadata
+            .isbn
+            .clone()
+            .unwrap_or_else(|| current.isbn.clone()),
         release_date,
-        title_name: metadata.title.clone().unwrap_or_else(|| current.title_name.clone()),
+        title_name: metadata
+            .title
+            .clone()
+            .unwrap_or_else(|| current.title_name.clone()),
         sort_order: metadata.number_sort.unwrap_or(current.sort_order),
         writers: authors_for("WRITER", &authors, &current.writers),
         cover_artists: authors_for("COVER", &authors, &current.cover_artists),
@@ -1880,15 +1960,21 @@ impl KavitaMediaServerClientAdapter {
 
 #[async_trait::async_trait]
 impl MediaServerClient for KavitaMediaServerClientAdapter {
-    async fn get_series(&self, series_id: &MediaServerSeriesId) -> Result<MediaServerSeries, MediaServerError> {
-        let id: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+    async fn get_series(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<MediaServerSeries, MediaServerError> {
+        let id: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         let series = self.client.get_series(id).await?;
         let metadata = self.client.get_series_metadata(id).await?;
         let details = self.client.get_series_details(id).await?;
-        Ok(to_media_server_series(&series, &metadata, details.total_count))
+        Ok(to_media_server_series(
+            &series,
+            &metadata,
+            details.total_count,
+        ))
     }
 
     async fn get_series_page(
@@ -1896,38 +1982,55 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         library_id: &MediaServerLibraryId,
         page_number: i32,
     ) -> Result<Page<MediaServerSeries>, MediaServerError> {
-        let library_id_i32: i32 = library_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita library id: {}", library_id.0)))?;
-        let (content, pagination) = self.client.get_series_page(library_id_i32, page_number).await?;
+        let library_id_i32: i32 = library_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita library id: {}", library_id.0))
+        })?;
+        let (content, pagination) = self
+            .client
+            .get_series_page(library_id_i32, page_number)
+            .await?;
         let mut series_list = Vec::with_capacity(content.len());
         for series in content {
             let metadata = match self.client.get_series_metadata(series.id).await {
                 Ok(metadata) => metadata,
                 Err(_) => {
-                    tracing::warn!("kavita: failed to load metadata for series {}, skipping", series.id);
+                    tracing::warn!(
+                        "kavita: failed to load metadata for series {}, skipping",
+                        series.id
+                    );
                     continue;
                 }
             };
             let details = self.client.get_series_details(series.id).await?;
-            series_list.push(to_media_server_series(&series, &metadata, details.total_count));
+            series_list.push(to_media_server_series(
+                &series,
+                &metadata,
+                details.total_count,
+            ));
         }
-        let total_items = pagination.as_ref().map(|p| p.total_items as i64).unwrap_or(series_list.len() as i64);
+        let total_items = pagination
+            .as_ref()
+            .map(|p| p.total_items as i64)
+            .unwrap_or(series_list.len() as i64);
         let total_pages = pagination.as_ref().map(|p| p.total_pages).unwrap_or(1);
         Ok(Page {
             content: series_list,
-            page_number: pagination.as_ref().map(|p| p.current_page).unwrap_or(page_number),
+            page_number: pagination
+                .as_ref()
+                .map(|p| p.current_page)
+                .unwrap_or(page_number),
             total_elements: total_items,
             total_pages,
         })
     }
 
-    async fn get_series_thumbnail(&self, series_id: &MediaServerSeriesId) -> Result<Option<Image>, MediaServerError> {
-        let id: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+    async fn get_series_thumbnail(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Option<Image>, MediaServerError> {
+        let id: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         match self.client.get_series_cover(id).await {
             Ok(image) => Ok(Some(image)),
             Err(_) => Ok(None),
@@ -1942,21 +2045,25 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         Ok(Vec::new())
     }
 
-    async fn get_book(&self, book_id: &MediaServerBookId) -> Result<MediaServerBook, MediaServerError> {
-        let id: i32 = book_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0)))?;
+    async fn get_book(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<MediaServerBook, MediaServerError> {
+        let id: i32 = book_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
+        })?;
         let chapter = self.client.get_chapter(id).await?;
         let volume = self.client.get_volume(chapter.volume_id).await?;
         Ok(to_media_server_book(&chapter, &volume))
     }
 
-    async fn get_books(&self, series_id: &MediaServerSeriesId) -> Result<Vec<MediaServerBook>, MediaServerError> {
-        let id: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+    async fn get_books(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Vec<MediaServerBook>, MediaServerError> {
+        let id: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         let volumes = self.client.get_volumes(id).await?;
         let mut books = Vec::new();
         for volume in volumes.iter() {
@@ -1975,18 +2082,23 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         Ok(Vec::new())
     }
 
-    async fn get_book_thumbnail(&self, book_id: &MediaServerBookId) -> Result<Option<Image>, MediaServerError> {
-        let id: i32 = book_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0)))?;
+    async fn get_book_thumbnail(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<Option<Image>, MediaServerError> {
+        let id: i32 = book_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
+        })?;
         match self.client.get_chapter_cover(id).await {
             Ok(image) => Ok(Some(image)),
             Err(_) => Ok(None),
         }
     }
 
-    async fn get_library(&self, library_id: &MediaServerLibraryId) -> Result<MediaServerLibrary, MediaServerError> {
+    async fn get_library(
+        &self,
+        library_id: &MediaServerLibraryId,
+    ) -> Result<MediaServerLibrary, MediaServerError> {
         let libraries = self.get_libraries().await?;
         libraries
             .into_iter()
@@ -2007,10 +2119,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         series_id: &MediaServerSeriesId,
         metadata: &MediaServerSeriesMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+        let id: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         // newName 由 title 决定；写入的标题字段同时锁定（Kavita
         // scanner 重扫会重置未锁定的 sort/localized name）。
         let new_name = metadata.title.as_ref().map(|t| t.name.clone());
@@ -2061,10 +2172,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         series_id: &MediaServerSeriesId,
         _thumbnail_id: &MediaServerThumbnailId,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+        let id: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         let series = self.client.get_series(id).await?;
         // 封面重置只解锁封面，标题锁保持当前值（此前误把
         // sort/localized 锁清掉，重扫会把 komf 写入的标题重置）
@@ -2097,10 +2207,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         book_id: &MediaServerBookId,
         metadata: &MediaServerBookMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = book_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0)))?;
+        let id: i32 = book_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
+        })?;
         let current_chapter = self.client.get_chapter(id).await?;
         let request = to_kavita_chapter_metadata_update(metadata, &current_chapter);
         self.client.update_chapter_metadata(&request).await
@@ -2120,11 +2229,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         book: &MediaServerBook,
         _book_number: Option<i32>,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = book
-            .id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita chapter id: {}", book.id.0)))?;
+        let id: i32 = book.id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita chapter id: {}", book.id.0))
+        })?;
         self.client.reset_chapter_lock(id).await
     }
 
@@ -2132,11 +2239,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         &self,
         series: &MediaServerSeries,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = series
-            .id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series.id.0)))?;
+        let id: i32 = series.id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series.id.0))
+        })?;
         let series = self.client.get_series(id).await?;
         // 对齐 PR#343：重置清掉 komf 写入的标题，标题请求走 400 重试
         self.update_series_titles(&series, kavita_series_reset_update_request(&series))
@@ -2153,10 +2258,9 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         _selected: bool,
         lock: bool,
     ) -> Result<Option<MediaServerSeriesThumbnail>, MediaServerError> {
-        let id: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+        let id: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         self.client.upload_series_cover(id, thumbnail, lock).await?;
         Ok(None)
     }
@@ -2168,12 +2272,13 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         _selected: bool,
         lock: bool,
     ) -> Result<Option<MediaServerBookThumbnail>, MediaServerError> {
-        let id: i32 = book_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0)))?;
+        let id: i32 = book_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
+        })?;
         let chapter = self.client.get_chapter(id).await?;
-        self.client.upload_volume_cover(chapter.volume_id, thumbnail, lock).await?;
+        self.client
+            .upload_volume_cover(chapter.volume_id, thumbnail, lock)
+            .await?;
         Ok(None)
     }
 
@@ -2182,19 +2287,16 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         library_id: &MediaServerLibraryId,
         series_id: &MediaServerSeriesId,
     ) -> Result<(), MediaServerError> {
-        let library_id_i32: i32 = library_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita library id: {}", library_id.0)))?;
-        let series_id_i32: i32 = series_id
-            .0
-            .parse()
-            .map_err(|_| MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0)))?;
+        let library_id_i32: i32 = library_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita library id: {}", library_id.0))
+        })?;
+        let series_id_i32: i32 = series_id.0.parse().map_err(|_| {
+            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
+        })?;
         self.client.scan_library(library_id_i32).await?;
         self.client.scan_series(library_id_i32, series_id_i32).await
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // 测试
@@ -2292,17 +2394,35 @@ mod tests {
 
     #[test]
     fn age_rating_upgrade_mapping() {
-        assert_eq!(KavitaAgeRating::from_rating(0), KavitaAgeRating::RatingPending);
-        assert_eq!(KavitaAgeRating::from_rating(10), KavitaAgeRating::Everyone10Plus);
-        assert_eq!(KavitaAgeRating::from_rating(17), KavitaAgeRating::Mature17Plus);
+        assert_eq!(
+            KavitaAgeRating::from_rating(0),
+            KavitaAgeRating::RatingPending
+        );
+        assert_eq!(
+            KavitaAgeRating::from_rating(10),
+            KavitaAgeRating::Everyone10Plus
+        );
+        assert_eq!(
+            KavitaAgeRating::from_rating(17),
+            KavitaAgeRating::Mature17Plus
+        );
         assert_eq!(KavitaAgeRating::from_rating(18), KavitaAgeRating::R18Plus);
-        assert_eq!(KavitaAgeRating::from_rating(99), KavitaAgeRating::AdultsOnly);
+        assert_eq!(
+            KavitaAgeRating::from_rating(99),
+            KavitaAgeRating::AdultsOnly
+        );
     }
 
     #[test]
     fn publication_status_roundtrip() {
-        assert_eq!(KavitaPublicationStatus::from_id(0), Some(KavitaPublicationStatus::Ongoing));
-        assert_eq!(KavitaPublicationStatus::from_id(4), Some(KavitaPublicationStatus::Ended));
+        assert_eq!(
+            KavitaPublicationStatus::from_id(0),
+            Some(KavitaPublicationStatus::Ongoing)
+        );
+        assert_eq!(
+            KavitaPublicationStatus::from_id(4),
+            Some(KavitaPublicationStatus::Ended)
+        );
         assert_eq!(KavitaPublicationStatus::from_id(5), None);
         assert_eq!(KavitaPublicationStatus::Completed.id(), 2);
     }
@@ -2315,10 +2435,9 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.current_page, 3);
         assert_eq!(parsed.total_items, 1234);
-        let parsed = parse_pagination_header(
-            "currentPage=2&itemsPerPage=500&totalItems=999&totalPages=2",
-        )
-        .unwrap();
+        let parsed =
+            parse_pagination_header("currentPage=2&itemsPerPage=500&totalItems=999&totalPages=2")
+                .unwrap();
         assert_eq!(parsed.current_page, 2);
         assert_eq!(parsed.total_items, 999);
         assert_eq!(parse_pagination_header("garbage"), None);
@@ -2334,7 +2453,14 @@ mod tests {
             "Naruto".to_string(),
         ];
         let result = deduplicate(&values);
-        assert_eq!(result, vec!["One Piece".to_string(), "On+E!".to_string(), "Naruto".to_string()]);
+        assert_eq!(
+            result,
+            vec![
+                "One Piece".to_string(),
+                "On+E!".to_string(),
+                "Naruto".to_string()
+            ]
+        );
         // 大小写与连字符/空格归一化后去重
         let values = vec![
             "One-Piece!".to_string(),
@@ -2431,7 +2557,9 @@ mod tests {
         // Kotlin: KavitaSeriesMetadataUpdateRequest(seriesMetadata) → { "seriesMetadata": {...} }
         let request = kavita_series_reset_request(7, &KavitaSeriesMetadata::default());
         let json = serde_json::to_value(&request).unwrap();
-        let metadata = json.get("seriesMetadata").expect("wrapped under seriesMetadata");
+        let metadata = json
+            .get("seriesMetadata")
+            .expect("wrapped under seriesMetadata");
         assert_eq!(metadata["seriesId"], 7);
         assert_eq!(metadata["publicationStatus"], 0);
         assert_eq!(metadata["ageRating"], 0);
@@ -2447,13 +2575,22 @@ mod tests {
             id: 7,
             series_id: 7,
             summary: Some("locked summary".to_string()),
-            genres: vec![KavitaGenre { id: 1, title: "Locked Genre".to_string() }],
-            tags: vec![KavitaTag { id: 1, title: "Locked Tag".to_string() }],
+            genres: vec![KavitaGenre {
+                id: 1,
+                title: "Locked Genre".to_string(),
+            }],
+            tags: vec![KavitaTag {
+                id: 1,
+                title: "Locked Tag".to_string(),
+            }],
             age_rating: KavitaAgeRating::Teen.id(),
             publication_status: KavitaPublicationStatus::Completed.id(),
             release_year: 2019,
             language: Some("ja".to_string()),
-            writers: vec![KavitaAuthor { id: 1, name: "Locked Writer".to_string() }],
+            writers: vec![KavitaAuthor {
+                id: 1,
+                name: "Locked Writer".to_string(),
+            }],
             genres_locked: true,
             summary_locked: true,
             tags_locked: true,
@@ -2472,7 +2609,10 @@ mod tests {
         assert_eq!(metadata["genres"][0]["title"], "Locked Genre");
         assert_eq!(metadata["tags"][0]["title"], "Locked Tag");
         assert_eq!(metadata["ageRating"], KavitaAgeRating::Teen.id());
-        assert_eq!(metadata["publicationStatus"], KavitaPublicationStatus::Completed.id());
+        assert_eq!(
+            metadata["publicationStatus"],
+            KavitaPublicationStatus::Completed.id()
+        );
         assert_eq!(metadata["releaseYear"], 2019);
         assert_eq!(metadata["language"], "ja");
         assert_eq!(metadata["writers"][0]["name"], "Locked Writer");
@@ -2497,7 +2637,10 @@ mod tests {
         let current = KavitaSeriesMetadata {
             id: 7,
             series_id: 7,
-            publishers: vec![KavitaAuthor { id: 1, name: "Current Pub".to_string() }],
+            publishers: vec![KavitaAuthor {
+                id: 1,
+                name: "Current Pub".to_string(),
+            }],
             ..Default::default()
         };
         // 有 chosen publisher → 只写 chosen（不带 alternatives，避免字母序覆盖选择）
@@ -2518,7 +2661,10 @@ mod tests {
         };
         let request2 = to_kavita_series_metadata_update(&md2, &current, 7);
         assert_eq!(request2.series_metadata.publishers.len(), 1);
-        assert_eq!(request2.series_metadata.publishers[0].name, "Seven Seas Entertainment");
+        assert_eq!(
+            request2.series_metadata.publishers[0].name,
+            "Seven Seas Entertainment"
+        );
         // 两者皆无（真实路径：空 alt 被 metadata_mapper 过滤为 None）→ 保留 current
         let md3 = MediaServerSeriesMetadataUpdate {
             publisher: None,
@@ -2781,8 +2927,8 @@ mod tests {
             vec![
                 (Some("New".to_string()), Some("New JP".to_string())), // 原请求
                 (None, Some("New JP".to_string())),                    // 去 name
-                (Some("New".to_string()), Some("JP".to_string())),     // 去 localized name（回退当前值）
-                (None, Some("JP".to_string())),                        // 都去
+                (Some("New".to_string()), Some("JP".to_string())), // 去 localized name（回退当前值）
+                (None, Some("JP".to_string())),                    // 都去
             ]
         );
     }
@@ -2811,7 +2957,8 @@ mod tests {
                 let response = if i == 0 {
                     b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 11\r\n\r\nbad request".as_slice()
                 } else {
-                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok".as_slice()
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
+                        .as_slice()
                 };
                 let _ = sock.write_all(response).await;
             }
@@ -2881,7 +3028,10 @@ mod tests {
         let request = KavitaChapterMetadataUpdateRequest {
             id: 42,
             summary: Some("summary".to_string()),
-            genres: vec![KavitaGenre { id: 0, title: "Action".to_string() }],
+            genres: vec![KavitaGenre {
+                id: 0,
+                title: "Action".to_string(),
+            }],
             tags: vec![],
             age_rating: 13,
             language: None,
@@ -2890,7 +3040,10 @@ mod tests {
             release_date: "2024-05-01T00:00:00".to_string(),
             title_name: "Chapter 42".to_string(),
             sort_order: 42.0,
-            writers: vec![KavitaAuthor { id: 0, name: "Author A".to_string() }],
+            writers: vec![KavitaAuthor {
+                id: 0,
+                name: "Author A".to_string(),
+            }],
             cover_artists: vec![],
             publishers: vec![],
             characters: vec![],
@@ -2933,7 +3086,10 @@ mod tests {
         assert_eq!(json["weblinks"], "https://example.com");
         assert_eq!(json["ageRating"], 13);
         assert_eq!(json["writers"][0]["name"], "Author A");
-        assert!(json.get("seriesId").is_none(), "chapter update must not carry seriesId");
+        assert!(
+            json.get("seriesId").is_none(),
+            "chapter update must not carry seriesId"
+        );
     }
 
     #[test]

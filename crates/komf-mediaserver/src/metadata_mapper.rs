@@ -15,8 +15,20 @@ impl MetadataMapper {
         let current = &book.metadata;
 
         let authors: Option<Vec<MediaServerAuthor>> = {
-            let from_book = book_metadata.and_then(|m| if m.authors.is_empty() { None } else { Some(m.authors.clone()) });
-            let from_series = series_metadata.and_then(|m| if m.authors.is_empty() { None } else { Some(m.authors.clone()) });
+            let from_book = book_metadata.and_then(|m| {
+                if m.authors.is_empty() {
+                    None
+                } else {
+                    Some(m.authors.clone())
+                }
+            });
+            let from_series = series_metadata.and_then(|m| {
+                if m.authors.is_empty() {
+                    None
+                } else {
+                    Some(m.authors.clone())
+                }
+            });
             from_book.or(from_series).map(|authors| {
                 authors
                     .iter()
@@ -29,28 +41,50 @@ impl MetadataMapper {
         };
 
         MediaServerBookMetadataUpdate {
-            title: get_if_not_locked_or_empty(book_metadata.and_then(|m| m.title.clone()), current.title_lock),
-            summary: get_if_not_locked_or_empty(book_metadata.and_then(|m| m.summary.clone()), current.summary_lock),
+            title: get_if_not_locked_or_empty(
+                book_metadata.and_then(|m| m.title.clone()),
+                current.title_lock,
+            ),
+            summary: get_if_not_locked_or_empty(
+                book_metadata.and_then(|m| m.summary.clone()),
+                current.summary_lock,
+            ),
             release_date: get_if_not_locked_or_empty(
                 book_metadata.and_then(|m| m.release_date.clone()),
                 current.release_date_lock,
             ),
             authors: get_if_not_locked_or_empty(authors, current.authors_lock),
             tags: get_if_not_locked_or_empty(
-                book_metadata.map(|m| m.tags.clone()).filter(|t| !t.is_empty()),
+                book_metadata
+                    .map(|m| m.tags.clone())
+                    .filter(|t| !t.is_empty()),
                 current.tags_lock,
             ),
-            isbn: get_if_not_locked_or_empty(book_metadata.and_then(|m| m.isbn.clone()), current.isbn_lock),
+            isbn: get_if_not_locked_or_empty(
+                book_metadata.and_then(|m| m.isbn.clone()),
+                current.isbn_lock,
+            ),
             links: get_if_not_locked_or_empty(
-                book_metadata.map(|m| m.links.clone()).filter(|l| !l.is_empty()),
+                book_metadata
+                    .map(|m| m.links.clone())
+                    .filter(|l| !l.is_empty()),
                 current.links_lock,
             ),
             // ignore lock since we can't know if komf was the one to lock number
-            number: book_metadata.and_then(|m| m.number.as_ref()).map(|n| n.to_string()),
-            number_sort: book_metadata.and_then(|m| m.number.as_ref()).map(|n| n.start),
+            number: book_metadata
+                .and_then(|m| m.number.as_ref())
+                .map(|n| n.to_string()),
+            number_sort: book_metadata
+                .and_then(|m| m.number.as_ref())
+                .map(|n| n.start),
             // lock if number is not null; do not unlock if was locked
-            number_lock: Some(current.number_lock || book_metadata.and_then(|m| m.number.as_ref()).is_some()),
-            number_sort_lock: Some(current.number_sort_lock || book_metadata.and_then(|m| m.number_sort.as_ref()).is_some()),
+            number_lock: Some(
+                current.number_lock || book_metadata.and_then(|m| m.number.as_ref()).is_some(),
+            ),
+            number_sort_lock: Some(
+                current.number_sort_lock
+                    || book_metadata.and_then(|m| m.number_sort.as_ref()).is_some(),
+            ),
             ..Default::default()
         }
     }
@@ -76,7 +110,9 @@ impl MetadataMapper {
             )
         };
 
-        let alternative_titles: Option<Vec<(String, Option<komf_core::model::TitleType>, Option<String>)>> = {
+        let alternative_titles: Option<
+            Vec<(String, Option<komf_core::model::TitleType>, Option<String>)>,
+        > = {
             // 对齐 Kotlin `patch.titles.filter { it != patch.title }`：按 SeriesTitle 全等
             // （name + type + language）剔除主标题，而非仅按 name。
             let titles = patch
@@ -88,30 +124,64 @@ impl MetadataMapper {
                 })
                 .map(|t| (t.name.clone(), t.r#type, t.language.clone()))
                 .collect::<Vec<_>>();
-            if titles.is_empty() { None } else { Some(titles) }
+            if titles.is_empty() {
+                None
+            } else {
+                Some(titles)
+            }
         };
 
         MediaServerSeriesMetadataUpdate {
             status: get_if_not_locked_or_empty(patch.status, metadata.status_lock),
             title: get_if_not_locked_or_empty(patch.title.clone(), metadata.title_lock),
             title_sort: get_if_not_locked_or_empty(patch.title.clone(), metadata.title_sort_lock),
-            alternative_titles: get_if_not_locked_or_empty(alternative_titles, metadata.title_sort_lock),
+            alternative_titles: get_if_not_locked_or_empty(
+                alternative_titles,
+                metadata.title_sort_lock,
+            ),
             summary: get_if_not_locked_or_empty(patch.summary.clone(), metadata.summary_lock),
-            publisher: get_if_not_locked_or_empty(patch.publisher.as_ref().map(|p| p.name.clone()), metadata.publisher_lock),
-            alternative_publishers: get_if_not_locked_or_empty(
-                Some(patch.alternative_publishers.iter().map(|p| p.name.clone()).collect::<Vec<_>>())
-                    .filter(|p| !p.is_empty()),
+            publisher: get_if_not_locked_or_empty(
+                patch.publisher.as_ref().map(|p| p.name.clone()),
                 metadata.publisher_lock,
             ),
-            reading_direction: get_if_not_locked_or_empty(patch.reading_direction, metadata.reading_direction_lock),
+            alternative_publishers: get_if_not_locked_or_empty(
+                Some(
+                    patch
+                        .alternative_publishers
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .filter(|p| !p.is_empty()),
+                metadata.publisher_lock,
+            ),
+            reading_direction: get_if_not_locked_or_empty(
+                patch.reading_direction,
+                metadata.reading_direction_lock,
+            ),
             age_rating: get_if_not_locked_or_empty(patch.age_rating, metadata.age_rating_lock),
             language: get_if_not_locked_or_empty(patch.language.clone(), metadata.language_lock),
-            genres: get_if_not_locked_or_empty(Some(patch.genres.clone()).filter(|g| !g.is_empty()), metadata.genres_lock),
-            tags: get_if_not_locked_or_empty(Some(patch.tags.clone()).filter(|t| !t.is_empty()), metadata.tags_lock),
-            total_book_count: get_if_not_locked_or_empty(patch.total_book_count, metadata.total_book_count_lock),
+            genres: get_if_not_locked_or_empty(
+                Some(patch.genres.clone()).filter(|g| !g.is_empty()),
+                metadata.genres_lock,
+            ),
+            tags: get_if_not_locked_or_empty(
+                Some(patch.tags.clone()).filter(|t| !t.is_empty()),
+                metadata.tags_lock,
+            ),
+            total_book_count: get_if_not_locked_or_empty(
+                patch.total_book_count,
+                metadata.total_book_count_lock,
+            ),
             authors: get_if_not_locked_or_empty(authors, metadata.authors_lock),
-            release_year: get_if_not_locked_or_empty(patch.release_date.as_ref().and_then(|d| d.year), metadata.release_year_lock),
-            links: get_if_not_locked_or_empty(Some(patch.links.clone()).filter(|l| !l.is_empty()), metadata.links_lock),
+            release_year: get_if_not_locked_or_empty(
+                patch.release_date.as_ref().and_then(|d| d.year),
+                metadata.release_year_lock,
+            ),
+            links: get_if_not_locked_or_empty(
+                Some(patch.links.clone()).filter(|l| !l.is_empty()),
+                metadata.links_lock,
+            ),
             ..Default::default()
         }
     }
@@ -241,7 +311,11 @@ pub struct ComicInfoAuthorFields {
 }
 
 fn join_by_role(authors: &[Author], role: AuthorRole) -> Option<String> {
-    let names: Vec<String> = authors.iter().filter(|a| a.role == role).map(|a| a.name.clone()).collect();
+    let names: Vec<String> = authors
+        .iter()
+        .filter(|a| a.role == role)
+        .map(|a| a.name.clone())
+        .collect();
     if names.is_empty() {
         None
     } else {

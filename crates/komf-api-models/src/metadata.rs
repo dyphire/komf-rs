@@ -1,5 +1,7 @@
 //! 元数据相关 API DTO —— 对应 `snd.komf.api.metadata` 包。
-use super::common::{KomfMediaType, KomfProviderSeriesId, KomfProviders, KomfServerLibraryId, KomfServerSeriesId};
+use super::common::{
+    KomfMediaType, KomfProviderSeriesId, KomfProviders, KomfServerLibraryId, KomfServerSeriesId,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

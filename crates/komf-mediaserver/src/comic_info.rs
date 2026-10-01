@@ -110,19 +110,60 @@ pub fn comic_info_from_metadata(
         cover_artist: author_fields.cover_artist,
         editor: author_fields.editor,
         translator: author_fields.translator,
-        publisher: series.and_then(|s| s.publisher.as_ref()).map(|p| p.name.clone()),
-        genre: series.and_then(|s| if s.genres.is_empty() { None } else { Some(s.genres.join(",")) }),
-        tags: book.and_then(|b| if b.tags.is_empty() { None } else { Some(b.tags.join(",")) }),
-        age_rating: series.and_then(|s| s.age_rating).map(crate::metadata_mapper::age_rating_to_comic_info),
+        publisher: series
+            .and_then(|s| s.publisher.as_ref())
+            .map(|p| p.name.clone()),
+        genre: series.and_then(|s| {
+            if s.genres.is_empty() {
+                None
+            } else {
+                Some(s.genres.join(","))
+            }
+        }),
+        tags: book.and_then(|b| {
+            if b.tags.is_empty() {
+                None
+            } else {
+                Some(b.tags.join(","))
+            }
+        }),
+        age_rating: series
+            .and_then(|s| s.age_rating)
+            .map(crate::metadata_mapper::age_rating_to_comic_info),
         language_iso: series.and_then(|s| s.language.clone()),
-        localized_series: series.and_then(|s| s.titles.iter().find(|t| t.r#type.is_some()).map(|t| t.name.clone())),
-        story_arc: book
-            .and_then(|b| b.story_arcs.as_ref())
-            .and_then(|arcs| if arcs.is_empty() { None } else { Some(arcs.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(",")) }),
-        story_arc_number: book
-            .and_then(|b| b.story_arcs.as_ref())
-            .and_then(|arcs| if arcs.is_empty() { None } else { Some(arcs.iter().map(|a| a.number.to_string()).collect::<Vec<_>>().join(",")) }),
-        gtin: book.and_then(|b| b.isbn.clone()).filter(|i| !i.trim().is_empty()),
+        localized_series: series.and_then(|s| {
+            s.titles
+                .iter()
+                .find(|t| t.r#type.is_some())
+                .map(|t| t.name.clone())
+        }),
+        story_arc: book.and_then(|b| b.story_arcs.as_ref()).and_then(|arcs| {
+            if arcs.is_empty() {
+                None
+            } else {
+                Some(
+                    arcs.iter()
+                        .map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            }
+        }),
+        story_arc_number: book.and_then(|b| b.story_arcs.as_ref()).and_then(|arcs| {
+            if arcs.is_empty() {
+                None
+            } else {
+                Some(
+                    arcs.iter()
+                        .map(|a| a.number.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            }
+        }),
+        gtin: book
+            .and_then(|b| b.isbn.clone())
+            .filter(|i| !i.trim().is_empty()),
         ..Default::default()
     })
 }
@@ -136,7 +177,9 @@ pub fn series_comic_info(
     ComicInfo {
         title: book_metadata.and_then(|b| b.title.clone()),
         series: series_metadata.title_name(),
-        number: book_metadata.and_then(|b| b.number.as_ref()).map(|n| n.to_string()),
+        number: book_metadata
+            .and_then(|b| b.number.as_ref())
+            .map(|n| n.to_string()),
         count: series_metadata.total_book_count,
         summary: series_metadata.summary.clone(),
         year: series_metadata.release_date.as_ref().and_then(|d| d.year),
@@ -161,15 +204,31 @@ pub fn series_comic_info(
         } else {
             Some(series_metadata.tags.join(","))
         },
-        age_rating: series_metadata.age_rating.map(crate::metadata_mapper::age_rating_to_comic_info),
+        age_rating: series_metadata
+            .age_rating
+            .map(crate::metadata_mapper::age_rating_to_comic_info),
         language_iso: series_metadata.language.clone(),
-        localized_series: series_metadata.titles.iter().find(|t| t.r#type.is_some()).map(|t| t.name.clone()),
+        localized_series: series_metadata
+            .titles
+            .iter()
+            .find(|t| t.r#type.is_some())
+            .map(|t| t.name.clone()),
         story_arc: book_metadata
             .and_then(|b| b.story_arcs.as_ref())
-            .map(|arcs| arcs.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(",")),
+            .map(|arcs| {
+                arcs.iter()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }),
         story_arc_number: book_metadata
             .and_then(|b| b.story_arcs.as_ref())
-            .map(|arcs| arcs.iter().map(|a| a.number.to_string()).collect::<Vec<_>>().join(",")),
+            .map(|arcs| {
+                arcs.iter()
+                    .map(|a| a.number.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }),
         gtin: book_metadata.and_then(|b| b.isbn.clone()),
         ..Default::default()
     }
@@ -190,7 +249,11 @@ impl ComicInfo {
         push_optional(&mut xml, "Volume", &self.volume.map(|v| v.to_string()));
         push_optional(&mut xml, "AlternateSeries", &self.alternate_series);
         push_optional(&mut xml, "AlternateNumber", &self.alternate_number);
-        push_optional(&mut xml, "AlternateCount", &self.alternate_count.map(|c| c.to_string()));
+        push_optional(
+            &mut xml,
+            "AlternateCount",
+            &self.alternate_count.map(|c| c.to_string()),
+        );
         push_optional(&mut xml, "Summary", &self.summary);
         push_optional(&mut xml, "Notes", &self.notes);
         push_optional(&mut xml, "Year", &self.year.map(|y| y.to_string()));
@@ -209,7 +272,11 @@ impl ComicInfo {
         push_optional(&mut xml, "Genre", &self.genre);
         push_optional(&mut xml, "Tags", &self.tags);
         push_optional(&mut xml, "Web", &self.web);
-        push_optional(&mut xml, "PageCount", &self.page_count.map(|c| c.to_string()));
+        push_optional(
+            &mut xml,
+            "PageCount",
+            &self.page_count.map(|c| c.to_string()),
+        );
         push_optional(&mut xml, "LanguageISO", &self.language_iso);
         push_optional(&mut xml, "Format", &self.format);
         push_optional(&mut xml, "BlackAndWhite", &self.black_and_white);
@@ -231,12 +298,32 @@ impl ComicInfo {
                 xml.push_str("    <Page>\n");
                 push_optional_indent(&mut xml, "Image", &page.image.map(|v| v.to_string()), 6);
                 push_optional_indent(&mut xml, "Type", &page.r#type, 6);
-                push_optional_indent(&mut xml, "DoublePage", &page.double_page.map(|v| v.to_string()), 6);
-                push_optional_indent(&mut xml, "ImageSize", &page.image_size.map(|v| v.to_string()), 6);
+                push_optional_indent(
+                    &mut xml,
+                    "DoublePage",
+                    &page.double_page.map(|v| v.to_string()),
+                    6,
+                );
+                push_optional_indent(
+                    &mut xml,
+                    "ImageSize",
+                    &page.image_size.map(|v| v.to_string()),
+                    6,
+                );
                 push_optional_indent(&mut xml, "Key", &page.key, 6);
                 push_optional_indent(&mut xml, "Bookmark", &page.bookmark, 6);
-                push_optional_indent(&mut xml, "ImageWidth", &page.image_width.map(|v| v.to_string()), 6);
-                push_optional_indent(&mut xml, "ImageHeight", &page.image_height.map(|v| v.to_string()), 6);
+                push_optional_indent(
+                    &mut xml,
+                    "ImageWidth",
+                    &page.image_width.map(|v| v.to_string()),
+                    6,
+                );
+                push_optional_indent(
+                    &mut xml,
+                    "ImageHeight",
+                    &page.image_height.map(|v| v.to_string()),
+                    6,
+                );
                 xml.push_str("    </Page>\n");
             }
             xml.push_str("  </Pages>\n");
@@ -257,7 +344,11 @@ fn push_optional(xml: &mut String, tag: &str, value: &Option<String>) {
 fn push_optional_indent(xml: &mut String, tag: &str, value: &Option<String>, indent: usize) {
     if let Some(value) = value {
         if !value.is_empty() {
-            xml.push_str(&format!("{indent}<{tag}>{}</{tag}>\n", escape_xml(value), indent = " ".repeat(indent)));
+            xml.push_str(&format!(
+                "{indent}<{tag}>{}</{tag}>\n",
+                escape_xml(value),
+                indent = " ".repeat(indent)
+            ));
         }
     }
 }
@@ -327,10 +418,14 @@ fn parse_comic_info(xml: &str) -> ComicInfo {
         let mut pages = Vec::new();
         let mut idx = 0;
         while idx < inner.len() {
-            let Some(rel) = inner[idx..].find("<Page>") else { break };
+            let Some(rel) = inner[idx..].find("<Page>") else {
+                break;
+            };
             let pstart = idx + rel;
             let after = &inner[pstart + "<Page>".len()..];
-            let Some(pend) = after.find("</Page>") else { break };
+            let Some(pend) = after.find("</Page>") else {
+                break;
+            };
             let pbody = &after[..pend];
             pages.push(Page {
                 image: int_field(pbody, "Image"),
@@ -472,7 +567,11 @@ impl ComicInfoWriter {
         Self { override_existing }
     }
 
-    pub fn write_metadata(&self, book_url: &str, comic_info: &ComicInfo) -> Result<(), ComicInfoError> {
+    pub fn write_metadata(
+        &self,
+        book_url: &str,
+        comic_info: &ComicInfo,
+    ) -> Result<(), ComicInfoError> {
         let path = PathBuf::from(book_url);
         self.write_comic_info(&path, comic_info)
     }
@@ -485,7 +584,11 @@ impl ComicInfoWriter {
     /// 读取 zip 中是否存在 ComicInfo.xml（且非空）。
     pub fn has_comic_info(&self, book_url: &str) -> bool {
         read_zip_entries(Path::new(book_url))
-            .map(|entries| entries.iter().any(|(name, _)| name.eq_ignore_ascii_case("ComicInfo.xml")))
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("ComicInfo.xml"))
+            })
             .unwrap_or(false)
     }
 
@@ -517,7 +620,10 @@ impl ComicInfoWriter {
         let new_entries: Vec<(String, Vec<u8>)> = entries
             .into_iter()
             .filter(|(name, _)| name != entry_name)
-            .chain(std::iter::once((entry_name.to_string(), effective.into_bytes())))
+            .chain(std::iter::once((
+                entry_name.to_string(),
+                effective.into_bytes(),
+            )))
             .collect();
 
         write_zip_entries(path, &new_entries)
@@ -560,7 +666,11 @@ fn write_zip_entries(path: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), C
 
     // mimetype 必须无压缩且是第一个条目（EPUB 规范）
     let mut ordered: Vec<&(String, Vec<u8>)> = Vec::new();
-    if let Some((idx, _)) = entries.iter().enumerate().find(|(_, (name, _))| name == "mimetype") {
+    if let Some((idx, _)) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, (name, _))| name == "mimetype")
+    {
         ordered.push(&entries[idx]);
         for (i, entry) in entries.iter().enumerate() {
             if i != idx {

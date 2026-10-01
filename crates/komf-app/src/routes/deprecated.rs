@@ -23,22 +23,39 @@ fn deprecated_metadata_routes(kind: ServerKind) -> Router<SharedState> {
     Router::new()
         .route("/providers", get(move |s, q| providers(kind, s, q)))
         .route("/search", get(move |s, q| search(kind, s, q)))
-        .route("/identify", axum::routing::post(move |s, j| identify(kind, s, j)))
+        .route(
+            "/identify",
+            axum::routing::post(move |s, j| identify(kind, s, j)),
+        )
         .route(
             "/match/library/:library_id/series/:series_id",
             axum::routing::post(move |s, p| match_series(kind, s, p)),
         )
-        .route("/match/library/:library_id", axum::routing::post(move |s, p| match_library(kind, s, p)))
+        .route(
+            "/match/library/:library_id",
+            axum::routing::post(move |s, p| match_library(kind, s, p)),
+        )
         .route(
             "/reset/library/:library_id/series/:series_id",
             axum::routing::post(move |s, p, q| reset_series(kind, s, p, q)),
         )
-        .route("/reset/library/:library_id", axum::routing::post(move |s, p, q| reset_library(kind, s, p, q)))
+        .route(
+            "/reset/library/:library_id",
+            axum::routing::post(move |s, p, q| reset_library(kind, s, p, q)),
+        )
 }
 
 async fn get_config(State(state): State<SharedState>) -> Response {
     let state = state.read().unwrap();
-    Json(mappers::to_config_dto(&state.config, None, None, None, None, None)).into_response()
+    Json(mappers::to_config_dto(
+        &state.config,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ))
+    .into_response()
 }
 
 async fn update_config(
@@ -65,7 +82,11 @@ struct LibraryQuery {
     library_id: Option<String>,
 }
 
-async fn providers(kind: ServerKind, State(state): State<SharedState>, Query(query): Query<LibraryQuery>) -> Response {
+async fn providers(
+    kind: ServerKind,
+    State(state): State<SharedState>,
+    Query(query): Query<LibraryQuery>,
+) -> Response {
     let services = metadata_routes::select_services_for(kind, &state);
     let providers = match query.library_id {
         Some(library_id) => services
@@ -86,7 +107,11 @@ struct SearchQuery {
     library_id: Option<String>,
 }
 
-async fn search(kind: ServerKind, State(state): State<SharedState>, Query(query): Query<SearchQuery>) -> Response {
+async fn search(
+    kind: ServerKind,
+    State(state): State<SharedState>,
+    Query(query): Query<SearchQuery>,
+) -> Response {
     let Some(name) = query.name else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -103,11 +128,18 @@ async fn search(kind: ServerKind, State(state): State<SharedState>, Query(query)
         },
     };
     let results = match &library_id {
-        Some(library_id) => services
-            .metadata_service_for(&library_id.0)
-            .search_series_metadata(&name, Some(library_id))
-            .await,
-        None => services.default_metadata_service().search_series_metadata(&name, None).await,
+        Some(library_id) => {
+            services
+                .metadata_service_for(&library_id.0)
+                .search_series_metadata(&name, Some(library_id))
+                .await
+        }
+        None => {
+            services
+                .default_metadata_service()
+                .search_series_metadata(&name, None)
+                .await
+        }
     };
     Json(results).into_response()
 }
@@ -125,11 +157,18 @@ struct DeprecatedIdentifyRequest {
     edition: Option<String>,
 }
 
-async fn identify(kind: ServerKind, State(state): State<SharedState>, Json(request): Json<DeprecatedIdentifyRequest>) -> Response {
+async fn identify(
+    kind: ServerKind,
+    State(state): State<SharedState>,
+    Json(request): Json<DeprecatedIdentifyRequest>,
+) -> Response {
     let (services, client) = metadata_routes::select_all_for(kind, &state);
     let library_id = match &request.library_id {
         Some(library_id) => library_id.clone(),
-        None => match client.get_series(&MediaServerSeriesId(request.series_id.clone())).await {
+        None => match client
+            .get_series(&MediaServerSeriesId(request.series_id.clone()))
+            .await
+        {
             Ok(series) => series.library_id.0,
             Err(error) => {
                 return (
@@ -142,7 +181,9 @@ async fn identify(kind: ServerKind, State(state): State<SharedState>, Json(reque
     };
     // 对齐 Kotlin：`CoreProviders.valueOf(request.provider.uppercase())`——
     // 先大写化再匹配枚举名（容忍小写/混合大小写输入）。
-    let provider = match komf_core::providers::CoreProviders::from_str(&request.provider.to_uppercase()) {
+    let provider = match komf_core::providers::CoreProviders::from_str(
+        &request.provider.to_uppercase(),
+    ) {
         Some(provider) => provider,
         None => {
             return (
@@ -201,7 +242,11 @@ async fn wait_for_completion(state: &SharedState, job_id: &komf_mediaserver::job
     }
 }
 
-async fn match_library(kind: ServerKind, State(state): State<SharedState>, Path(library_id): Path<String>) -> Response {
+async fn match_library(
+    kind: ServerKind,
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Response {
     let services = metadata_routes::select_services_for(kind, &state);
     // 对齐 Kotlin：matchLibraryMetadata 后台执行（Unit），恒 202。
     services
@@ -282,9 +327,10 @@ mod tests {
     #[test]
     fn identify_request_accepts_camelcase() {
         // 脚本 editMetadata 形态：libraryId/edition 为 undefined 时被 JSON 序列化省略
-        let req: DeprecatedIdentifyRequest =
-            serde_json::from_str(r#"{"seriesId":"123","provider":"MANGA_BAKA","providerSeriesId":"456"}"#)
-                .unwrap();
+        let req: DeprecatedIdentifyRequest = serde_json::from_str(
+            r#"{"seriesId":"123","provider":"MANGA_BAKA","providerSeriesId":"456"}"#,
+        )
+        .unwrap();
         assert_eq!(req.series_id, "123");
         assert_eq!(req.provider, "MANGA_BAKA");
         assert_eq!(req.provider_series_id, "456");
@@ -298,10 +344,14 @@ mod tests {
         assert_eq!(req.library_id.as_deref(), Some("lib1"));
         assert_eq!(req.edition.as_deref(), Some("Vol 1"));
         // provider 大小写不敏感（Kotlin `uppercase()` 语义）
-        let req: DeprecatedIdentifyRequest =
-            serde_json::from_str(r#"{"seriesId":"1","provider":"manga_baka","providerSeriesId":"2"}"#).unwrap();
+        let req: DeprecatedIdentifyRequest = serde_json::from_str(
+            r#"{"seriesId":"1","provider":"manga_baka","providerSeriesId":"2"}"#,
+        )
+        .unwrap();
         assert_eq!(req.provider, "manga_baka");
         // 非法字段（无 seriesId）→ 解析失败（422 场景正确保留）
-        assert!(serde_json::from_str::<DeprecatedIdentifyRequest>(r#"{"provider":"BANGUMI"}"#).is_err());
+        assert!(
+            serde_json::from_str::<DeprecatedIdentifyRequest>(r#"{"provider":"BANGUMI"}"#).is_err()
+        );
     }
 }

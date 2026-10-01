@@ -196,9 +196,7 @@ pub struct OAuthToken {
 impl OAuthToken {
     fn expired(&self) -> bool {
         match self.expires_at {
-            Some(t) if t > 0 => {
-                t <= chrono::Utc::now().timestamp()
-            }
+            Some(t) if t > 0 => t <= chrono::Utc::now().timestamp(),
             _ => false,
         }
     }
@@ -329,8 +327,14 @@ impl OAuthManager {
         }
         let mut guard = self.conn();
         if let Some(conn) = guard.as_mut() {
-            let _ = conn.execute("DELETE FROM oauth_tokens WHERE provider=?1", params![provider.as_str()]);
-            let _ = conn.execute("DELETE FROM oauth_pending WHERE provider=?1", params![provider.as_str()]);
+            let _ = conn.execute(
+                "DELETE FROM oauth_tokens WHERE provider=?1",
+                params![provider.as_str()],
+            );
+            let _ = conn.execute(
+                "DELETE FROM oauth_pending WHERE provider=?1",
+                params![provider.as_str()],
+            );
         }
     }
 
@@ -375,7 +379,14 @@ impl OAuthManager {
     /// 返回 (provider, track_id, title, url, updated_at)。
     pub fn list_tracker_links(
         &self,
-    ) -> Vec<(String, String, Option<String>, Option<String>, Option<String>, i64)> {
+    ) -> Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+    )> {
         let mut guard = self.conn();
         let Some(conn) = guard.as_mut() else {
             return Vec::new();
@@ -396,8 +407,7 @@ impl OAuthManager {
                 row.get::<_, i64>(5)?,
             ))
         });
-        rows
-            .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+        rows.and_then(|it| it.collect::<Result<Vec<_>, _>>())
             .unwrap_or_default()
     }
 
@@ -472,7 +482,8 @@ impl OAuthManager {
         state_raw: &str,
     ) -> Result<(), String> {
         // 1) 解析并校验 state 与 pending nonce
-        let state: serde_json::Value = serde_json::from_str(state_raw).map_err(|_| "state 解析失败")?;
+        let state: serde_json::Value =
+            serde_json::from_str(state_raw).map_err(|_| "state 解析失败")?;
         let nonce = state
             .get("nonce")
             .and_then(|v| v.as_str())
@@ -534,7 +545,11 @@ impl OAuthManager {
         Ok(())
     }
 
-    async fn exchange(&self, token_url: &str, form: &[(&str, String)]) -> Result<OAuthToken, String> {
+    async fn exchange(
+        &self,
+        token_url: &str,
+        form: &[(&str, String)],
+    ) -> Result<OAuthToken, String> {
         // 覆盖为浏览器 UA：全局 client 的 UA（dyphire/komf-rs）会被 AniList 的
         // Cloudflare 拦截（连接级 403/1010），而 MAL/Bangumi 不受影响。
         // 仅对 token 交换/刷新请求生效，不改变其他请求（如 MangaDex 封面）的 UA。
@@ -566,7 +581,9 @@ impl OAuthManager {
         }
         let parsed: TokenResp =
             serde_json::from_str(&body).map_err(|e| format!("token 响应解析失败：{e}：{body}"))?;
-        let expires_at = parsed.expires_in.map(|secs| chrono::Utc::now().timestamp() + secs);
+        let expires_at = parsed
+            .expires_in
+            .map(|secs| chrono::Utc::now().timestamp() + secs);
         Ok(OAuthToken {
             access_token: parsed.access_token,
             refresh_token: parsed.refresh_token,
@@ -815,7 +832,9 @@ mod tests {
         }
         // 值与编译期注入一致（与宏本身同源；运行时 set_var 无法改变它）
         assert_eq!(
-            OAuthApp::for_provider(OAuthProvider::Anilist).client_secret.as_deref(),
+            OAuthApp::for_provider(OAuthProvider::Anilist)
+                .client_secret
+                .as_deref(),
             secret_from(option_env!("KOMF_OAUTH_ANILIST_CLIENT_SECRET")).as_deref(),
         );
     }

@@ -6,7 +6,9 @@
 //! （version 1.0.2；`comicid`/`year` 为 mylar 占位，year 被 releaseDate 年份覆盖）。
 //! 配置 `mylarCovers` 开启时同时下载系列封面为 `cover.jpg`（oneshot 为 `<系列名>.cover.jpg`）。
 
-use komf_core::model::{AuthorRole, ReadingDirection, ReleaseDate, SeriesMetadata, SeriesStatus, TitleType};
+use komf_core::model::{
+    AuthorRole, ReadingDirection, ReleaseDate, SeriesMetadata, SeriesStatus, TitleType,
+};
 use serde::Serialize;
 use std::path::Path;
 
@@ -292,7 +294,9 @@ pub fn resolve_mylar_output_dir(
     let (series_dir, file_stem) = if oneshot {
         (
             url_path.parent().unwrap_or(url_path),
-            url_path.file_stem().map(|s| s.to_string_lossy().to_string()),
+            url_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string()),
         )
     } else {
         (url_path, None)
@@ -425,7 +429,10 @@ mod tests {
         assert_eq!(m.language.as_deref(), Some("ja"));
         assert_eq!(m.reading_direction.as_deref(), Some("RIGHT_TO_LEFT"));
         assert_eq!(m.release_date.as_deref(), Some("2024-05-01"));
-        assert_eq!(m.genres.as_deref(), Some(vec!["恋爱".to_string()].as_slice()));
+        assert_eq!(
+            m.genres.as_deref(),
+            Some(vec!["恋爱".to_string()].as_slice())
+        );
         assert_eq!(m.tags.as_deref(), Some(vec!["tag1".to_string()].as_slice()));
         // links
         let links = m.links.as_ref().unwrap();
@@ -442,7 +449,12 @@ mod tests {
         assert_eq!(alts[1].label, "en"); // LOCALIZED → 语言
         assert_eq!(alts[1].title, "Even So");
         // 占位字段为 null / 空串
-        assert!(m.imprint.is_none() && m.description_formatted.is_none() && m.volume.is_none() && m.collects.is_none());
+        assert!(
+            m.imprint.is_none()
+                && m.description_formatted.is_none()
+                && m.volume.is_none()
+                && m.collects.is_none()
+        );
         assert!(m.comic_image.is_empty() && m.publication_run.is_empty());
     }
 
@@ -456,7 +468,7 @@ mod tests {
             &["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
         );
         assert_eq!(json.metadata.year, 2001); // 占位
-        // 元数据未提供总卷数/章数 → total_issues 设为 0（不回退 booksCount）
+                                              // 元数据未提供总卷数/章数 → total_issues 设为 0（不回退 booksCount）
         assert_eq!(json.metadata.total_issues, 0);
     }
 
@@ -514,17 +526,30 @@ mod tests {
         assert_eq!(stem.as_deref(), Some("AAA"));
         // 普通系列 + output → output/目录名
         let (dir, _) = resolve_mylar_output_dir(&series_a, false, Some(&out), None, None);
-        assert_eq!(dir, std::path::Path::new(&win_path(&["D:", "mylar", "series-a"])));
+        assert_eq!(
+            dir,
+            std::path::Path::new(&win_path(&["D:", "mylar", "series-a"]))
+        );
         // 普通系列 + output + root → output/相对结构
         let (dir, _) = resolve_mylar_output_dir(&sub_series_b, false, Some(&out), Some(&lib), None);
-        assert_eq!(dir, std::path::Path::new(&win_path(&["D:", "mylar", "sub", "series-b"])));
+        assert_eq!(
+            dir,
+            std::path::Path::new(&win_path(&["D:", "mylar", "sub", "series-b"]))
+        );
         // oneshot + output + root → output/zip 父目录相对结构 + stem
-        let (dir, stem) = resolve_mylar_output_dir(&oneshot_zip, true, Some(&out), Some(&lib), None);
-        assert_eq!(dir, std::path::Path::new(&win_path(&["D:", "mylar", "oneshot"])));
+        let (dir, stem) =
+            resolve_mylar_output_dir(&oneshot_zip, true, Some(&out), Some(&lib), None);
+        assert_eq!(
+            dir,
+            std::path::Path::new(&win_path(&["D:", "mylar", "oneshot"]))
+        );
         assert_eq!(stem.as_deref(), Some("AAA"));
         // url 不在 root 下 → 回退目录名
         let (dir, _) = resolve_mylar_output_dir(&other_c, false, Some(&out), Some(&lib), None);
-        assert_eq!(dir, std::path::Path::new(&win_path(&["D:", "mylar", "series-c"])));
+        assert_eq!(
+            dir,
+            std::path::Path::new(&win_path(&["D:", "mylar", "series-c"]))
+        );
         // ${configDir} 展开为配置目录；无基准时原样保留
         // 注意：Windows 上 PathBuf::from("C:").join("app") = "C:app"（相对盘符语义），
         // 必须用正斜杠字面量构造（两个平台都解析为 C:\app\conf / C:/app/conf）。
@@ -537,13 +562,8 @@ mod tests {
             Some(&cfg),
         );
         assert_eq!(dir, std::path::Path::new("C:/app/conf/mylar/series-a"));
-        let (dir, _) = resolve_mylar_output_dir(
-            &series_a,
-            false,
-            Some("${configDir}/mylar"),
-            None,
-            None,
-        );
+        let (dir, _) =
+            resolve_mylar_output_dir(&series_a, false, Some("${configDir}/mylar"), None, None);
         assert_eq!(dir, std::path::Path::new("${configDir}/mylar/series-a"));
     }
 
@@ -558,7 +578,10 @@ mod tests {
         let p1 = write_series_json(&dir, "Series A", false, &json).unwrap();
         assert_eq!(p1.file_name().unwrap().to_str().unwrap(), "series.json");
         let p2 = write_series_json(&dir, "Series B", true, &json).unwrap();
-        assert_eq!(p2.file_name().unwrap().to_str().unwrap(), "Series B.oneshot.json");
+        assert_eq!(
+            p2.file_name().unwrap().to_str().unwrap(),
+            "Series B.oneshot.json"
+        );
         let body = std::fs::read_to_string(&p1).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["version"], "1.0.2");

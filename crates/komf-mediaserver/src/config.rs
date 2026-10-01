@@ -43,7 +43,10 @@ impl Default for KavitaConfig {
         Self {
             base_uri: "http://localhost:5000".to_string(),
             api_key: String::new(),
-            event_listener: EventListenerConfig { enabled: false, ..Default::default() },
+            event_listener: EventListenerConfig {
+                enabled: false,
+                ..Default::default()
+            },
             metadata_update: MetadataUpdateConfig::default(),
         }
     }
@@ -70,7 +73,10 @@ impl Default for StumpConfig {
             username: String::new(),
             password: String::new(),
             api_key: String::new(),
-            event_listener: EventListenerConfig { enabled: false, ..Default::default() },
+            event_listener: EventListenerConfig {
+                enabled: false,
+                ..Default::default()
+            },
             metadata_update: MetadataUpdateConfig::default(),
         }
     }
@@ -303,7 +309,11 @@ impl Default for MetadataPostProcessingConfig {
             series_title: false,
             series_title_language: Some("en".to_string()),
             alternative_series_titles: false,
-            alternative_series_title_languages: vec!["en".to_string(), "ja".to_string(), "ja-ro".to_string()],
+            alternative_series_title_languages: vec![
+                "en".to_string(),
+                "ja".to_string(),
+                "ja-ro".to_string(),
+            ],
             fallback_to_alt_title: false,
             order_books: false,
             reading_direction_value: None,

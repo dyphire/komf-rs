@@ -139,7 +139,10 @@ impl MalClient {
         Self {
             http,
             oauth,
-            limiter: crate::rate_limiter::ThroughputLimiter::new(10, std::time::Duration::from_secs(10)),
+            limiter: crate::rate_limiter::ThroughputLimiter::new(
+                10,
+                std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -159,17 +162,13 @@ impl MalClient {
     pub async fn search(&self, name: &str) -> Result<Vec<MalManga>, ProviderError> {
         self.limiter.acquire().await;
         let response = self
-            .authorized(
-                self.http
-                    .get(format!("{BASE_URL}/manga"))
-                    .query(&[
-                        ("q", name),
-                        ("fields", SEARCH_FIELDS),
-                        // Kotlin MalClient: parameter("nsfw", "true") —— 不过滤成人向作品
-                        // Kotlin searchSeries 不传 limit（MAL 默认 100）。
-                        ("nsfw", "true"),
-                    ]),
-            )
+            .authorized(self.http.get(format!("{BASE_URL}/manga")).query(&[
+                ("q", name),
+                ("fields", SEARCH_FIELDS),
+                // Kotlin MalClient: parameter("nsfw", "true") —— 不过滤成人向作品
+                // Kotlin searchSeries 不传 limit（MAL 默认 100）。
+                ("nsfw", "true"),
+            ]))
             .await
             .send()
             .await?;
@@ -454,7 +453,6 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for MalMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"myanimelist\.net/(?:manga|anime)/(\d+)").ok()?;
         re.captures(query)

@@ -1,7 +1,8 @@
 //! 元数据后处理 —— 对应 `MetadataPostProcessor.kt`。
 use crate::model::{MediaServerBookId, SeriesAndBookMetadata};
 use komf_core::model::{
-    BookMetadata, MediaType, PublisherType, ReadingDirection, SeriesMetadata, SeriesTitle, TitleType,
+    BookMetadata, MediaType, PublisherType, ReadingDirection, SeriesMetadata, SeriesTitle,
+    TitleType,
 };
 use komf_core::util::{replace_fullwidth_chars, strip_accents, BookNameParser};
 use std::collections::HashMap;
@@ -108,16 +109,21 @@ impl MetadataPostProcessor {
             // localizedName 字段取第一个备选标题，配置优先的语言必须排在前面）。
             // 未配置 / 不在配置中的语言保留并回退原有逻辑：有语言标签的按字母序
             // 在前、无语言最后。
-            titles.sort_by(|a, b| match (self.language_priority(a.language.as_deref()), self.language_priority(b.language.as_deref())) {
-                (Some(x), Some(y)) => x.cmp(&y),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => match (&a.language, &b.language) {
-                    (Some(x), Some(y)) => x.cmp(y),
+            titles.sort_by(|a, b| {
+                match (
+                    self.language_priority(a.language.as_deref()),
+                    self.language_priority(b.language.as_deref()),
+                ) {
+                    (Some(x), Some(y)) => x.cmp(&y),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                },
+                    (None, None) => match (&a.language, &b.language) {
+                        (Some(x), Some(y)) => x.cmp(y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    },
+                }
             });
             titles
         } else {
@@ -129,8 +135,13 @@ impl MetadataPostProcessor {
             // provider 禁用备选写入只影响备选（series.titles 已按来源剔除），
             // 不影响主标题从全量候选选择；语言不匹配时 choose_series_title 返回 None
             // （不写入主标题，保持媒体服务器旧标题），除非显式开启 fallback_to_alt_title。
-            self.choose_series_title(all_titles)
-                .or_else(|| if self.fallback_to_alt_title { alt_titles.first().cloned() } else { None })
+            self.choose_series_title(all_titles).or_else(|| {
+                if self.fallback_to_alt_title {
+                    alt_titles.first().cloned()
+                } else {
+                    None
+                }
+            })
         } else {
             // seriesTitle=false：不写入系列主标题（保持媒体服务器旧标题）。
             None
@@ -172,7 +183,10 @@ impl MetadataPostProcessor {
             title: chosen_title,
             titles: alts_without_series_title,
             reading_direction: self.reading_direction_value.or(series.reading_direction),
-            language: series.language.clone().or_else(|| self.language_value.clone()),
+            language: series
+                .language
+                .clone()
+                .or_else(|| self.language_value.clone()),
             tags,
             ..series.clone()
         }
@@ -189,24 +203,19 @@ impl MetadataPostProcessor {
     }
 
     fn add_score_tag(&self, tags: &mut Vec<String>, series: &SeriesMetadata) {
-        let Some(tag_name) = &self.score_tag_name else { return };
-        let Some(score) = series.score.map(|s| s as i32) else { return };
+        let Some(tag_name) = &self.score_tag_name else {
+            return;
+        };
+        let Some(score) = series.score.map(|s| s as i32) else {
+            return;
+        };
         tags.push(format!("{tag_name}: {score}"));
     }
 
     fn add_original_publisher_tag(&self, tags: &mut Vec<String>, series: &SeriesMetadata) {
-        let Some(tag_name) = &self.original_publisher_tag_name else { return };
-        let publishers: Vec<_> = series
-            .alternative_publishers
-            .iter()
-            .chain(series.publisher.iter())
-            .collect();
-        if let Some(publisher) = publishers.iter().find(|p| p.r#type == Some(PublisherType::Original)) {
-            tags.push(format!("{tag_name}: {}", publisher.name));
-        }
-    }
-
-    fn add_publisher_tag(&self, tags: &mut Vec<String>, series: &SeriesMetadata, tag_name: &str, language: &str) {
+        let Some(tag_name) = &self.original_publisher_tag_name else {
+            return;
+        };
         let publishers: Vec<_> = series
             .alternative_publishers
             .iter()
@@ -214,8 +223,30 @@ impl MetadataPostProcessor {
             .collect();
         if let Some(publisher) = publishers
             .iter()
-            .find(|p| p.language_tag.as_deref().map(|l| l.eq_ignore_ascii_case(language)).unwrap_or(false))
+            .find(|p| p.r#type == Some(PublisherType::Original))
         {
+            tags.push(format!("{tag_name}: {}", publisher.name));
+        }
+    }
+
+    fn add_publisher_tag(
+        &self,
+        tags: &mut Vec<String>,
+        series: &SeriesMetadata,
+        tag_name: &str,
+        language: &str,
+    ) {
+        let publishers: Vec<_> = series
+            .alternative_publishers
+            .iter()
+            .chain(series.publisher.iter())
+            .collect();
+        if let Some(publisher) = publishers.iter().find(|p| {
+            p.language_tag
+                .as_deref()
+                .map(|l| l.eq_ignore_ascii_case(language))
+                .unwrap_or(false)
+        }) {
             tags.push(format!("{tag_name}: {}", publisher.name));
         }
     }
@@ -345,10 +376,12 @@ impl MetadataPostProcessor {
 
         let mut new_series_metadata = series_metadata;
         new_series_metadata.thumbnail = None; // series thumbnail should be null for oneshots
-        let oneshots: HashMap<MediaServerBookId, bool> =
-            new_book_metadata.keys().map(|id| (id.clone(), true)).collect();
-        let mut out =
-            SeriesAndBookMetadata::new(new_series_metadata, new_book_metadata).with_book_oneshots(oneshots);
+        let oneshots: HashMap<MediaServerBookId, bool> = new_book_metadata
+            .keys()
+            .map(|id| (id.clone(), true))
+            .collect();
+        let mut out = SeriesAndBookMetadata::new(new_series_metadata, new_book_metadata)
+            .with_book_oneshots(oneshots);
         out.excluded_alt_titles = excluded_alt_titles.to_vec();
         out
     }
@@ -370,13 +403,18 @@ fn dedup_score(title: &SeriesTitle) -> u8 {
 }
 
 /// 在真实排序场景（updater）中使用的按卷/章排序逻辑 —— 对应 Kotlin `orderBook`。
-pub fn order_book_by_name(library_type: MediaType, book_name: &str, metadata: &BookMetadata) -> BookMetadata {
+pub fn order_book_by_name(
+    library_type: MediaType,
+    book_name: &str,
+    metadata: &BookMetadata,
+) -> BookMetadata {
     let range = match library_type {
         MediaType::Manga => BookNameParser::get_volumes(book_name)
             .or_else(|| BookNameParser::get_chapters(book_name))
             .or_else(|| BookNameParser::get_book_number(book_name)),
         MediaType::Novel | MediaType::Comic => BookNameParser::get_book_number(book_name),
-        MediaType::Webtoon => BookNameParser::get_chapters(book_name).or_else(|| BookNameParser::get_book_number(book_name)),
+        MediaType::Webtoon => BookNameParser::get_chapters(book_name)
+            .or_else(|| BookNameParser::get_book_number(book_name)),
     };
 
     match range {
@@ -443,9 +481,14 @@ mod tests {
     /// 主标题尊重 seriesTitleLanguage 配置：配置 zh → name_cn
     #[test]
     fn series_title_respects_language_config() {
-        let out = processor(Some("zh".into()))
-            .process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        let out = processor(Some("zh".into())).process(&SeriesAndBookMetadata::new(
+            bangumi_series(),
+            HashMap::new(),
+        ));
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送的芙莉莲"
+        );
     }
 
     /// 完全匹配未命中时前缀匹配兜底：配置 zh 可命中 zh-Hant/zh-CN 标题
@@ -471,7 +514,10 @@ mod tests {
         ];
         let out = processor(Some("zh".into()))
             .process(&SeriesAndBookMetadata::new(series, HashMap::new()));
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉蓮");
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送的芙莉蓮"
+        );
     }
 
     /// 前缀匹配排除罗马音变体：配置 ja 时仅有 ja-ro（归一后的罗马音）不命中 → title 保持 None
@@ -499,8 +545,14 @@ mod tests {
     /// 未配置 seriesTitleLanguage → titles.first()（日文原名），不预设 name_cn 优先
     #[test]
     fn series_title_defaults_to_first_title() {
-        let out = processor(None).process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送のフリーレン");
+        let out = processor(None).process(&SeriesAndBookMetadata::new(
+            bangumi_series(),
+            HashMap::new(),
+        ));
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送のフリーレン"
+        );
     }
 
     /// seriesTitle 关闭时永不写入系列主标题（保持媒体服务器旧标题，
@@ -535,9 +587,16 @@ mod tests {
     /// 主标题（名字级）从备选中剔除，但同名不同语言的 name_cn 若未成为主标题则保留
     #[test]
     fn series_title_removed_from_alt_titles() {
-        let out = processor(Some("zh".into()))
-            .process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        let out = processor(Some("zh".into())).process(&SeriesAndBookMetadata::new(
+            bangumi_series(),
+            HashMap::new(),
+        ));
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         // 主标题 = 葬送的芙莉莲（zh），同名备选被 distinctName 剔除；语言排序 nullsLast：
         // 有语言(zh/en)在前、无语言(原名)在后
         assert_eq!(alts, vec!["Frieren", "葬送のフリーレン"]);
@@ -563,10 +622,21 @@ mod tests {
             None,
             vec![],
         );
-        let out = p.process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
+        let out = p.process(&SeriesAndBookMetadata::new(
+            bangumi_series(),
+            HashMap::new(),
+        ));
         // 主标题 = zh；en(0) 排在 zh(1) 前、无语言最后；zh 同名备选被主标题剔除
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送的芙莉莲"
+        );
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Frieren", "葬送のフリーレン"]);
     }
 
@@ -587,11 +657,22 @@ mod tests {
             None,
             vec![],
         );
-        let out = p.process(&SeriesAndBookMetadata::new(bangumi_series(), HashMap::new()));
+        let out = p.process(&SeriesAndBookMetadata::new(
+            bangumi_series(),
+            HashMap::new(),
+        ));
         // 配置 ["EN"]：en 命中（ignoreCase）排前；zh 不在配置但保留，
         // 按原有逻辑（字母序）排在配置语言之后、无语言之前
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送のフリーレン");
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送のフリーレン"
+        );
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Frieren", "葬送的芙莉莲"]);
     }
 
@@ -621,7 +702,12 @@ mod tests {
         let out = p.process(&SeriesAndBookMetadata::new(series, HashMap::new()));
         // 空配置：不过滤任何语言；排序回退原有逻辑——有语言(en,zh)按字母序
         // 在前（en < zh）、无语言最后
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Frieren", "葬送的芙莉莲", "葬送のフリーレン"]);
     }
 
@@ -633,19 +719,42 @@ mod tests {
         // 聚合后 series.titles：主 provider 在前，其他 provider 在后
         let series = SeriesMetadata {
             titles: vec![
-                SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }, // 主 provider 主标题
-                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("ja-ro".into()) }, // 主 provider 备选
-                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) }, // 其他 provider 同名（语言更靠前）
+                SeriesTitle {
+                    name: "ベルセルク".into(),
+                    r#type: None,
+                    language: None,
+                }, // 主 provider 主标题
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: Some("ja-ro".into()),
+                }, // 主 provider 备选
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: Some("en".into()),
+                }, // 其他 provider 同名（语言更靠前）
             ],
             ..Default::default()
         };
         let out = processor(None).process(&SeriesAndBookMetadata::new(series, HashMap::new()));
         // 主标题 = all.first() = ベルセルク → 剔除同名；Berserk 同名去重
         // → 保留主 provider 的 ja-ro（en 被去重）
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "ベルセルク"
+        );
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Berserk"]);
-        assert_eq!(out.series_metadata.titles[0].language.as_deref(), Some("ja-ro"));
+        assert_eq!(
+            out.series_metadata.titles[0].language.as_deref(),
+            Some("ja-ro")
+        );
     }
 
     /// 去重时同名标题优先保留有语言的：主 provider 的同名备选无语言、
@@ -655,18 +764,41 @@ mod tests {
     fn alt_titles_dedup_prefers_languaged() {
         let series = SeriesMetadata {
             titles: vec![
-                SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }, // 主 provider 主标题
-                SeriesTitle { name: "Berserk".into(), r#type: None, language: None }, // 主 provider 备选（无语言）
-                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) }, // 其他 provider 同名（有语言）
+                SeriesTitle {
+                    name: "ベルセルク".into(),
+                    r#type: None,
+                    language: None,
+                }, // 主 provider 主标题
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: None,
+                }, // 主 provider 备选（无语言）
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: Some("en".into()),
+                }, // 其他 provider 同名（有语言）
             ],
             ..Default::default()
         };
         let out = processor(None).process(&SeriesAndBookMetadata::new(series, HashMap::new()));
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "ベルセルク"
+        );
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Berserk"]);
         // 无语言的让位 → 保留有语言的 en 版本
-        assert_eq!(out.series_metadata.titles[0].language.as_deref(), Some("en"));
+        assert_eq!(
+            out.series_metadata.titles[0].language.as_deref(),
+            Some("en")
+        );
     }
 
     /// 同名时无语言的 Native 优先于有语言的非 Native：原始名（Native 无语言）
@@ -675,19 +807,42 @@ mod tests {
     fn alt_titles_dedup_prefers_native_unlanguaged() {
         let series = SeriesMetadata {
             titles: vec![
-                SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }, // 主 provider 主标题
-                SeriesTitle { name: "Berserk".into(), r#type: Some(TitleType::Native), language: None }, // 主 provider 备选（Native 无语言）
-                SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) }, // 其他 provider 同名（有语言非 Native）
+                SeriesTitle {
+                    name: "ベルセルク".into(),
+                    r#type: None,
+                    language: None,
+                }, // 主 provider 主标题
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: Some(TitleType::Native),
+                    language: None,
+                }, // 主 provider 备选（Native 无语言）
+                SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: Some("en".into()),
+                }, // 其他 provider 同名（有语言非 Native）
             ],
             ..Default::default()
         };
         let out = processor(None).process(&SeriesAndBookMetadata::new(series, HashMap::new()));
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "ベルセルク"
+        );
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Berserk"]);
         // Native 无语言优先 → 保留 None/Native 版本（en 被让位）
         assert!(out.series_metadata.titles[0].language.is_none());
-        assert_eq!(out.series_metadata.titles[0].r#type, Some(TitleType::Native));
+        assert_eq!(
+            out.series_metadata.titles[0].r#type,
+            Some(TitleType::Native)
+        );
     }
 
     /// alternativeTitles=false（excluded=全量标题名）：主标题语言选择仍基于全量候选，
@@ -700,7 +855,10 @@ mod tests {
         input.excluded_alt_titles = excluded;
         let out = processor(Some("zh".into())).process(&input);
         // 主标题仍为 zh（若提前 truncate(1) 则此处会回退为原名或 None）
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送的芙莉莲"
+        );
         assert!(out.series_metadata.titles.is_empty());
     }
 
@@ -711,8 +869,16 @@ mod tests {
         let mut input = SeriesAndBookMetadata::new(series, HashMap::new());
         input.excluded_alt_titles = vec!["Frieren".to_string()];
         let out = processor(Some("zh".into())).process(&input);
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送的芙莉莲"
+        );
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["葬送のフリーレン"]);
     }
 
@@ -763,10 +929,18 @@ mod tests {
         ];
         input.excluded_alt_titles = Vec::new(); // 聚合下名单已置空
         let out = processor(None).process(&input); // 未配置系列标题语言 → 取全量候选第一个
-        // 主标题 = 全量候选第一个（ベルセルク，来自禁写备选的 provider，仍可作主标题）
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "ベルセルク");
+                                                   // 主标题 = 全量候选第一个（ベルセルク，来自禁写备选的 provider，仍可作主标题）
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "ベルセルク"
+        );
         // 备选 = series.titles（已剔除主 provider 标题）剔除主标题 → Berserk + 剣風伝奇ベルセルク
-        let alts: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        let alts: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(alts, vec!["Berserk", "剣風伝奇ベルセルク"]);
     }
 }

@@ -57,8 +57,7 @@ async fn main() {
             println!("NONE (未能解析)");
             // 直接调用底层 client 定位原因
             println!("\n== [2b] BangumiClient::get(412571) 详情 ==");
-            let client =
-                komf_core::providers::bangumi::BangumiClient::new(http.clone(), None);
+            let client = komf_core::providers::bangumi::BangumiClient::new(http.clone(), None);
             match client.get(412571).await {
                 Ok(s) => println!("OK: id={} name={:?} name_cn={:?}", s.id, s.name, s.name_cn),
                 Err(e) => println!("ERR: {e:?}"),

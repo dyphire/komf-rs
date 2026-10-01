@@ -30,11 +30,7 @@ pub fn long_download_client() -> Result<reqwest::Client, String> {
 
 /// 通用指数退避重试：`op` 每次调用为一次尝试（含首次），失败按 `delays` 睡眠后重试。
 /// `tag` 仅用于日志（如 `"bangumi archive download"`），`E` 只需可打印。
-pub async fn with_retry_delays<T, E, F, Fut>(
-    tag: &str,
-    delays: &[u64],
-    mut op: F,
-) -> Result<T, E>
+pub async fn with_retry_delays<T, E, F, Fut>(tag: &str, delays: &[u64], mut op: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -248,7 +244,9 @@ mod tests {
     #[test]
     fn retryable_status_classification() {
         assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
         assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(reqwest::StatusCode::OK));
         assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));

@@ -511,11 +511,19 @@ impl KomgaClient {
     }
 
     async fn get_series_dto(&self, series_id: &str) -> Result<KomgaSeriesDto, MediaServerError> {
-        self.send_json(self.http.get(self.url(&format!("{API_PREFIX}/series/{series_id}")))).await
+        self.send_json(
+            self.http
+                .get(self.url(&format!("{API_PREFIX}/series/{series_id}"))),
+        )
+        .await
     }
 
     async fn get_book_dto(&self, book_id: &str) -> Result<KomgaBookDto, MediaServerError> {
-        self.send_json(self.http.get(self.url(&format!("{API_PREFIX}/books/{book_id}")))).await
+        self.send_json(
+            self.http
+                .get(self.url(&format!("{API_PREFIX}/books/{book_id}"))),
+        )
+        .await
     }
 
     fn to_series(&self, dto: &KomgaSeriesDto) -> MediaServerSeries {
@@ -538,7 +546,10 @@ impl KomgaClient {
                     })
                     .collect(),
                 summary: metadata.summary.clone(),
-                reading_direction: metadata.reading_direction.as_deref().and_then(map_komga_reading_direction),
+                reading_direction: metadata
+                    .reading_direction
+                    .as_deref()
+                    .and_then(map_komga_reading_direction),
                 publisher: metadata.publisher.clone(),
                 alternative_publishers: Vec::new(),
                 age_rating: metadata.age_rating,
@@ -548,7 +559,14 @@ impl KomgaClient {
                 total_book_count: metadata.total_book_count,
                 authors: Vec::new(),
                 release_year: None,
-                links: metadata.links.iter().map(|l| WebLink { label: l.label.clone(), url: l.url.clone() }).collect(),
+                links: metadata
+                    .links
+                    .iter()
+                    .map(|l| WebLink {
+                        label: l.label.clone(),
+                        url: l.url.clone(),
+                    })
+                    .collect(),
                 status_lock: metadata.status_lock,
                 title_lock: metadata.title_lock,
                 title_sort_lock: metadata.title_sort_lock,
@@ -610,10 +628,24 @@ impl KomgaClient {
                 number: metadata.number.clone().unwrap_or_default(),
                 number_sort: Some(kotlin_float_string(metadata.number_sort)),
                 release_date: metadata.release_date.clone(),
-                authors: metadata.authors.iter().map(|a| MediaServerAuthor { name: a.name.clone(), role: a.role.clone() }).collect(),
+                authors: metadata
+                    .authors
+                    .iter()
+                    .map(|a| MediaServerAuthor {
+                        name: a.name.clone(),
+                        role: a.role.clone(),
+                    })
+                    .collect(),
                 tags: metadata.tags.clone(),
                 isbn: metadata.isbn.clone(),
-                links: metadata.links.iter().map(|l| WebLink { label: l.label.clone(), url: l.url.clone() }).collect(),
+                links: metadata
+                    .links
+                    .iter()
+                    .map(|l| WebLink {
+                        label: l.label.clone(),
+                        url: l.url.clone(),
+                    })
+                    .collect(),
                 title_lock: metadata.title_lock,
                 summary_lock: metadata.summary_lock,
                 number_lock: metadata.number_lock,
@@ -665,7 +697,11 @@ fn map_komga_reading_direction(direction: &str) -> Option<ReadingDirection> {
 /// 未锁定字段正常重置。lock 字段本身一律不发送，Komga 现有 lock 状态不变。
 /// 注意：Kotlin 原版 reset 请求发 Some(false) 会解锁所有字段，本实现为改进（用户要求尊重 lock）。
 fn unless_locked<T>(locked: bool, value: Option<Option<T>>) -> Option<Option<T>> {
-    if locked { None } else { value }
+    if locked {
+        None
+    } else {
+        value
+    }
 }
 
 pub fn series_metadata_reset_request(
@@ -673,7 +709,10 @@ pub fn series_metadata_reset_request(
     metadata: &MediaServerSeriesMetadata,
 ) -> KomgaSeriesMetadataUpdateRequest {
     KomgaSeriesMetadataUpdateRequest {
-        status: unless_locked(metadata.status_lock, Some(Some(Some("ONGOING".to_string())))),
+        status: unless_locked(
+            metadata.status_lock,
+            Some(Some(Some("ONGOING".to_string()))),
+        ),
         title: unless_locked(metadata.title_lock, Some(Some(name.to_string()))),
         title_sort: unless_locked(metadata.title_sort_lock, Some(Some(name.to_string()))),
         alternate_titles: unless_locked(metadata.alternative_titles_lock, Some(None)),
@@ -708,8 +747,12 @@ pub fn book_metadata_reset_request(
     book_number: Option<i32>,
     metadata: &MediaServerBookMetadata,
 ) -> KomgaBookMetadataUpdateRequest {
-    let number_value = book_number.map(|n| Some(Some(n.to_string()))).unwrap_or(Some(None));
-    let number_sort_value = book_number.map(|n| Some(Some(n as f64))).unwrap_or(Some(None));
+    let number_value = book_number
+        .map(|n| Some(Some(n.to_string())))
+        .unwrap_or(Some(None));
+    let number_sort_value = book_number
+        .map(|n| Some(Some(n as f64)))
+        .unwrap_or(Some(None));
     KomgaBookMetadataUpdateRequest {
         title: unless_locked(metadata.title_lock, Some(Some(name.to_string()))),
         summary: unless_locked(metadata.summary_lock, Some(Some(String::new()))),
@@ -782,14 +825,12 @@ pub fn to_series_update_request(
                                 .clone()
                                 .unwrap_or_else(|| TitleType::Native.label().to_string()),
                         ),
-                        Some(TitleType::Localized) => Some(
-                            language.clone().unwrap_or_else(|| {
-                                alternate_title_labels
-                                    .localized
-                                    .clone()
-                                    .unwrap_or_else(|| TitleType::Localized.label().to_string())
-                            }),
-                        ),
+                        Some(TitleType::Localized) => Some(language.clone().unwrap_or_else(|| {
+                            alternate_title_labels
+                                .localized
+                                .clone()
+                                .unwrap_or_else(|| TitleType::Localized.label().to_string())
+                        })),
                         None => language.clone(),
                     }?;
                     let dto = KomgaAlternateTitleDto {
@@ -816,7 +857,10 @@ pub fn to_series_update_request(
         links: patch(update.links.as_ref().map(|links| {
             links
                 .iter()
-                .map(|l| KomgaWebLinkDto { label: l.label.clone(), url: l.url.clone() })
+                .map(|l| KomgaWebLinkDto {
+                    label: l.label.clone(),
+                    url: l.url.clone(),
+                })
                 .collect()
         })),
         status_lock: patch(update.status_lock),
@@ -836,7 +880,9 @@ pub fn to_series_update_request(
 }
 
 /// 从内部更新模型转 Komga 书籍元数据请求 —— 对应 Kotlin `toKomgaMetadataUpdate`。
-pub fn to_book_update_request(update: &MediaServerBookMetadataUpdate) -> KomgaBookMetadataUpdateRequest {
+pub fn to_book_update_request(
+    update: &MediaServerBookMetadataUpdate,
+) -> KomgaBookMetadataUpdateRequest {
     fn patch<T>(value: Option<T>) -> PatchValue<T> {
         value.map(Some)
     }
@@ -850,7 +896,10 @@ pub fn to_book_update_request(update: &MediaServerBookMetadataUpdate) -> KomgaBo
         authors: patch(update.authors.as_ref().map(|authors| {
             authors
                 .iter()
-                .map(|a| KomgaAuthorDto { name: a.name.clone(), role: a.role.to_lowercase() })
+                .map(|a| KomgaAuthorDto {
+                    name: a.name.clone(),
+                    role: a.role.to_lowercase(),
+                })
                 .collect()
         })),
         tags: patch(update.tags.clone()),
@@ -858,7 +907,10 @@ pub fn to_book_update_request(update: &MediaServerBookMetadataUpdate) -> KomgaBo
         links: patch(update.links.as_ref().map(|links| {
             links
                 .iter()
-                .map(|l| KomgaWebLinkDto { label: l.label.clone(), url: l.url.clone() })
+                .map(|l| KomgaWebLinkDto {
+                    label: l.label.clone(),
+                    url: l.url.clone(),
+                })
                 .collect()
         })),
         title_lock: patch(update.title_lock),
@@ -875,7 +927,10 @@ pub fn to_book_update_request(update: &MediaServerBookMetadataUpdate) -> KomgaBo
 
 #[async_trait::async_trait]
 impl MediaServerClient for KomgaClient {
-    async fn get_series(&self, series_id: &MediaServerSeriesId) -> Result<MediaServerSeries, MediaServerError> {
+    async fn get_series(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<MediaServerSeries, MediaServerError> {
         let dto = self.get_series_dto(&series_id.0).await?;
         Ok(self.to_series(&dto))
     }
@@ -933,7 +988,10 @@ impl MediaServerClient for KomgaClient {
         })
     }
 
-    async fn get_series_thumbnail(&self, series_id: &MediaServerSeriesId) -> Result<Option<Image>, MediaServerError> {
+    async fn get_series_thumbnail(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Option<Image>, MediaServerError> {
         // Kotlin `runCatching { getDefaultThumbnail() }.getOrNull()`：任何失败都返回 null。
         match self
             .send(
@@ -972,12 +1030,18 @@ impl MediaServerClient for KomgaClient {
             .collect())
     }
 
-    async fn get_book(&self, book_id: &MediaServerBookId) -> Result<MediaServerBook, MediaServerError> {
+    async fn get_book(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<MediaServerBook, MediaServerError> {
         let dto = self.get_book_dto(&book_id.0).await?;
         Ok(self.to_book(&dto))
     }
 
-    async fn get_books(&self, series_id: &MediaServerSeriesId) -> Result<Vec<MediaServerBook>, MediaServerError> {
+    async fn get_books(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Vec<MediaServerBook>, MediaServerError> {
         // Komga ≥1.19：GET /api/v1/books 与 GET /api/v1/series/{id}/books 均已废弃，
         // 改用 POST /api/v1/books/list（Kotlin komga-client 同款）。分页在 query，
         // 过滤条件在 body，wire 对齐 komga-client 的 sealed 序列化
@@ -1047,7 +1111,10 @@ impl MediaServerClient for KomgaClient {
             .collect())
     }
 
-    async fn get_book_thumbnail(&self, book_id: &MediaServerBookId) -> Result<Option<Image>, MediaServerError> {
+    async fn get_book_thumbnail(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<Option<Image>, MediaServerError> {
         // Kotlin `runCatching { getDefaultThumbnail() }.getOrNull()`：任何失败都返回 null。
         match self
             .send(
@@ -1064,9 +1131,15 @@ impl MediaServerClient for KomgaClient {
         }
     }
 
-    async fn get_library(&self, library_id: &MediaServerLibraryId) -> Result<MediaServerLibrary, MediaServerError> {
+    async fn get_library(
+        &self,
+        library_id: &MediaServerLibraryId,
+    ) -> Result<MediaServerLibrary, MediaServerError> {
         let dto: KomgaLibraryDto = self
-            .send_json(self.http.get(self.url(&format!("{API_PREFIX}/libraries/{}", library_id.0))))
+            .send_json(
+                self.http
+                    .get(self.url(&format!("{API_PREFIX}/libraries/{}", library_id.0))),
+            )
             .await?;
         Ok(MediaServerLibrary {
             id: MediaServerLibraryId(dto.id),
@@ -1119,7 +1192,11 @@ impl MediaServerClient for KomgaClient {
             "ordered": false,
         });
         let dto: KomgaCollectionDto = self
-            .send_json(self.http.post(self.url(&format!("{API_PREFIX}/collections"))).json(&body))
+            .send_json(
+                self.http
+                    .post(self.url(&format!("{API_PREFIX}/collections")))
+                    .json(&body),
+            )
             .await?;
         Ok(MediaServerCollection {
             id: dto.id,
@@ -1315,7 +1392,10 @@ impl MediaServerClient for KomgaClient {
                 }
                 continue 'round;
             }
-            let mime = attempt.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+            let mime = attempt
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string());
             // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
             let had_session = self.has_session().await;
             let mut retried = false;
@@ -1328,7 +1408,12 @@ impl MediaServerClient for KomgaClient {
                 let response = self
                     .send(
                         self.http
-                            .post(self.url(&format!("{API_PREFIX}/series/{}/thumbnails", series_id.0)))
+                            .post(
+                                self.url(&format!(
+                                    "{API_PREFIX}/series/{}/thumbnails",
+                                    series_id.0
+                                )),
+                            )
                             .query(&[("selected", selected.to_string())])
                             .multipart(form),
                     )
@@ -1366,7 +1451,9 @@ impl MediaServerClient for KomgaClient {
             };
             return Ok(Some(MediaServerSeriesThumbnail {
                 id: MediaServerThumbnailId(dto.id),
-                series_id: MediaServerSeriesId(dto.series_id.unwrap_or_else(|| series_id.0.clone())),
+                series_id: MediaServerSeriesId(
+                    dto.series_id.unwrap_or_else(|| series_id.0.clone()),
+                ),
                 r#type: dto.r#type,
                 selected: dto.selected,
                 file_size: dto.file_size,
@@ -1416,7 +1503,10 @@ impl MediaServerClient for KomgaClient {
                 }
                 continue 'round;
             }
-            let mime = attempt.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+            let mime = attempt
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string());
             // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
             let had_session = self.has_session().await;
             let mut retried = false;
@@ -1503,14 +1593,40 @@ impl MediaServerClient for KomgaClient {
 /// Komga SSE 事件解析（`/sse/v1/events`）。
 #[derive(Debug, Clone)]
 pub enum KomgaEvent {
-    SeriesAdded { series_id: String, library_id: String },
-    SeriesChanged { series_id: String, library_id: String },
-    SeriesDeleted { series_id: String, library_id: String },
-    BookAdded { book_id: String, series_id: String, library_id: String },
-    BookChanged { book_id: String, series_id: String, library_id: String },
-    BookDeleted { book_id: String, series_id: String, library_id: String },
-    TaskQueueStatus { count: i64 },
-    Other { r#type: String, data: String },
+    SeriesAdded {
+        series_id: String,
+        library_id: String,
+    },
+    SeriesChanged {
+        series_id: String,
+        library_id: String,
+    },
+    SeriesDeleted {
+        series_id: String,
+        library_id: String,
+    },
+    BookAdded {
+        book_id: String,
+        series_id: String,
+        library_id: String,
+    },
+    BookChanged {
+        book_id: String,
+        series_id: String,
+        library_id: String,
+    },
+    BookDeleted {
+        book_id: String,
+        series_id: String,
+        library_id: String,
+    },
+    TaskQueueStatus {
+        count: i64,
+    },
+    Other {
+        r#type: String,
+        data: String,
+    },
 }
 
 impl KomgaEvent {
@@ -1530,34 +1646,82 @@ impl KomgaEvent {
                         .unwrap_or_default()
                         .to_string();
                     return match event_type {
-                        "SeriesAdded" => KomgaEvent::SeriesAdded { series_id, library_id },
-                        "SeriesChanged" => KomgaEvent::SeriesChanged { series_id, library_id },
-                        _ => KomgaEvent::SeriesDeleted { series_id, library_id },
+                        "SeriesAdded" => KomgaEvent::SeriesAdded {
+                            series_id,
+                            library_id,
+                        },
+                        "SeriesChanged" => KomgaEvent::SeriesChanged {
+                            series_id,
+                            library_id,
+                        },
+                        _ => KomgaEvent::SeriesDeleted {
+                            series_id,
+                            library_id,
+                        },
                     };
                 }
-                KomgaEvent::Other { r#type: event_type.to_string(), data: data.to_string() }
+                KomgaEvent::Other {
+                    r#type: event_type.to_string(),
+                    data: data.to_string(),
+                }
             }
             "BookAdded" | "BookChanged" | "BookDeleted" => {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-                    let book_id = value.pointer("/bookId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                    let series_id = value.pointer("/seriesId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                    let library_id = value.pointer("/libraryId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let book_id = value
+                        .pointer("/bookId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let series_id = value
+                        .pointer("/seriesId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let library_id = value
+                        .pointer("/libraryId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     return match event_type {
-                        "BookAdded" => KomgaEvent::BookAdded { book_id, series_id, library_id },
-                        "BookChanged" => KomgaEvent::BookChanged { book_id, series_id, library_id },
-                        _ => KomgaEvent::BookDeleted { book_id, series_id, library_id },
+                        "BookAdded" => KomgaEvent::BookAdded {
+                            book_id,
+                            series_id,
+                            library_id,
+                        },
+                        "BookChanged" => KomgaEvent::BookChanged {
+                            book_id,
+                            series_id,
+                            library_id,
+                        },
+                        _ => KomgaEvent::BookDeleted {
+                            book_id,
+                            series_id,
+                            library_id,
+                        },
                     };
                 }
-                KomgaEvent::Other { r#type: event_type.to_string(), data: data.to_string() }
+                KomgaEvent::Other {
+                    r#type: event_type.to_string(),
+                    data: data.to_string(),
+                }
             }
             "TaskQueueStatus" => {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-                    let count = value.pointer("/count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let count = value
+                        .pointer("/count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
                     return KomgaEvent::TaskQueueStatus { count };
                 }
-                KomgaEvent::Other { r#type: event_type.to_string(), data: data.to_string() }
+                KomgaEvent::Other {
+                    r#type: event_type.to_string(),
+                    data: data.to_string(),
+                }
             }
-            _ => KomgaEvent::Other { r#type: event_type.to_string(), data: data.to_string() },
+            _ => KomgaEvent::Other {
+                r#type: event_type.to_string(),
+                data: data.to_string(),
+            },
         }
     }
 }
@@ -1570,7 +1734,9 @@ mod tests {
         serde_json::to_value(value).unwrap()
     }
 
-    fn update_request(update: &MediaServerSeriesMetadataUpdate) -> KomgaSeriesMetadataUpdateRequest {
+    fn update_request(
+        update: &MediaServerSeriesMetadataUpdate,
+    ) -> KomgaSeriesMetadataUpdateRequest {
         to_series_update_request(
             update,
             &AlternateTitleLabelsConfig::default(),
@@ -1716,7 +1882,10 @@ mod tests {
         let v = json(&req);
         assert!(v.get("title").is_none(), "locked title must be omitted");
         assert!(v.get("number").is_none(), "locked number must be omitted");
-        assert!(v.get("numberSort").is_none(), "locked numberSort must be omitted");
+        assert!(
+            v.get("numberSort").is_none(),
+            "locked numberSort must be omitted"
+        );
         assert_eq!(v["summary"], "");
         assert_eq!(v["authors"], serde_json::json!([]));
         assert!(v.get("titleLock").is_none(), "lock fields always omitted");
@@ -1724,7 +1893,8 @@ mod tests {
 
     #[test]
     fn book_reset_request_omits_none_fields() {
-        let req = book_metadata_reset_request("Chapter 1", Some(12), &MediaServerBookMetadata::default());
+        let req =
+            book_metadata_reset_request("Chapter 1", Some(12), &MediaServerBookMetadata::default());
         let v = json(&req);
         assert_eq!(v["title"], "Chapter 1");
         assert_eq!(v["summary"], "");
@@ -1742,7 +1912,8 @@ mod tests {
             );
         }
         // bookNumber 为 null 时 number/numberSort 同样输出 null（Kotlin PatchValue.None）
-        let req_none = book_metadata_reset_request("Oneshot", None, &MediaServerBookMetadata::default());
+        let req_none =
+            book_metadata_reset_request("Oneshot", None, &MediaServerBookMetadata::default());
         let v2 = json(&req_none);
         assert_eq!(v2.get("number"), Some(&serde_json::Value::Null));
         assert_eq!(v2.get("numberSort"), Some(&serde_json::Value::Null));
@@ -1761,9 +1932,17 @@ mod tests {
             alternative_titles: Some(vec![
                 ("soredemo".to_string(), Some(TitleType::Romaji), None),
                 ("それでも".to_string(), Some(TitleType::Native), None),
-                ("Soredemo".to_string(), Some(TitleType::Localized), Some("en".to_string())),
+                (
+                    "Soredemo".to_string(),
+                    Some(TitleType::Localized),
+                    Some("en".to_string()),
+                ),
                 ("無言語".to_string(), Some(TitleType::Localized), None),
-                ("中文名".to_string(), Some(TitleType::Localized), Some("zh".to_string())),
+                (
+                    "中文名".to_string(),
+                    Some(TitleType::Localized),
+                    Some("zh".to_string()),
+                ),
             ]),
             ..series_update_base()
         };
@@ -1775,7 +1954,12 @@ mod tests {
         let titles = v["alternateTitles"].as_array().unwrap();
         let pairs: Vec<(String, String)> = titles
             .iter()
-            .map(|t| (t["label"].as_str().unwrap().to_string(), t["title"].as_str().unwrap().to_string()))
+            .map(|t| {
+                (
+                    t["label"].as_str().unwrap().to_string(),
+                    t["title"].as_str().unwrap().to_string(),
+                )
+            })
             .collect();
         assert_eq!(
             pairs,
@@ -1841,10 +2025,18 @@ mod tests {
         let update = MediaServerSeriesMetadataUpdate {
             alternative_titles: Some(vec![
                 ("soredemo".to_string(), Some(TitleType::Romaji), None),
-                ("Soredemo".to_string(), Some(TitleType::Localized), Some("en".to_string())),
+                (
+                    "Soredemo".to_string(),
+                    Some(TitleType::Localized),
+                    Some("en".to_string()),
+                ),
                 ("それでも".to_string(), Some(TitleType::Native), None),
                 ("dropped-no-language".to_string(), None, None),
-                ("kept-with-language".to_string(), None, Some("ja".to_string())),
+                (
+                    "kept-with-language".to_string(),
+                    None,
+                    Some("ja".to_string()),
+                ),
                 ("dropped-language".to_string(), None, Some("fr".to_string())),
                 ("soredemo".to_string(), Some(TitleType::Romaji), None), // 与第一条 title 相同 → 去重
             ]),
@@ -1854,7 +2046,12 @@ mod tests {
         let titles = v["alternateTitles"].as_array().unwrap();
         let pairs: Vec<(String, String)> = titles
             .iter()
-            .map(|t| (t["label"].as_str().unwrap().to_string(), t["title"].as_str().unwrap().to_string()))
+            .map(|t| {
+                (
+                    t["label"].as_str().unwrap().to_string(),
+                    t["title"].as_str().unwrap().to_string(),
+                )
+            })
             .collect();
         assert_eq!(
             pairs,
@@ -1915,7 +2112,11 @@ mod tests {
             r#"{"bookId":"b1","seriesId":"s1","libraryId":"l1","title":"x"}"#,
         );
         match event {
-            KomgaEvent::BookAdded { book_id, series_id, library_id } => {
+            KomgaEvent::BookAdded {
+                book_id,
+                series_id,
+                library_id,
+            } => {
                 assert_eq!(book_id, "b1");
                 assert_eq!(series_id, "s1");
                 assert_eq!(library_id, "l1");
@@ -1935,12 +2136,12 @@ mod tests {
 
     #[test]
     fn parse_series_changed_event() {
-        let event = KomgaEvent::parse(
-            "SeriesChanged",
-            r#"{"seriesId":"s1","libraryId":"l1"}"#,
-        );
+        let event = KomgaEvent::parse("SeriesChanged", r#"{"seriesId":"s1","libraryId":"l1"}"#);
         match event {
-            KomgaEvent::SeriesChanged { series_id, library_id } => {
+            KomgaEvent::SeriesChanged {
+                series_id,
+                library_id,
+            } => {
                 assert_eq!(series_id, "s1");
                 assert_eq!(library_id, "l1");
             }
@@ -1955,7 +2156,11 @@ mod tests {
             r#"{"bookId":"b1","seriesId":"s1","libraryId":"l1"}"#,
         );
         match event {
-            KomgaEvent::BookChanged { book_id, series_id, library_id } => {
+            KomgaEvent::BookChanged {
+                book_id,
+                series_id,
+                library_id,
+            } => {
                 assert_eq!(book_id, "b1");
                 assert_eq!(series_id, "s1");
                 assert_eq!(library_id, "l1");
@@ -1996,13 +2201,19 @@ mod tests {
             ("set-cookie", "KOMGA-SESSION=abc123; Path=/; HttpOnly"),
         ]));
         assert_eq!(session.auth_token.as_deref(), Some("session-id-1"));
-        assert_eq!(session.cookies.get("KOMGA-SESSION").map(String::as_str), Some("abc123"));
+        assert_eq!(
+            session.cookies.get("KOMGA-SESSION").map(String::as_str),
+            Some("abc123")
+        );
 
         // 服务端轮换即跟随：新 token 覆盖旧值。
         session.store_from_headers(&headers(&[("x-auth-token", "session-id-2")]));
         assert_eq!(session.auth_token.as_deref(), Some("session-id-2"));
         // cookie 不受影响（本次响应没带 Set-Cookie）。
-        assert_eq!(session.cookies.get("KOMGA-SESSION").map(String::as_str), Some("abc123"));
+        assert_eq!(
+            session.cookies.get("KOMGA-SESSION").map(String::as_str),
+            Some("abc123")
+        );
     }
 
     #[test]
@@ -2025,15 +2236,32 @@ mod tests {
     async fn auth_prefers_session_over_credentials() {
         let client = session_test_client("");
         // 无会话：Basic + 空 X-Auth-Token（请服务端返回会话）。
-        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = client
+            .attach_auth(
+                client.http.get("http://localhost:25600/api/v1/libraries"),
+                false,
+            )
+            .await;
         let req = req.build().unwrap();
-        let auth = req.headers().get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap();
+        let auth = req
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(auth.starts_with("Basic "), "unexpected auth: {auth}");
         assert!(req.headers().contains_key(X_AUTH_TOKEN));
 
         // 存下会话后：只带 X-Auth-Token，不再带 Authorization。
-        client.store_session(&headers(&[("x-auth-token", "session-id-1")])).await;
-        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        client
+            .store_session(&headers(&[("x-auth-token", "session-id-1")]))
+            .await;
+        let req = client
+            .attach_auth(
+                client.http.get("http://localhost:25600/api/v1/libraries"),
+                false,
+            )
+            .await;
         let req = req.build().unwrap();
         assert_eq!(req.headers().get(X_AUTH_TOKEN).unwrap(), "session-id-1");
         assert!(!req.headers().contains_key(reqwest::header::AUTHORIZATION));
@@ -2044,23 +2272,46 @@ mod tests {
     async fn auth_cookie_fallback_without_credentials() {
         let client = session_test_client("");
         client
-            .store_session(&headers(&[("set-cookie", "KOMGA-SESSION=abc123; Path=/; HttpOnly")]))
+            .store_session(&headers(&[(
+                "set-cookie",
+                "KOMGA-SESSION=abc123; Path=/; HttpOnly",
+            )]))
             .await;
-        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = client
+            .attach_auth(
+                client.http.get("http://localhost:25600/api/v1/libraries"),
+                false,
+            )
+            .await;
         let req = req.build().unwrap();
-        assert_eq!(req.headers().get(reqwest::header::COOKIE).unwrap(), "KOMGA-SESSION=abc123");
+        assert_eq!(
+            req.headers().get(reqwest::header::COOKIE).unwrap(),
+            "KOMGA-SESSION=abc123"
+        );
         assert!(!req.headers().contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[tokio::test]
     async fn auth_api_key_mode_uses_session_after_login() {
         let client = session_test_client("test-api-key");
-        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        let req = client
+            .attach_auth(
+                client.http.get("http://localhost:25600/api/v1/libraries"),
+                false,
+            )
+            .await;
         let req = req.build().unwrap();
         assert_eq!(req.headers().get("x-api-key").unwrap(), "test-api-key");
 
-        client.store_session(&headers(&[("x-auth-token", "session-id-9")])).await;
-        let req = client.attach_auth(client.http.get("http://localhost:25600/api/v1/libraries"), false).await;
+        client
+            .store_session(&headers(&[("x-auth-token", "session-id-9")]))
+            .await;
+        let req = client
+            .attach_auth(
+                client.http.get("http://localhost:25600/api/v1/libraries"),
+                false,
+            )
+            .await;
         let req = req.build().unwrap();
         assert_eq!(req.headers().get(X_AUTH_TOKEN).unwrap(), "session-id-9");
         assert!(!req.headers().contains_key("x-api-key"));

@@ -9,17 +9,17 @@
 //! - Kavita 事件监听（`kavita_signalr.rs`）：Kotlin 版经 SignalR hub `/hubs/messages`
 //!   实时接收扫描事件，Rust 移植以 SignalR over SSE transport 实现，语义一致。
 use crate::client::MediaServerClient;
-use crate::jobs::{MetadataJobEvent, MetadataJobId, KomfJobTracker, KomfJobsRepository};
+use crate::jobs::{KomfJobTracker, KomfJobsRepository, MetadataJobEvent, MetadataJobId};
 use crate::komga::KomgaClient;
 use crate::metadata_service::MetadataServiceProvider;
 use crate::model::{MediaServer, MediaServerBookId, MediaServerLibraryId, MediaServerSeriesId};
+use futures::StreamExt;
+use komf_notifications::apprise::AppriseCliService;
 use komf_notifications::context::{
     AlternativeTitleContext, AuthorContext, BookContext, BookMetadataContext, LibraryContext,
     NotificationContext, SeriesContext, SeriesMetadataContext, WebLinkContext,
 };
-use komf_notifications::apprise::AppriseCliService;
 use komf_notifications::discord::DiscordWebhookService;
-use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -141,14 +141,20 @@ impl MediaServerEventListener for MetadataEventHandler {
 
     async fn on_books_deleted(&self, events: &[BookEvent]) {
         for event in events {
-            let _ = self.repository.delete_book_thumbnail(&event.book_id, self.media_server);
+            let _ = self
+                .repository
+                .delete_book_thumbnail(&event.book_id, self.media_server);
         }
     }
 
     async fn on_series_deleted(&self, events: &[SeriesEvent]) {
         for event in events {
-            let _ = self.repository.delete_series_thumbnail(&event.series_id, self.media_server);
-            let _ = self.repository.delete_series_match(&event.series_id, self.media_server);
+            let _ = self
+                .repository
+                .delete_series_thumbnail(&event.series_id, self.media_server);
+            let _ = self
+                .repository
+                .delete_series_match(&event.series_id, self.media_server);
         }
     }
 }
@@ -189,7 +195,10 @@ impl MediaServerEventListener for NotificationsEventHandler {
         let mut grouped: HashMap<MediaServerSeriesId, Vec<MediaServerBookId>> = HashMap::new();
         for event in events {
             if library_allowed(&self.library_filter, &event.library_id.0) {
-                grouped.entry(event.series_id.clone()).or_default().push(event.book_id.clone());
+                grouped
+                    .entry(event.series_id.clone())
+                    .or_default()
+                    .push(event.book_id.clone());
             }
         }
         for (series_id, book_ids) in grouped {
@@ -228,7 +237,12 @@ impl NotificationsEventHandler {
                 books.push(to_book_context(&book));
             }
         }
-        let thumbnail = self.client.get_series_thumbnail(series_id).await.ok().flatten();
+        let thumbnail = self
+            .client
+            .get_series_thumbnail(series_id)
+            .await
+            .ok()
+            .flatten();
 
         Some(NotificationContext {
             library: to_library_context(&library),
@@ -255,7 +269,10 @@ fn to_series_context(series: &crate::model::MediaServerSeries) -> SeriesContext 
         name: series.name.clone(),
         book_count: series.books_count,
         metadata: SeriesMetadataContext {
-            status: metadata.status.map(|s| screaming_snake(&format!("{s:?}"))).unwrap_or_default(),
+            status: metadata
+                .status
+                .map(|s| screaming_snake(&format!("{s:?}")))
+                .unwrap_or_default(),
             title: metadata.title.clone(),
             title_sort: metadata.title_sort.clone(),
             alternative_titles: metadata
@@ -267,7 +284,9 @@ fn to_series_context(series: &crate::model::MediaServerSeries) -> SeriesContext 
                 })
                 .collect(),
             summary: metadata.summary.clone(),
-            reading_direction: metadata.reading_direction.map(|d| screaming_snake(&format!("{d:?}"))),
+            reading_direction: metadata
+                .reading_direction
+                .map(|d| screaming_snake(&format!("{d:?}"))),
             publisher: metadata.publisher.clone(),
             alternative_publishers: metadata.alternative_publishers.clone(),
             age_rating: metadata.age_rating,
@@ -343,7 +362,10 @@ pub struct KomgaEventHandler {
 }
 
 impl KomgaEventHandler {
-    pub fn new(client: Arc<KomgaClient>, listeners: Vec<Arc<dyn MediaServerEventListener>>) -> Self {
+    pub fn new(
+        client: Arc<KomgaClient>,
+        listeners: Vec<Arc<dyn MediaServerEventListener>>,
+    ) -> Self {
         Self {
             client,
             listeners,
@@ -363,7 +385,8 @@ impl KomgaEventHandler {
                             "komga events stream returned status {}; retrying",
                             response.status()
                         );
-                        self.wait_or_cancel(token.clone(), Duration::from_secs(10)).await;
+                        self.wait_or_cancel(token.clone(), Duration::from_secs(10))
+                            .await;
                         continue;
                     }
                     tracing::info!("connected to Komga event stream");
@@ -373,7 +396,8 @@ impl KomgaEventHandler {
                 }
                 Err(error) => {
                     tracing::warn!("komga events stream error: {error}");
-                    self.wait_or_cancel(token.clone(), Duration::from_secs(10)).await;
+                    self.wait_or_cancel(token.clone(), Duration::from_secs(10))
+                        .await;
                 }
             }
         }
@@ -410,21 +434,32 @@ impl KomgaEventHandler {
         // 对齐 Kotlin KomgaEventHandler `logger.debug { event }`：每个 SSE 事件入日志
         tracing::debug!("komga event: {event:?}");
         match event {
-            crate::komga::KomgaEvent::BookAdded { book_id, series_id, library_id } => {
+            crate::komga::KomgaEvent::BookAdded {
+                book_id,
+                series_id,
+                library_id,
+            } => {
                 self.book_added.lock().await.push(BookEvent {
                     library_id: MediaServerLibraryId(library_id),
                     series_id: MediaServerSeriesId(series_id),
                     book_id: MediaServerBookId(book_id),
                 });
             }
-            crate::komga::KomgaEvent::BookDeleted { book_id, series_id, library_id } => {
+            crate::komga::KomgaEvent::BookDeleted {
+                book_id,
+                series_id,
+                library_id,
+            } => {
                 self.book_deleted.lock().await.push(BookEvent {
                     library_id: MediaServerLibraryId(library_id),
                     series_id: MediaServerSeriesId(series_id),
                     book_id: MediaServerBookId(book_id),
                 });
             }
-            crate::komga::KomgaEvent::SeriesDeleted { series_id, library_id } => {
+            crate::komga::KomgaEvent::SeriesDeleted {
+                series_id,
+                library_id,
+            } => {
                 self.series_deleted.lock().await.push(SeriesEvent {
                     library_id: MediaServerLibraryId(library_id),
                     series_id: MediaServerSeriesId(series_id),
@@ -470,7 +505,6 @@ impl KomgaEventHandler {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // SSE 帧解析
 // ---------------------------------------------------------------------------
@@ -493,7 +527,12 @@ fn find_frame_boundary(buffer: &[u8]) -> Option<usize> {
         .windows(2)
         .position(|w| w == b"\n\n")
         .map(|pos| pos + 2)
-        .or_else(|| buffer.windows(4).position(|w| w == b"\r\n\r\n").map(|pos| pos + 4))
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|pos| pos + 4)
+        })
 }
 
 /// 解析一帧 SSE：提取 `event:` 与 `data:` 行。
@@ -533,7 +572,11 @@ mod tests {
             r#"{"bookId":"5f","seriesId":"1f","libraryId":"2f"}"#,
         );
         match event {
-            KomgaEvent::BookAdded { book_id, series_id, library_id } => {
+            KomgaEvent::BookAdded {
+                book_id,
+                series_id,
+                library_id,
+            } => {
                 assert_eq!(book_id, "5f");
                 assert_eq!(series_id, "1f");
                 assert_eq!(library_id, "2f");
@@ -546,7 +589,10 @@ mod tests {
     fn parses_komga_series_deleted_event() {
         let event = KomgaEvent::parse("SeriesDeleted", r#"{"seriesId":"7","libraryId":"3"}"#);
         match event {
-            KomgaEvent::SeriesDeleted { series_id, library_id } => {
+            KomgaEvent::SeriesDeleted {
+                series_id,
+                library_id,
+            } => {
                 assert_eq!(series_id, "7");
                 assert_eq!(library_id, "3");
             }

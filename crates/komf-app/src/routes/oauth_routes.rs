@@ -84,7 +84,12 @@ fn instance_host(headers: &axum::http::HeaderMap) -> Option<String> {
         .and_then(|v| v.split(',').next())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_string))
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
 }
 
 #[derive(Deserialize)]
@@ -136,7 +141,10 @@ fn authorize_response(
         None => "",
     };
     // 实例回调（中转页经 state.redirectUrl 转交回来）。
-    let redirect_url = format!("{scheme}://{host}{prefix}/api/oauth/{}/callback", provider.as_str());
+    let redirect_url = format!(
+        "{scheme}://{host}{prefix}/api/oauth/{}/callback",
+        provider.as_str()
+    );
     match mgr.start(provider, &redirect_url) {
         Ok(url) => Redirect::to(&url).into_response(),
         Err(e) => internal(e),
@@ -160,7 +168,9 @@ async fn callback(
         Err(r) => return r,
     };
     let mgr = manager(&state);
-    let result = mgr.handle_callback(provider, &params.code, &params.state).await;
+    let result = mgr
+        .handle_callback(provider, &params.code, &params.state)
+        .await;
     match result {
         Ok(()) => {
             // 使登录后才注册的 provider（如 MAL 无 clientId 时）生效：以当前配置热重载。
@@ -180,10 +190,7 @@ async fn callback(
 }
 
 /// `GET /api/oauth/{provider}/status`：登录态 + username。
-async fn status(
-    State(state): State<SharedState>,
-    Path(provider): Path<String>,
-) -> Response {
+async fn status(State(state): State<SharedState>, Path(provider): Path<String>) -> Response {
     let provider = match parse_provider(&provider) {
         Ok(p) => p,
         Err(r) => return r,
@@ -213,7 +220,9 @@ async fn logout(State(state): State<SharedState>, Path(provider): Path<String>) 
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -225,13 +234,19 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
     fn test_manager(test_name: &str) -> Arc<OAuthManager> {
-        let dir = std::env::temp_dir().join(format!("komf-oauth-routes-{test_name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "komf-oauth-routes-{test_name}-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         OAuthManager::new(Some(&dir), reqwest::Client::new())
     }
 
     fn cleanup(test_name: &str) {
-        let dir = std::env::temp_dir().join(format!("komf-oauth-routes-{test_name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "komf-oauth-routes-{test_name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -242,7 +257,10 @@ mod tests {
         headers.insert(header::HOST, HeaderValue::from_static("internal:8085"));
         assert_eq!(instance_host(&headers).as_deref(), Some("internal:8085"));
         assert_eq!(instance_scheme(&headers), "http");
-        headers.insert("x-forwarded-host", HeaderValue::from_static("komga.example"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("komga.example"),
+        );
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
         assert_eq!(instance_host(&headers).as_deref(), Some("komga.example"));
         assert_eq!(instance_scheme(&headers), "https");
@@ -252,10 +270,20 @@ mod tests {
     #[test]
     fn start_assembles_callback_url_with_prefix() {
         let mgr = test_manager("assemble");
-        let response =
-            authorize_response(&mgr, OAuthProvider::Anilist, "https", "komga.example", Some("/api/v1/komf"));
+        let response = authorize_response(
+            &mgr,
+            OAuthProvider::Anilist,
+            "https",
+            "komga.example",
+            Some("/api/v1/komf"),
+        );
         assert!(response.status().is_redirection());
-        let location = response.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
         let url = url::Url::parse(location).unwrap();
         let state_raw = url
             .query_pairs()
@@ -274,8 +302,13 @@ mod tests {
     #[test]
     fn start_rejects_invalid_prefix() {
         let mgr = test_manager("reject");
-        let response =
-            authorize_response(&mgr, OAuthProvider::Anilist, "https", "komga.example", Some("/a/../b"));
+        let response = authorize_response(
+            &mgr,
+            OAuthProvider::Anilist,
+            "https",
+            "komga.example",
+            Some("/a/../b"),
+        );
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         cleanup("reject");
     }

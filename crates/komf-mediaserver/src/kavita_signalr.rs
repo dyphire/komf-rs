@@ -179,7 +179,9 @@ struct NegotiateResponse {
 impl NegotiateResponse {
     /// 连接请求（SSE / LongPolling / 消息 POST）应使用的 `id` 查询值。
     fn connection_id_for_requests(&self) -> &str {
-        self.connection_token.as_deref().unwrap_or(&self.connection_id)
+        self.connection_token
+            .as_deref()
+            .unwrap_or(&self.connection_id)
     }
 }
 
@@ -195,7 +197,10 @@ pub struct KavitaSignalREventHandler {
 }
 
 impl KavitaSignalREventHandler {
-    pub fn new(client: Arc<KavitaClient>, listeners: Vec<Arc<dyn MediaServerEventListener>>) -> Self {
+    pub fn new(
+        client: Arc<KavitaClient>,
+        listeners: Vec<Arc<dyn MediaServerEventListener>>,
+    ) -> Self {
         Self {
             client,
             listeners,
@@ -218,7 +223,10 @@ impl KavitaSignalREventHandler {
             if token.is_cancelled() {
                 return;
             }
-            match self.connect_and_run(state.clone(), token.clone(), sse_failures.clone()).await {
+            match self
+                .connect_and_run(state.clone(), token.clone(), sse_failures.clone())
+                .await
+            {
                 Ok(()) => tracing::debug!("kavita signalr connection closed"),
                 Err(error) => tracing::warn!("kavita signalr error: {error}"),
             }
@@ -255,12 +263,16 @@ impl KavitaSignalREventHandler {
 
         // 1. WebSocket：与 Kotlin 官方客户端一致；有协议级心跳，不受服务端
         //    60s 空闲连接超时影响。失败继续尝试下一传输。
-        let supports_ws = negotiate.available_transports.as_ref().is_none_or(|transports| {
-            transports.iter().any(|t| t.transport == "WebSockets")
-        });
+        let supports_ws = negotiate
+            .available_transports
+            .as_ref()
+            .is_none_or(|transports| transports.iter().any(|t| t.transport == "WebSockets"));
         if supports_ws {
             tracing::debug!("kavita signalr: WebSockets advertised, opening websocket");
-            match self.run_websocket(&jwt, connection, state.clone(), token.clone()).await {
+            match self
+                .run_websocket(&jwt, connection, state.clone(), token.clone())
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     tracing::warn!("Kavita signalr WebSocket failed ({error}); trying SSE");
@@ -270,9 +282,10 @@ impl KavitaSignalREventHandler {
         // 2. SSE：官方默认第二选择，实时性优于 LongPolling。本实例实测 SSE 挂起
         //    连接约 60s 被服务端空闲超时关闭（error decoding response body），
         //    连续失败达到阈值后跳过 SSE（SseSilent 为连接存活但静默，同周期降级）。
-        let supports_sse = negotiate.available_transports.as_ref().is_none_or(|transports| {
-            transports.iter().any(|t| t.transport == "ServerSentEvents")
-        });
+        let supports_sse = negotiate
+            .available_transports
+            .as_ref()
+            .is_none_or(|transports| transports.iter().any(|t| t.transport == "ServerSentEvents"));
         if supports_sse && sse_failures.load(Ordering::Relaxed) < SSE_FAILURE_THRESHOLD {
             let response = self.open_sse(&jwt, connection).await?;
             let status = response.status();
@@ -310,9 +323,10 @@ impl KavitaSignalREventHandler {
             };
         }
         // 3. LongPolling：轮询短连接免疫服务端空闲超时，作为最终兜底。
-        let supports_lp = negotiate.available_transports.as_ref().is_none_or(|transports| {
-            transports.iter().any(|t| t.transport == "LongPolling")
-        });
+        let supports_lp = negotiate
+            .available_transports
+            .as_ref()
+            .is_none_or(|transports| transports.iter().any(|t| t.transport == "LongPolling"));
         if supports_lp {
             return self.run_long_polling(&jwt, connection, state, token).await;
         }
@@ -327,7 +341,10 @@ impl KavitaSignalREventHandler {
         let response = self
             .client
             .http_client()
-            .post(format!("{}/hubs/messages/negotiate", self.client.base_uri()))
+            .post(format!(
+                "{}/hubs/messages/negotiate",
+                self.client.base_uri()
+            ))
             .query(&[("negotiateVersion", "1"), ("access_token", jwt)])
             .send()
             .await?;
@@ -338,12 +355,18 @@ impl KavitaSignalREventHandler {
         }
         let parsed: NegotiateResponse = response.json().await?;
         if parsed.connection_id.is_empty() {
-            return Err(MediaServerError::message("signalr negotiate returned no connectionId"));
+            return Err(MediaServerError::message(
+                "signalr negotiate returned no connectionId",
+            ));
         }
         Ok(parsed)
     }
 
-    async fn open_sse(&self, jwt: &str, connection_id: &str) -> Result<reqwest::Response, MediaServerError> {
+    async fn open_sse(
+        &self,
+        jwt: &str,
+        connection_id: &str,
+    ) -> Result<reqwest::Response, MediaServerError> {
         let response = self
             .client
             .http_client()
@@ -363,7 +386,13 @@ impl KavitaSignalREventHandler {
         Ok(response)
     }
 
-    async fn send_client_message(&self, jwt: &str, connection_id: &str, transport: &str, payload: &str) -> Result<(), MediaServerError> {
+    async fn send_client_message(
+        &self,
+        jwt: &str,
+        connection_id: &str,
+        transport: &str,
+        payload: &str,
+    ) -> Result<(), MediaServerError> {
         let response = self
             .client
             .http_client()
@@ -387,12 +416,14 @@ impl KavitaSignalREventHandler {
 
     /// 发送 SignalR 握手帧（传输建立后客户端必须先发握手）。
     async fn send_handshake(&self, jwt: &str, connection_id: &str) -> Result<(), MediaServerError> {
-        self.send_client_message(jwt, connection_id, "ServerSentEvents", HANDSHAKE_MESSAGE).await
+        self.send_client_message(jwt, connection_id, "ServerSentEvents", HANDSHAKE_MESSAGE)
+            .await
     }
 
     /// 发送 SignalR Ping（`{"type":6}\x1e`）。
     async fn send_ping(&self, jwt: &str, connection_id: &str) -> Result<(), MediaServerError> {
-        self.send_client_message(jwt, connection_id, "ServerSentEvents", "{\"type\":6}\u{1e}").await
+        self.send_client_message(jwt, connection_id, "ServerSentEvents", "{\"type\":6}\u{1e}")
+            .await
     }
 
     // -- SSE 事件循环 ----------------------------------------------------------
@@ -469,17 +500,24 @@ impl KavitaSignalREventHandler {
     ) -> Result<(), MediaServerError> {
         let request = Self::websocket_url(self.client.base_uri(), connection_id, jwt)
             .into_client_request()
-            .map_err(|e| MediaServerError::message(format!("websocket request build failed: {e}")))?;
+            .map_err(|e| {
+                MediaServerError::message(format!("websocket request build failed: {e}"))
+            })?;
         let (ws_stream, response) = connect_async(request)
             .await
             .map_err(|e| MediaServerError::message(format!("websocket connect failed: {e}")))?;
-        tracing::debug!("kavita signalr: websocket opened status={}", response.status());
+        tracing::debug!(
+            "kavita signalr: websocket opened status={}",
+            response.status()
+        );
         let (mut sink, mut stream) = ws_stream.split();
 
         // 传输建立后必须先发握手帧；服务端在 WS 帧上回 {} 握手响应。
         sink.send(WsMessage::Text(HANDSHAKE_MESSAGE.into()))
             .await
-            .map_err(|e| MediaServerError::message(format!("websocket handshake send failed: {e}")))?;
+            .map_err(|e| {
+                MediaServerError::message(format!("websocket handshake send failed: {e}"))
+            })?;
         tracing::debug!("kavita signalr: websocket handshake sent");
 
         let mut last_activity = tokio::time::Instant::now();
@@ -621,7 +659,10 @@ impl KavitaSignalREventHandler {
         // SignalR 消息：type 1=Invocation, 3=StreamItem, 6=Ping, 7=Close
         match parsed.get("type").and_then(|t| t.as_u64()) {
             Some(1) => {
-                let target = parsed.get("target").and_then(|t| t.as_str()).unwrap_or_default();
+                let target = parsed
+                    .get("target")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
                 let arguments = parsed
                     .get("arguments")
                     .and_then(|a| a.as_array())
@@ -717,8 +758,7 @@ impl KavitaSignalREventHandler {
                     let listeners = self.listeners.clone();
                     let state = state.clone();
                     tokio::spawn(async move {
-                        let events =
-                            collect_book_events(&client, volumes, last_scan, &state).await;
+                        let events = collect_book_events(&client, volumes, last_scan, &state).await;
                         if !events.is_empty() {
                             for listener in &listeners {
                                 listener.on_books_added(&events).await;
@@ -765,7 +805,9 @@ async fn collect_book_events(
                 }
             }
             Err(MediaServerError::NotFound(_)) => {}
-            Err(error) => tracing::warn!("kavita signalr: failed to load volume {volume_id}: {error}"),
+            Err(error) => {
+                tracing::warn!("kavita signalr: failed to load volume {volume_id}: {error}")
+            }
         }
     }
     // 对齐 Kotlin `trimReportedChapters()`（每次处理后清理超限条目）。
@@ -774,7 +816,10 @@ async fn collect_book_events(
     let mut by_series: std::collections::BTreeMap<i32, Vec<(KavitaVolume, Vec<KavitaChapter>)>> =
         std::collections::BTreeMap::new();
     for (volume, chapters) in volume_chapters {
-        by_series.entry(volume.series_id).or_default().push((volume, chapters));
+        by_series
+            .entry(volume.series_id)
+            .or_default()
+            .push((volume, chapters));
     }
     for (series_id, entries) in by_series {
         let series = match client.get_series(series_id).await {
@@ -819,7 +864,12 @@ fn find_frame_boundary(buffer: &[u8]) -> Option<usize> {
         .windows(2)
         .position(|w| w == b"\n\n")
         .map(|pos| pos + 2)
-        .or_else(|| buffer.windows(4).position(|w| w == b"\r\n\r\n").map(|pos| pos + 4))
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|pos| pos + 4)
+        })
 }
 
 /// 从 SSE 帧提取 SignalR data 负载（`data: <json>\x1e`）。
@@ -888,7 +938,10 @@ mod tests {
     #[test]
     fn signalr_handshake_payload() {
         // 传输建立后的握手帧必须是 json 协议 + record separator 结尾。
-        assert_eq!(HANDSHAKE_MESSAGE, "{\"protocol\":\"json\",\"version\":1}\u{1e}");
+        assert_eq!(
+            HANDSHAKE_MESSAGE,
+            "{\"protocol\":\"json\",\"version\":1}\u{1e}"
+        );
     }
 
     #[test]
@@ -915,11 +968,7 @@ mod tests {
     #[test]
     fn builds_websocket_url() {
         assert_eq!(
-            KavitaSignalREventHandler::websocket_url(
-                "https://kavita.example.com:8443",
-                "t",
-                "j"
-            ),
+            KavitaSignalREventHandler::websocket_url("https://kavita.example.com:8443", "t", "j"),
             "wss://kavita.example.com:8443/hubs/messages?id=t&transport=WebSockets&access_token=j"
         );
     }
@@ -939,7 +988,11 @@ mod tests {
         assert_eq!(rc.order.len(), 3, "size stays capped");
         assert!(!rc.set.contains(&1), "oldest reported chapter evicted");
         assert!(rc.claim(1), "evicted id can be claimed again");
-        assert_eq!(rc.order.len(), 4, "claim after eviction appends (trim runs per cycle)");
+        assert_eq!(
+            rc.order.len(),
+            4,
+            "claim after eviction appends (trim runs per cycle)"
+        );
         rc.trim();
         assert_eq!(rc.order.len(), 3);
     }
@@ -964,7 +1017,8 @@ mod tests {
     }
 
     #[test]
-    fn noop_events_cover_kotlin_list() {        let handler = KavitaSignalREventHandler {
+    fn noop_events_cover_kotlin_list() {
+        let handler = KavitaSignalREventHandler {
             client: Arc::new(
                 KavitaClient::new(reqwest::Client::new(), "http://localhost:5000", "key").unwrap(),
             ),
@@ -989,7 +1043,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 4096];
                     let _ = sock.read(&mut buf).await;

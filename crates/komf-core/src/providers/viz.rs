@@ -398,7 +398,10 @@ impl VizClient {
         Self {
             http,
             parser: VizParser::new(),
-            limiter: crate::rate_limiter::ThroughputLimiter::new(5, std::time::Duration::from_secs(10)),
+            limiter: crate::rate_limiter::ThroughputLimiter::new(
+                5,
+                std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -779,7 +782,6 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for VizMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"viz\.com/manga-books/manga/([^/?#]+)").ok()?;
         re.captures(query)

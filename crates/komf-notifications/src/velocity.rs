@@ -84,7 +84,9 @@ enum PathPart {
 #[derive(Debug, Clone)]
 enum Node {
     Text(String),
-    Ref { path: Vec<PathPart> },
+    Ref {
+        path: Vec<PathPart>,
+    },
     If {
         cond: Cond,
         then_branch: Vec<Node>,
@@ -178,9 +180,7 @@ impl Scope {
         if let Value::Map(map) = root {
             base = map;
         }
-        Self {
-            stack: vec![base],
-        }
+        Self { stack: vec![base] }
     }
 
     fn resolve(&self, path: &[PathPart]) -> Value {
@@ -670,8 +670,14 @@ mod tests {
         root.insert(
             "books".to_string(),
             Value::List(vec![
-                Value::Map(HashMap::from([("name".to_string(), Value::Str("Vol. 1".to_string()))])),
-                Value::Map(HashMap::from([("name".to_string(), Value::Str("Vol. 2".to_string()))])),
+                Value::Map(HashMap::from([(
+                    "name".to_string(),
+                    Value::Str("Vol. 1".to_string()),
+                )])),
+                Value::Map(HashMap::from([(
+                    "name".to_string(),
+                    Value::Str("Vol. 2".to_string()),
+                )])),
             ]),
         );
         Value::Map(root)
@@ -695,7 +701,10 @@ mod tests {
         assert_eq!(tpl.render(ctx()), "many");
 
         let mut single = HashMap::new();
-        single.insert("books".to_string(), Value::List(vec![Value::Str("x".to_string())]));
+        single.insert(
+            "books".to_string(),
+            Value::List(vec![Value::Str("x".to_string())]),
+        );
         let tpl = Template::parse("#if(${books.size()} == 1)one#{else}many#end").unwrap();
         assert_eq!(tpl.render(Value::Map(single)), "one");
     }

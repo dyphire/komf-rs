@@ -509,7 +509,13 @@ struct StumpTokenProvider {
 }
 
 impl StumpTokenProvider {
-    fn new(http: reqwest::Client, base_uri: &str, username: &str, password: &str, api_key: &str) -> Self {
+    fn new(
+        http: reqwest::Client,
+        base_uri: &str,
+        username: &str,
+        password: &str,
+        api_key: &str,
+    ) -> Self {
         Self {
             http,
             base_uri: base_uri.to_string(),
@@ -574,13 +580,24 @@ pub struct StumpClient {
 }
 
 impl StumpClient {
-    pub fn new(base_uri: &str, username: &str, password: &str, api_key: &str) -> Result<Self, MediaServerError> {
+    pub fn new(
+        base_uri: &str,
+        username: &str,
+        password: &str,
+        api_key: &str,
+    ) -> Result<Self, MediaServerError> {
         let base_uri = base_uri.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(MediaServerError::Http)?;
-        let token_provider = Arc::new(StumpTokenProvider::new(http.clone(), &base_uri, username, password, api_key));
+        let token_provider = Arc::new(StumpTokenProvider::new(
+            http.clone(),
+            &base_uri,
+            username,
+            password,
+            api_key,
+        ));
         Ok(Self {
             http,
             base_uri: base_uri.clone(),
@@ -620,7 +637,10 @@ impl StumpClient {
                 .send()
                 .await?;
             let status = response.status();
-            if status == reqwest::StatusCode::UNAUTHORIZED && !retried && !self.token_provider.uses_api_key() {
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                && !retried
+                && !self.token_provider.uses_api_key()
+            {
                 // access token 过期：清缓存重新登录后重试一次
                 self.token_provider.invalidate().await;
                 retried = true;
@@ -638,7 +658,9 @@ impl StumpClient {
                         .filter_map(|e| e.message.clone())
                         .collect::<Vec<_>>()
                         .join("; ");
-                    return Err(MediaServerError::message(format!("stump graphql error: {messages}")));
+                    return Err(MediaServerError::message(format!(
+                        "stump graphql error: {messages}"
+                    )));
                 }
             }
             return Ok(envelope.data.unwrap_or(Value::Null));
@@ -659,7 +681,10 @@ impl StumpClient {
 
     // -- 读取 ----------------------------------------------------------------
 
-    pub async fn get_series_dto(&self, series_id: &str) -> Result<StumpSeriesDto, MediaServerError> {
+    pub async fn get_series_dto(
+        &self,
+        series_id: &str,
+    ) -> Result<StumpSeriesDto, MediaServerError> {
         self.gql_data(SERIES_BY_ID_DOC, json!({ "id": series_id }), "seriesById")
             .await
     }
@@ -684,7 +709,10 @@ impl StumpClient {
     }
 
     /// 拉取系列下全部书籍（顶层 media 按 seriesId 过滤 + offset 分页，每页 1000，翻页直到取完）。
-    pub async fn get_media_of_series_dto(&self, series_id: &str) -> Result<Vec<StumpMediaDto>, MediaServerError> {
+    pub async fn get_media_of_series_dto(
+        &self,
+        series_id: &str,
+    ) -> Result<Vec<StumpMediaDto>, MediaServerError> {
         let filter = json!({ "seriesId": { "eq": series_id } });
         let mut all = Vec::new();
         let mut page = 1;
@@ -715,24 +743,44 @@ impl StumpClient {
             .map(|page: StumpPageResponse<StumpLibraryDto>| page.nodes)
     }
 
-    pub async fn get_library_dto(&self, library_id: &str) -> Result<StumpLibraryDto, MediaServerError> {
-        self.gql_data(LIBRARY_BY_ID_DOC, json!({ "id": library_id }), "libraryById")
-            .await
+    pub async fn get_library_dto(
+        &self,
+        library_id: &str,
+    ) -> Result<StumpLibraryDto, MediaServerError> {
+        self.gql_data(
+            LIBRARY_BY_ID_DOC,
+            json!({ "id": library_id }),
+            "libraryById",
+        )
+        .await
     }
 
     /// REST 缩略图（GET /api/v2/series/{id}/thumbnail），404 视为无图。
-    pub async fn get_series_thumbnail_image(&self, series_id: &str) -> Result<Option<Image>, MediaServerError> {
-        self.get_thumbnail_image(&format!("/api/v2/series/{series_id}/thumbnail")).await
+    pub async fn get_series_thumbnail_image(
+        &self,
+        series_id: &str,
+    ) -> Result<Option<Image>, MediaServerError> {
+        self.get_thumbnail_image(&format!("/api/v2/series/{series_id}/thumbnail"))
+            .await
     }
 
     /// REST 缩略图（GET /api/v2/media/{id}/thumbnail），404 视为无图。
-    pub async fn get_book_thumbnail_image(&self, media_id: &str) -> Result<Option<Image>, MediaServerError> {
-        self.get_thumbnail_image(&format!("/api/v2/media/{media_id}/thumbnail")).await
+    pub async fn get_book_thumbnail_image(
+        &self,
+        media_id: &str,
+    ) -> Result<Option<Image>, MediaServerError> {
+        self.get_thumbnail_image(&format!("/api/v2/media/{media_id}/thumbnail"))
+            .await
     }
 
     async fn get_thumbnail_image(&self, path: &str) -> Result<Option<Image>, MediaServerError> {
         let token = self.token_provider.access_token().await?;
-        let response = self.http.get(self.url(path)).bearer_auth(token).send().await?;
+        let response = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(token)
+            .send()
+            .await?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -752,7 +800,11 @@ impl StumpClient {
 
     // -- 写入 ----------------------------------------------------------------
 
-    pub async fn update_series_metadata(&self, series_id: &str, input: &Value) -> Result<(), MediaServerError> {
+    pub async fn update_series_metadata(
+        &self,
+        series_id: &str,
+        input: &Value,
+    ) -> Result<(), MediaServerError> {
         self.gql_value(
             UPDATE_SERIES_METADATA_DOC,
             json!({ "id": series_id, "input": input }),
@@ -761,7 +813,11 @@ impl StumpClient {
         .map(|_| ())
     }
 
-    pub async fn update_media_metadata(&self, media_id: &str, input: &Value) -> Result<(), MediaServerError> {
+    pub async fn update_media_metadata(
+        &self,
+        media_id: &str,
+        input: &Value,
+    ) -> Result<(), MediaServerError> {
         self.gql_value(
             UPDATE_MEDIA_METADATA_DOC,
             json!({ "id": media_id, "input": input }),
@@ -771,7 +827,11 @@ impl StumpClient {
     }
 
     /// 设置系列 tags（整表替换；仅系列级，书级 tags 走 MediaMetadataInput.genres）。
-    pub async fn set_series_tags(&self, series_id: &str, tags: &[String]) -> Result<(), MediaServerError> {
+    pub async fn set_series_tags(
+        &self,
+        series_id: &str,
+        tags: &[String],
+    ) -> Result<(), MediaServerError> {
         self.gql_value(
             SET_SERIES_TAGS_DOC,
             json!({ "id": series_id, "tags": tags }),
@@ -792,7 +852,11 @@ impl StumpClient {
 
     /// base64 上传系列封面（Stump 专为 Komf 添加的 mutation；服务端按魔数校验
     /// PNG/JPEG/WebP/GIF/HEIF/JXL/AVIF 且受 max_file_upload_size 限制）。
-    pub async fn upload_series_thumbnail_base64(&self, series_id: &str, image: &Image) -> Result<(), MediaServerError> {
+    pub async fn upload_series_thumbnail_base64(
+        &self,
+        series_id: &str,
+        image: &Image,
+    ) -> Result<(), MediaServerError> {
         let encoded = BASE64.encode(&image.bytes);
         self.gql_value(
             UPLOAD_SERIES_THUMBNAIL_DOC,
@@ -802,7 +866,11 @@ impl StumpClient {
         .map(|_| ())
     }
 
-    pub async fn upload_book_thumbnail_base64(&self, media_id: &str, image: &Image) -> Result<(), MediaServerError> {
+    pub async fn upload_book_thumbnail_base64(
+        &self,
+        media_id: &str,
+        image: &Image,
+    ) -> Result<(), MediaServerError> {
         let encoded = BASE64.encode(&image.bytes);
         self.gql_value(
             UPLOAD_MEDIA_THUMBNAIL_DOC,
@@ -948,7 +1016,12 @@ fn to_media_server_book(dto: &StumpMediaDto, series_name: &str, base_uri: &str) 
 
     MediaServerBook {
         id: MediaServerBookId(dto.id.clone()),
-        series_id: MediaServerSeriesId(dto.series_id.clone().or_else(|| dto.series.as_ref().map(|s| s.id.clone())).unwrap_or_default()),
+        series_id: MediaServerSeriesId(
+            dto.series_id
+                .clone()
+                .or_else(|| dto.series.as_ref().map(|s| s.id.clone()))
+                .unwrap_or_default(),
+        ),
         library_id: dto
             .library_id
             .clone()
@@ -1034,7 +1107,10 @@ fn build_series_metadata_input(
         input.insert("summary".to_string(), json!(summary));
     }
 
-    let publisher = metadata.publisher.clone().or_else(|| current.publisher.clone());
+    let publisher = metadata
+        .publisher
+        .clone()
+        .or_else(|| current.publisher.clone());
     if let Some(publisher) = publisher {
         input.insert("publisher".to_string(), json!(publisher));
     }
@@ -1062,7 +1138,9 @@ fn build_series_metadata_input(
     }
 
     let links = match &metadata.links {
-        Some(links) if !links.is_empty() => Some(links.iter().map(|l| l.url.clone()).collect::<Vec<_>>()),
+        Some(links) if !links.is_empty() => {
+            Some(links.iter().map(|l| l.url.clone()).collect::<Vec<_>>())
+        }
         Some(_) => None,
         None => (!current.links.is_empty()).then(|| current.links.clone()),
     };
@@ -1101,7 +1179,10 @@ fn build_series_metadata_input(
         input.insert("comicid".to_string(), json!(comicid));
     }
     if let Some(description_formatted) = &current.description_formatted {
-        input.insert("descriptionFormatted".to_string(), json!(description_formatted));
+        input.insert(
+            "descriptionFormatted".to_string(),
+            json!(description_formatted),
+        );
     }
     if let Some(imprint) = &current.imprint {
         input.insert("imprint".to_string(), json!(imprint));
@@ -1147,7 +1228,10 @@ fn build_media_metadata_input(
         input.insert("number".to_string(), json!(number));
     }
 
-    let isbn = metadata.isbn.clone().or_else(|| current.identifier_isbn.clone());
+    let isbn = metadata
+        .isbn
+        .clone()
+        .or_else(|| current.identifier_isbn.clone());
     if let Some(isbn) = isbn {
         input.insert("identifierIsbn".to_string(), json!(isbn));
     }
@@ -1183,7 +1267,9 @@ fn build_media_metadata_input(
     }
 
     let links = match &metadata.links {
-        Some(links) if !links.is_empty() => Some(links.iter().map(|l| l.url.clone()).collect::<Vec<_>>()),
+        Some(links) if !links.is_empty() => {
+            Some(links.iter().map(|l| l.url.clone()).collect::<Vec<_>>())
+        }
         Some(_) => None,
         None => (!current.links.is_empty()).then(|| current.links.clone()),
     };
@@ -1247,7 +1333,10 @@ fn build_media_metadata_input(
         input.insert("identifierGoogle".to_string(), json!(identifier_google));
     }
     if let Some(identifier_mobi_asin) = &current.identifier_mobi_asin {
-        input.insert("identifierMobiAsin".to_string(), json!(identifier_mobi_asin));
+        input.insert(
+            "identifierMobiAsin".to_string(),
+            json!(identifier_mobi_asin),
+        );
     }
     if let Some(identifier_uuid) = &current.identifier_uuid {
         input.insert("identifierUuid".to_string(), json!(identifier_uuid));
@@ -1319,7 +1408,10 @@ impl StumpMediaServerClientAdapter {
 
 #[async_trait::async_trait]
 impl MediaServerClient for StumpMediaServerClientAdapter {
-    async fn get_series(&self, series_id: &MediaServerSeriesId) -> Result<MediaServerSeries, MediaServerError> {
+    async fn get_series(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<MediaServerSeries, MediaServerError> {
         let dto = self.client.get_series_dto(&series_id.0).await?;
         Ok(to_media_server_series(&dto, self.client.base_uri()))
     }
@@ -1329,7 +1421,10 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         library_id: &MediaServerLibraryId,
         page_number: i32,
     ) -> Result<Page<MediaServerSeries>, MediaServerError> {
-        let page = self.client.get_series_page_dto(&library_id.0, page_number).await?;
+        let page = self
+            .client
+            .get_series_page_dto(&library_id.0, page_number)
+            .await?;
         let content = page
             .nodes
             .iter()
@@ -1343,7 +1438,10 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         })
     }
 
-    async fn get_series_thumbnail(&self, series_id: &MediaServerSeriesId) -> Result<Option<Image>, MediaServerError> {
+    async fn get_series_thumbnail(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Option<Image>, MediaServerError> {
         self.client.get_series_thumbnail_image(&series_id.0).await
     }
 
@@ -1368,17 +1466,27 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         })
     }
 
-    async fn get_book(&self, book_id: &MediaServerBookId) -> Result<MediaServerBook, MediaServerError> {
+    async fn get_book(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<MediaServerBook, MediaServerError> {
         let dto = self.client.get_media_dto(&book_id.0).await?;
         let series_name = dto
             .series
             .as_ref()
             .map(|s| s.name.clone())
             .unwrap_or_default();
-        Ok(to_media_server_book(&dto, &series_name, self.client.base_uri()))
+        Ok(to_media_server_book(
+            &dto,
+            &series_name,
+            self.client.base_uri(),
+        ))
     }
 
-    async fn get_books(&self, series_id: &MediaServerSeriesId) -> Result<Vec<MediaServerBook>, MediaServerError> {
+    async fn get_books(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Result<Vec<MediaServerBook>, MediaServerError> {
         let dtos = self.client.get_media_of_series_dto(&series_id.0).await?;
         Ok(dtos
             .iter()
@@ -1420,11 +1528,17 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         })
     }
 
-    async fn get_book_thumbnail(&self, book_id: &MediaServerBookId) -> Result<Option<Image>, MediaServerError> {
+    async fn get_book_thumbnail(
+        &self,
+        book_id: &MediaServerBookId,
+    ) -> Result<Option<Image>, MediaServerError> {
         self.client.get_book_thumbnail_image(&book_id.0).await
     }
 
-    async fn get_library(&self, library_id: &MediaServerLibraryId) -> Result<MediaServerLibrary, MediaServerError> {
+    async fn get_library(
+        &self,
+        library_id: &MediaServerLibraryId,
+    ) -> Result<MediaServerLibrary, MediaServerError> {
         let dto = self.client.get_library_dto(&library_id.0).await?;
         Ok(to_media_server_library(&dto))
     }
@@ -1445,10 +1559,15 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         // 否则本次更新会静默清空未传入字段（见 build_series_metadata_input）。
         let current = self.client.get_series_dto(&series_id.0).await?;
         let input = build_series_metadata_input(
-            current.metadata.as_ref().unwrap_or(&StumpSeriesMetadataDto::default()),
+            current
+                .metadata
+                .as_ref()
+                .unwrap_or(&StumpSeriesMetadataDto::default()),
             metadata,
         );
-        self.client.update_series_metadata(&series_id.0, &input).await?;
+        self.client
+            .update_series_metadata(&series_id.0, &input)
+            .await?;
         // 系列 tags（与 genres 分离）经独立 setSeriesTags 写入
         if let Some(tags) = &metadata.tags {
             if !tags.is_empty() {
@@ -1475,7 +1594,10 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         // 同 update_series_metadata：先读当前值再全量提交，防止缺省清空误伤。
         let current = self.client.get_media_dto(&book_id.0).await?;
         let input = build_media_metadata_input(
-            current.metadata.as_ref().unwrap_or(&StumpMediaMetadataDto::default()),
+            current
+                .metadata
+                .as_ref()
+                .unwrap_or(&StumpMediaMetadataDto::default()),
             metadata,
         );
         self.client.update_media_metadata(&book_id.0, &input).await
@@ -1500,7 +1622,10 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         self.client.update_media_metadata(&book.id.0, &input).await
     }
 
-    async fn reset_series_metadata(&self, series: &MediaServerSeries) -> Result<(), MediaServerError> {
+    async fn reset_series_metadata(
+        &self,
+        series: &MediaServerSeries,
+    ) -> Result<(), MediaServerError> {
         // Stump 的 resetSeriesMetadata(impact=SERIES) 只清 series_metadata 表；
         // series_tags 是独立关联表（setSeriesTags 写入），需显式清空——
         // 对齐 Komga reset（series_metadata_reset_request 中 tags 置空 Vec）语义。
@@ -1516,7 +1641,9 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         _lock: bool,
     ) -> Result<Option<MediaServerSeriesThumbnail>, MediaServerError> {
         // Stump 单一缩略图：selected/lock 无意义，上传即替换
-        self.client.upload_series_thumbnail_base64(&series_id.0, thumbnail).await?;
+        self.client
+            .upload_series_thumbnail_base64(&series_id.0, thumbnail)
+            .await?;
         Ok(Some(MediaServerSeriesThumbnail {
             id: MediaServerThumbnailId(format!("{}-thumbnail", series_id.0)),
             series_id: series_id.clone(),
@@ -1533,7 +1660,9 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         _selected: bool,
         _lock: bool,
     ) -> Result<Option<MediaServerBookThumbnail>, MediaServerError> {
-        self.client.upload_book_thumbnail_base64(&book_id.0, thumbnail).await?;
+        self.client
+            .upload_book_thumbnail_base64(&book_id.0, thumbnail)
+            .await?;
         Ok(Some(MediaServerBookThumbnail {
             id: MediaServerThumbnailId(format!("{}-thumbnail", book_id.0)),
             book_id: book_id.clone(),
@@ -1608,7 +1737,10 @@ mod tests {
     fn deserialize_series_dto() {
         let dto: StumpSeriesDto = serde_json::from_value(series_dto_sample()).unwrap();
         assert_eq!(dto.id, "series-1");
-        assert_eq!(dto.metadata.as_ref().unwrap().writers, vec!["Kentaro Miura"]);
+        assert_eq!(
+            dto.metadata.as_ref().unwrap().writers,
+            vec!["Kentaro Miura"]
+        );
         assert_eq!(dto.media_count, Some(41));
     }
 
@@ -1625,8 +1757,14 @@ mod tests {
 
     #[test]
     fn status_mapping_roundtrip() {
-        assert_eq!(from_stump_status(&Some("Ended".into())), Some(SeriesStatus::Ended));
-        assert_eq!(from_stump_status(&Some("Continuing".into())), Some(SeriesStatus::Ongoing));
+        assert_eq!(
+            from_stump_status(&Some("Ended".into())),
+            Some(SeriesStatus::Ended)
+        );
+        assert_eq!(
+            from_stump_status(&Some("Continuing".into())),
+            Some(SeriesStatus::Ongoing)
+        );
         assert_eq!(from_stump_status(&None), None);
         assert_eq!(to_stump_status(SeriesStatus::Ongoing), "Continuing");
         assert_eq!(to_stump_status(SeriesStatus::Hiatus), "Continuing");
@@ -1636,7 +1774,10 @@ mod tests {
 
     #[test]
     fn release_date_parsing() {
-        assert_eq!(parse_release_date("2016-09-02"), (Some(2016), Some(9), Some(2)));
+        assert_eq!(
+            parse_release_date("2016-09-02"),
+            (Some(2016), Some(9), Some(2))
+        );
         assert_eq!(parse_release_date("2016-09"), (Some(2016), Some(9), None));
         assert_eq!(parse_release_date("2016"), (Some(2016), None, None));
     }
@@ -1656,11 +1797,20 @@ mod tests {
             publisher: Some("Hakusensha".into()),
             age_rating: Some(17),
             genres: Some(vec!["Action".into()]),
-            links: Some(vec![WebLink { label: "x".into(), url: "https://x".into() }]),
+            links: Some(vec![WebLink {
+                label: "x".into(),
+                url: "https://x".into(),
+            }]),
             total_book_count: Some(41),
             authors: Some(vec![
-                MediaServerAuthor { name: "Kentaro Miura".into(), role: "Writer".into() },
-                MediaServerAuthor { name: "Someone".into(), role: "Penciller".into() },
+                MediaServerAuthor {
+                    name: "Kentaro Miura".into(),
+                    role: "Writer".into(),
+                },
+                MediaServerAuthor {
+                    name: "Someone".into(),
+                    role: "Penciller".into(),
+                },
             ]),
             release_year: Some(1989),
             ..Default::default()
@@ -1736,9 +1886,15 @@ mod tests {
             summary: Some("summary".into()),
             number: Some("1.5".into()),
             release_date: Some("2016-09-02".into()),
-            authors: Some(vec![MediaServerAuthor { name: "Kentaro Miura".into(), role: "Writer".into() }]),
+            authors: Some(vec![MediaServerAuthor {
+                name: "Kentaro Miura".into(),
+                role: "Writer".into(),
+            }]),
             isbn: Some("978-4-00-000000-0".into()),
-            links: Some(vec![WebLink { label: "x".into(), url: "https://x".into() }]),
+            links: Some(vec![WebLink {
+                label: "x".into(),
+                url: "https://x".into(),
+            }]),
             ..Default::default()
         };
         let input = build_media_metadata_input(&current, &update);

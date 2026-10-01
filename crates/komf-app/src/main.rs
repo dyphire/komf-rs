@@ -42,7 +42,12 @@ fn main() -> anyhow::Result<()> {
             .await
             .expect("failed to bind port");
         tracing::info!("komf-rs listening on http://{bind}:{port}");
-        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("server error");
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("server error");
     });
     Ok(())
 }

@@ -28,12 +28,25 @@ pub enum KomfMetadataJobStatus {
 /// 任务事件流（SSE）—— 对应 `KomfMetadataJobEvents.kt`。
 #[derive(Debug, Clone)]
 pub enum KomfMetadataJobEvent {
-    ProviderSeries { provider: String },
-    ProviderBook { provider: String, total_books: i32, book_progress: i32 },
-    ProviderError { provider: String, message: String },
-    ProviderCompleted { provider: String },
+    ProviderSeries {
+        provider: String,
+    },
+    ProviderBook {
+        provider: String,
+        total_books: i32,
+        book_progress: i32,
+    },
+    ProviderError {
+        provider: String,
+        message: String,
+    },
+    ProviderCompleted {
+        provider: String,
+    },
     PostProcessingStart,
-    ProcessingError { message: String },
+    ProcessingError {
+        message: String,
+    },
     Completed,
 }
 

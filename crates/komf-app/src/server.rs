@@ -1,7 +1,8 @@
 //! HTTP 服务模块 —— 对应 `ServerModule.kt`。
 use crate::routes::{
-    config_routes, cover_routes, deprecated, job_routes, mangabaka_routes, media_server_routes, metadata_routes,
-    notification_routes, oauth_routes, tracker_routes, web_auth, ServerKind, SharedState,
+    config_routes, cover_routes, deprecated, job_routes, mangabaka_routes, media_server_routes,
+    metadata_routes, notification_routes, oauth_routes, tracker_routes, web_auth, ServerKind,
+    SharedState,
 };
 use axum::http::HeaderValue;
 use axum::routing::get;
@@ -147,7 +148,9 @@ async fn default_headers(
 ) -> axum::response::Response {
     let mut response = next.run(request).await;
     if let Ok(value) = HeaderValue::from_str("same-origin") {
-        response.headers_mut().insert("Cross-Origin-Opener-Policy", value);
+        response
+            .headers_mut()
+            .insert("Cross-Origin-Opener-Policy", value);
     }
     if let Ok(value) = HeaderValue::from_str(KOMF_VERSION) {
         response.headers_mut().insert("X-Komf-Version", value);
@@ -167,7 +170,10 @@ mod tests {
         assert!(!info.version.is_empty());
 
         let json = serde_json::to_value(&info).expect("serialize version info");
-        assert_eq!(json, serde_json::json!({"name": "komf-rs", "version": KOMF_VERSION}));
+        assert_eq!(
+            json,
+            serde_json::json!({"name": "komf-rs", "version": KOMF_VERSION})
+        );
     }
 
     #[test]

@@ -69,12 +69,25 @@ pub struct MetadataJobId(pub Uuid);
 
 #[derive(Debug, Clone)]
 pub enum MetadataJobEvent {
-    ProviderSeries { provider: CoreProviders },
-    ProviderBook { provider: CoreProviders, total_books: i32, book_progress: i32 },
-    ProviderError { provider: CoreProviders, message: String },
-    ProviderCompleted { provider: CoreProviders },
+    ProviderSeries {
+        provider: CoreProviders,
+    },
+    ProviderBook {
+        provider: CoreProviders,
+        total_books: i32,
+        book_progress: i32,
+    },
+    ProviderError {
+        provider: CoreProviders,
+        message: String,
+    },
+    ProviderCompleted {
+        provider: CoreProviders,
+    },
     PostProcessingStart,
-    ProcessingError { message: String },
+    ProcessingError {
+        message: String,
+    },
     Completed,
 }
 
@@ -92,7 +105,9 @@ pub struct GlobalJobEvent {
 
 #[derive(Debug, Clone)]
 pub enum GlobalJobEventKind {
-    Created { started_at: DateTime<Utc> },
+    Created {
+        started_at: DateTime<Utc>,
+    },
     Event(MetadataJobEvent),
     Finished {
         status: MetadataJobStatus,
@@ -278,8 +293,11 @@ impl KomfJobsRepository {
                 series_id: MediaServerSeriesId(row.get(1)?),
                 status: parse_status(&row.get::<_, String>(2)?),
                 message: row.get(3)?,
-                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?).unwrap_or_default(),
-                finished_at: row.get::<_, Option<i64>>(5)?.and_then(|ms| DateTime::from_timestamp_millis(ms)),
+                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?)
+                    .unwrap_or_default(),
+                finished_at: row
+                    .get::<_, Option<i64>>(5)?
+                    .and_then(|ms| DateTime::from_timestamp_millis(ms)),
             })
         })?;
         rows.next().transpose()
@@ -296,8 +314,11 @@ impl KomfJobsRepository {
                 series_id: MediaServerSeriesId(row.get(1)?),
                 status: parse_status(&row.get::<_, String>(2)?),
                 message: row.get(3)?,
-                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?).unwrap_or_default(),
-                finished_at: row.get::<_, Option<i64>>(5)?.and_then(|ms| DateTime::from_timestamp_millis(ms)),
+                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?)
+                    .unwrap_or_default(),
+                finished_at: row
+                    .get::<_, Option<i64>>(5)?
+                    .and_then(|ms| DateTime::from_timestamp_millis(ms)),
             })
         })?;
         rows.collect()
@@ -328,15 +349,21 @@ impl KomfJobsRepository {
         let rows = stmt.query_map(
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
             |row| {
-            Ok(KomfJobRecord {
-                id: MetadataJobId(Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default()),
-                series_id: MediaServerSeriesId(row.get(1)?),
-                status: parse_status(&row.get::<_, String>(2)?),
-                message: row.get(3)?,
-                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?).unwrap_or_default(),
-                finished_at: row.get::<_, Option<i64>>(5)?.and_then(|ms| DateTime::from_timestamp_millis(ms)),
-            })
-        })?;
+                Ok(KomfJobRecord {
+                    id: MetadataJobId(
+                        Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                    ),
+                    series_id: MediaServerSeriesId(row.get(1)?),
+                    status: parse_status(&row.get::<_, String>(2)?),
+                    message: row.get(3)?,
+                    started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?)
+                        .unwrap_or_default(),
+                    finished_at: row
+                        .get::<_, Option<i64>>(5)?
+                        .and_then(|ms| DateTime::from_timestamp_millis(ms)),
+                })
+            },
+        )?;
         rows.collect()
     }
 
@@ -394,7 +421,12 @@ impl KomfJobsRepository {
         Ok(())
     }
 
-    pub fn find_manual_for(&self, series_id: &MediaServerSeriesId, media_server: &str) -> Result<Option<SeriesMatch>, rusqlite::Error> {        let conn = self.conn.lock().unwrap();
+    pub fn find_manual_for(
+        &self,
+        series_id: &MediaServerSeriesId,
+        media_server: &str,
+    ) -> Result<Option<SeriesMatch>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT series_id, type, media_server, provider, provider_series_id FROM series_match WHERE series_id = ?1 AND media_server = ?2 AND type = 'MANUAL'",
         )?;
@@ -403,14 +435,19 @@ impl KomfJobsRepository {
                 series_id: MediaServerSeriesId(row.get(0)?),
                 r#type: row.get(1)?,
                 media_server: row.get(2)?,
-                provider: CoreProviders::from_str(&row.get::<_, String>(3)?).unwrap_or(CoreProviders::MangaUpdates),
+                provider: CoreProviders::from_str(&row.get::<_, String>(3)?)
+                    .unwrap_or(CoreProviders::MangaUpdates),
                 provider_series_id: row.get(4)?,
             })
         })?;
         rows.next().transpose()
     }
 
-    pub fn delete_series_match(&self, series_id: &MediaServerSeriesId, media_server: &str) -> Result<(), rusqlite::Error> {
+    pub fn delete_series_match(
+        &self,
+        series_id: &MediaServerSeriesId,
+        media_server: &str,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM series_match WHERE series_id = ?1 AND media_server = ?2",
@@ -429,7 +466,11 @@ impl KomfJobsRepository {
         Ok(())
     }
 
-    pub fn delete_series_thumbnail(&self, series_id: &MediaServerSeriesId, media_server: &str) -> Result<(), rusqlite::Error> {
+    pub fn delete_series_thumbnail(
+        &self,
+        series_id: &MediaServerSeriesId,
+        media_server: &str,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM series_thumbnail WHERE series_id = ?1 AND media_server = ?2",
@@ -438,7 +479,11 @@ impl KomfJobsRepository {
         Ok(())
     }
 
-    pub fn find_series_thumbnail(&self, series_id: &MediaServerSeriesId, media_server: &str) -> Result<Option<SeriesThumbnail>, rusqlite::Error> {
+    pub fn find_series_thumbnail(
+        &self,
+        series_id: &MediaServerSeriesId,
+        media_server: &str,
+    ) -> Result<Option<SeriesThumbnail>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT series_id, thumbnail_id, media_server FROM series_thumbnail WHERE series_id = ?1 AND media_server = ?2",
@@ -462,7 +507,11 @@ impl KomfJobsRepository {
         Ok(())
     }
 
-    pub fn delete_book_thumbnail(&self, book_id: &MediaServerBookId, media_server: &str) -> Result<(), rusqlite::Error> {
+    pub fn delete_book_thumbnail(
+        &self,
+        book_id: &MediaServerBookId,
+        media_server: &str,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM book_thumbnail WHERE book_id = ?1 AND media_server = ?2",
@@ -471,7 +520,11 @@ impl KomfJobsRepository {
         Ok(())
     }
 
-    pub fn find_book_thumbnail(&self, book_id: &MediaServerBookId, media_server: &str) -> Result<Option<BookThumbnail>, rusqlite::Error> {
+    pub fn find_book_thumbnail(
+        &self,
+        book_id: &MediaServerBookId,
+        media_server: &str,
+    ) -> Result<Option<BookThumbnail>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT series_id, book_id, thumbnail_id, media_server FROM book_thumbnail WHERE book_id = ?1 AND media_server = ?2",
@@ -530,7 +583,10 @@ impl KomfJobTracker {
         }
     }
 
-    pub async fn register_job(&self, series_id: MediaServerSeriesId) -> (MetadataJobId, JobEventSender) {
+    pub async fn register_job(
+        &self,
+        series_id: MediaServerSeriesId,
+    ) -> (MetadataJobId, JobEventSender) {
         let job = MetadataJob::new(series_id);
         let (tx, _rx) = tokio::sync::broadcast::channel(256);
         let record = KomfJobRecord {
@@ -611,13 +667,17 @@ impl KomfJobTracker {
             state.record.status = MetadataJobStatus::Failed;
             state.record.message = Some(message.clone());
             state.record.finished_at = Some(Utc::now());
-            let _ = self
-                .repository
-                .update_job_status(id, MetadataJobStatus::Failed, Some(message.clone()));
+            let _ = self.repository.update_job_status(
+                id,
+                MetadataJobStatus::Failed,
+                Some(message.clone()),
+            );
             if emit_error {
                 // 保持 per-job 原语义（finish_job 已先经 tx 发过一次，这里再发一次，
                 // 共两帧 ProcessingErrorEvent）；全局仅保留 tx 那一次，避免重复。
-                let _ = state.broadcast.send(MetadataJobEvent::ProcessingError { message: message.clone() });
+                let _ = state.broadcast.send(MetadataJobEvent::ProcessingError {
+                    message: message.clone(),
+                });
             }
             let _ = state.broadcast.send(MetadataJobEvent::Completed);
             let _ = self.global_tx.send(GlobalJobEvent {
@@ -647,8 +707,15 @@ impl KomfJobTracker {
     }
 
     /// 订阅某个 job 的事件流（返回 None 表示 job 不存在）。
-    pub async fn subscribe(&self, id: &MetadataJobId) -> Option<tokio::sync::broadcast::Receiver<MetadataJobEvent>> {
-        self.jobs.read().await.get(id).map(|s| s.broadcast.subscribe())
+    pub async fn subscribe(
+        &self,
+        id: &MetadataJobId,
+    ) -> Option<tokio::sync::broadcast::Receiver<MetadataJobEvent>> {
+        self.jobs
+            .read()
+            .await
+            .get(id)
+            .map(|s| s.broadcast.subscribe())
     }
 
     /// 订阅全局 job 事件流（firehose，不过滤）。
@@ -659,8 +726,7 @@ impl KomfJobTracker {
     /// 当前内存中的 RUNNING job 快照（供全局流连接时回放 Created，避免订阅竞态漏 job）。
     pub async fn running_jobs(&self) -> Vec<KomfJobRecord> {
         let jobs = self.jobs.read().await;
-        let mut records: Vec<KomfJobRecord> =
-            jobs.values().map(|s| s.record.clone()).collect();
+        let mut records: Vec<KomfJobRecord> = jobs.values().map(|s| s.record.clone()).collect();
         records.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         records
     }
@@ -672,7 +738,11 @@ mod global_stream_tests {
     use crate::model::MediaServerSeriesId;
 
     fn test_tracker() -> KomfJobTracker {
-        let dir = std::env::temp_dir().join(format!("komf-job-global-{}-{}", std::process::id(), rand_suffix()));
+        let dir = std::env::temp_dir().join(format!(
+            "komf-job-global-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let repo = Arc::new(KomfJobsRepository::open(&dir.join("jobs.sqlite")).unwrap());
@@ -681,7 +751,13 @@ mod global_stream_tests {
 
     fn rand_suffix() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        format!("{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos())
+        format!(
+            "{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        )
     }
 
     #[tokio::test]
@@ -716,13 +792,16 @@ mod global_stream_tests {
         let mut global = tracker.subscribe_all();
         let (job_id, tx) = tracker.register_job(MediaServerSeriesId("s2".into())).await;
         let _ = global.recv().await.unwrap(); // Created
-        // 经 sender 发 Completed：per-job 可收到，全局不转发为 Event。
+                                              // 经 sender 发 Completed：per-job 可收到，全局不转发为 Event。
         let _ = tx.send(MetadataJobEvent::Completed);
         tracker.complete_job(&job_id).await;
         let finished = global.recv().await.unwrap();
         assert!(matches!(
             finished.kind,
-            GlobalJobEventKind::Finished { status: MetadataJobStatus::Completed, .. }
+            GlobalJobEventKind::Finished {
+                status: MetadataJobStatus::Completed,
+                ..
+            }
         ));
         // per-job 终态后订阅返回 None（SSE 发 EventStreamNotFoundEvent）。
         assert!(tracker.subscribe(&job_id).await.is_none());
@@ -738,7 +817,9 @@ mod global_stream_tests {
         tracker.fail_job(&job_id, "boom".to_string(), false).await;
         let finished = global.recv().await.unwrap();
         match finished.kind {
-            GlobalJobEventKind::Finished { status, message, .. } => {
+            GlobalJobEventKind::Finished {
+                status, message, ..
+            } => {
                 assert_eq!(status, MetadataJobStatus::Failed);
                 assert_eq!(message.as_deref(), Some("boom"));
             }

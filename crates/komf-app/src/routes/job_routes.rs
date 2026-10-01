@@ -14,7 +14,9 @@ use komf_api_models::job::{
     KomfMetadataJob, KomfMetadataJobEvent as KomfEvent, KomfMetadataJobId, KomfMetadataJobStatus,
     JOB_CREATED_EVENT_NAME, JOB_FINISHED_EVENT_NAME,
 };
-use komf_mediaserver::jobs::{GlobalJobEvent, GlobalJobEventKind, MetadataJobEvent, MetadataJobStatus};
+use komf_mediaserver::jobs::{
+    GlobalJobEvent, GlobalJobEventKind, MetadataJobEvent, MetadataJobStatus,
+};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -95,7 +97,10 @@ async fn get_job(
             .into_response();
     };
     let state = state.read().unwrap();
-    match state.jobs_repository.get_job(&komf_mediaserver::jobs::MetadataJobId(job_id)) {
+    match state
+        .jobs_repository
+        .get_job(&komf_mediaserver::jobs::MetadataJobId(job_id))
+    {
         Ok(Some(job)) => (StatusCode::OK, Json(to_dto(&job))).into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
@@ -107,10 +112,7 @@ async fn delete_all(State(state): State<SharedState>) -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
-async fn job_events(
-    State(state): State<SharedState>,
-    Path(job_id): Path<String>,
-) -> Response {
+async fn job_events(State(state): State<SharedState>, Path(job_id): Path<String>) -> Response {
     // 对齐 Kotlin：jobId 先经 `UUID.fromString`（非 UUID → IllegalArgumentException → 400），
     // UUID 合法但查不到 → 200 SSE 发空 data 的 EventStreamNotFoundEvent。
     let job_id = match Uuid::parse_str(&job_id) {
@@ -135,7 +137,9 @@ async fn job_events(
         return event_stream_not_found();
     };
     let stream = event_stream(receiver);
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 /// 全局 job 事件流（firehose）：`GET /jobs/events`，单连接观察全部 job 活动。
@@ -168,7 +172,9 @@ async fn global_job_events(
     });
     // `?ids=` 传了但全非法 → 空流（不断开，行为与“过滤无命中”一致）。
     let filter = match filter {
-        Some(set) if query.ids.as_deref().is_some_and(|s| !s.trim().is_empty()) && set.is_empty() => {
+        Some(set)
+            if query.ids.as_deref().is_some_and(|s| !s.trim().is_empty()) && set.is_empty() =>
+        {
             return empty_global_stream();
         }
         other => other.filter(|set| !set.is_empty()),
@@ -183,7 +189,9 @@ async fn global_job_events(
     let receiver = job_tracker.subscribe_all();
     let snapshot = job_tracker.running_jobs().await;
     let stream = global_event_stream(receiver, snapshot, filter);
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 /// 连接建立时立即发出的存活注释帧（`: ok`），消除 axum `KeepAlive` 首个 15s 静默期：
@@ -196,7 +204,9 @@ fn sse_ok() -> Result<Event, Infallible> {
 /// `?ids=` 全非法时的空流：只保活，不断开。
 fn empty_global_stream() -> Response {
     let stream = empty_global_stream_inner();
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 /// `?ids=` 全非法时的空流数据源：连接即发存活注释帧，然后永久 pending 保活。
@@ -282,7 +292,11 @@ fn global_frame(event: GlobalJobEvent) -> Option<(String, String)> {
             }
             (name, serde_json::to_string(&data).unwrap_or_default()).into()
         }
-        GlobalJobEventKind::Finished { status, message, finished_at } => {
+        GlobalJobEventKind::Finished {
+            status,
+            message,
+            finished_at,
+        } => {
             let dto_status = match status {
                 MetadataJobStatus::Running => KomfMetadataJobStatus::Running,
                 MetadataJobStatus::Failed => KomfMetadataJobStatus::Failed,
@@ -324,7 +338,9 @@ fn event_stream_not_found() -> Response {
             .data("");
         yield Ok::<Event, Infallible>(event);
     };
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 fn event_stream(
@@ -463,7 +479,12 @@ mod global_stream_tests {
             .route("/jobs/events", get(|| async { "global" }))
             .route("/jobs/:job_id", get(|| async { "single" }));
         let res = app
-            .oneshot(Request::builder().uri("/jobs/events").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/jobs/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -486,7 +507,9 @@ mod sse_connect_tests {
         let response = Sse::new(event_stream(rx))
             .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
             .into_response();
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         assert!(
             bytes.starts_with(b": ok\n\n"),
             "首帧应为 `: ok` 注释帧，实际：{:?}",
@@ -511,7 +534,9 @@ mod sse_connect_tests {
             .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
             .into_response();
         let text = String::from_utf8_lossy(
-            &axum::body::to_bytes(response.into_body(), 8192).await.unwrap(),
+            &axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
         )
         .into_owned();
         assert!(

@@ -5,7 +5,8 @@
 //! `eventListener.enabled` 时自动启动。
 use crate::client::MediaServerClient;
 use crate::config::{
-    DatabaseConfig, KavitaConfig, KomgaConfig, MetadataProcessingConfig, MetadataUpdateConfig, StumpConfig,
+    DatabaseConfig, KavitaConfig, KomgaConfig, MetadataProcessingConfig, MetadataUpdateConfig,
+    StumpConfig,
 };
 use crate::event_listener::{
     KomgaEventHandler, MediaServerEventListener, MetadataEventHandler, NotificationsEventHandler,
@@ -175,11 +176,7 @@ impl MediaServerModule {
             );
         }
         if stump_config.event_listener.enabled {
-            module.start_stump_listener(
-                &stump_config,
-                discord_service,
-                apprise_service,
-            );
+            module.start_stump_listener(&stump_config, discord_service, apprise_service);
         }
 
         module
@@ -280,7 +277,10 @@ impl MediaServerModule {
                 MediaServer::Stump,
             )),
         ];
-        let handler = Arc::new(StumpEventHandler::new(self.stump_client_core.clone(), listeners));
+        let handler = Arc::new(StumpEventHandler::new(
+            self.stump_client_core.clone(),
+            listeners,
+        ));
         let token = CancellationToken::new();
         let task_token = token.clone();
         let task_handler = handler.clone();
@@ -347,7 +347,10 @@ impl MediaServerModule {
                         config,
                         media_server_client.clone(),
                         metadata_providers.clone(),
-                        library_updaters.get(library_id).cloned().unwrap_or_else(|| default_updater.clone()),
+                        library_updaters
+                            .get(library_id)
+                            .cloned()
+                            .unwrap_or_else(|| default_updater.clone()),
                         repository.clone(),
                         job_tracker.clone(),
                         media_server,
@@ -407,7 +410,10 @@ impl MediaServerModule {
             config.post_processing.series_title,
             config.post_processing.series_title_language.clone(),
             config.post_processing.alternative_series_titles,
-            config.post_processing.alternative_series_title_languages.clone(),
+            config
+                .post_processing
+                .alternative_series_title_languages
+                .clone(),
             config.post_processing.order_books,
             config.post_processing.reading_direction_value,
             config.post_processing.language_value.clone(),

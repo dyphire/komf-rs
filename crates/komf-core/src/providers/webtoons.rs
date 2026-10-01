@@ -468,7 +468,10 @@ impl WebtoonsClient {
             base_headers,
             mobile_headers,
             parser: WebtoonsParser,
-            limiter: crate::rate_limiter::ThroughputLimiter::new(1, std::time::Duration::from_secs(1)),
+            limiter: crate::rate_limiter::ThroughputLimiter::new(
+                1,
+                std::time::Duration::from_secs(1),
+            ),
         }
     }
 
@@ -978,7 +981,6 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for WebtoonsMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         // series_id = URL path+query（对齐 WebtoonsSeriesId 的 encoded_path_and_query）
         let re = regex::Regex::new(r"webtoons\.com([^\s]+)").ok()?;
@@ -999,7 +1001,9 @@ impl MetadataProvider for WebtoonsMetadataProvider {
         let series = self
             .series_cache
             .get_or_load(series_id.clone(), || async move {
-                self.client.get_series_with_chapters(&WebtoonsSeriesId(id)).await
+                self.client
+                    .get_series_with_chapters(&WebtoonsSeriesId(id))
+                    .await
             })
             .await
             .ok()?;

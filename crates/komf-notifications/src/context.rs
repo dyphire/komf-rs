@@ -119,7 +119,12 @@ pub fn to_value_tree(context: &NotificationContext) -> crate::velocity::Value {
     metadata.insert("publisher".to_string(), opt_str(m.publisher.clone()));
     metadata.insert(
         "alternativePublishers".to_string(),
-        Value::List(m.alternative_publishers.iter().map(|p| Value::Str(p.clone())).collect()),
+        Value::List(
+            m.alternative_publishers
+                .iter()
+                .map(|p| Value::Str(p.clone()))
+                .collect(),
+        ),
     );
     metadata.insert("ageRating".to_string(), opt_int(m.age_rating));
     metadata.insert("language".to_string(), opt_str(m.language.clone()));
@@ -165,7 +170,10 @@ pub fn to_value_tree(context: &NotificationContext) -> crate::velocity::Value {
     let mut series = HashMap::new();
     series.insert("id".to_string(), Value::Str(context.series.id.clone()));
     series.insert("name".to_string(), Value::Str(context.series.name.clone()));
-    series.insert("bookCount".to_string(), Value::Int(context.series.book_count as i64));
+    series.insert(
+        "bookCount".to_string(),
+        Value::Int(context.series.book_count as i64),
+    );
     series.insert("metadata".to_string(), Value::Map(metadata));
 
     let mut books = Vec::new();
@@ -174,10 +182,22 @@ pub fn to_value_tree(context: &NotificationContext) -> crate::velocity::Value {
     for book in sorted {
         let mut bm = HashMap::new();
         bm.insert("title".to_string(), Value::Str(book.metadata.title.clone()));
-        bm.insert("summary".to_string(), opt_str(book.metadata.summary.clone()));
-        bm.insert("number".to_string(), Value::Str(book.metadata.number.clone()));
-        bm.insert("numberSort".to_string(), opt_str(book.metadata.number_sort.clone()));
-        bm.insert("releaseDate".to_string(), opt_str(book.metadata.release_date.clone()));
+        bm.insert(
+            "summary".to_string(),
+            opt_str(book.metadata.summary.clone()),
+        );
+        bm.insert(
+            "number".to_string(),
+            Value::Str(book.metadata.number.clone()),
+        );
+        bm.insert(
+            "numberSort".to_string(),
+            opt_str(book.metadata.number_sort.clone()),
+        );
+        bm.insert(
+            "releaseDate".to_string(),
+            opt_str(book.metadata.release_date.clone()),
+        );
         bm.insert(
             "authors".to_string(),
             Value::List(
@@ -195,7 +215,13 @@ pub fn to_value_tree(context: &NotificationContext) -> crate::velocity::Value {
         );
         bm.insert(
             "tags".to_string(),
-            Value::List(book.metadata.tags.iter().map(|t| Value::Str(t.clone())).collect()),
+            Value::List(
+                book.metadata
+                    .tags
+                    .iter()
+                    .map(|t| Value::Str(t.clone()))
+                    .collect(),
+            ),
         );
         bm.insert("isbn".to_string(), opt_str(book.metadata.isbn.clone()));
         bm.insert(
@@ -226,7 +252,10 @@ pub fn to_value_tree(context: &NotificationContext) -> crate::velocity::Value {
     root.insert("library".to_string(), Value::Map(library));
     root.insert("series".to_string(), Value::Map(series));
     root.insert("books".to_string(), Value::List(books));
-    root.insert("mediaServer".to_string(), Value::Str(context.media_server.clone()));
+    root.insert(
+        "mediaServer".to_string(),
+        Value::Str(context.media_server.clone()),
+    );
     Value::Map(root)
 }
 

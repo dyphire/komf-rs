@@ -27,9 +27,9 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 /// 断线重连退避（对齐 Komga/Kavita 10 秒）。
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
@@ -92,7 +92,10 @@ impl EventBatcher {
 
     /// `JobUpdate` 终态 → 关窗。返回 true 表示所有任务已结束、应派发缓冲。
     fn on_job_update(&mut self, id: &str, status: Option<&str>) -> bool {
-        if matches!(status, Some("COMPLETED") | Some("FAILED") | Some("CANCELLED")) {
+        if matches!(
+            status,
+            Some("COMPLETED") | Some("FAILED") | Some("CANCELLED")
+        ) {
             self.active_jobs.remove(id);
             tracing::debug!(
                 "stump job ended {id} ({status:?}); {} job(s) remaining",
@@ -128,7 +131,10 @@ pub struct StumpEventHandler {
 }
 
 impl StumpEventHandler {
-    pub fn new(client: Arc<StumpClient>, listeners: Vec<Arc<dyn MediaServerEventListener>>) -> Self {
+    pub fn new(
+        client: Arc<StumpClient>,
+        listeners: Vec<Arc<dyn MediaServerEventListener>>,
+    ) -> Self {
         Self {
             client,
             listeners,
@@ -169,9 +175,10 @@ impl StumpEventHandler {
         let mut request = ws_url
             .into_client_request()
             .map_err(|e| MediaServerError::message(format!("invalid stump ws url: {e}")))?;
-        request
-            .headers_mut()
-            .insert("Sec-WebSocket-Protocol", "graphql-transport-ws".parse().unwrap());
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "graphql-transport-ws".parse().unwrap(),
+        );
         request.headers_mut().insert(
             "Authorization",
             format!("Bearer {token_value}").parse().unwrap(),
@@ -281,9 +288,10 @@ impl StumpEventHandler {
                 let status = event.status.as_deref();
                 let flush = self.batcher.lock().unwrap().on_job_update(&id, status);
                 if flush {
-                    tracing::info!("stump scan window closed; dispatching {} batched event(s)", {
-                        self.batcher.lock().unwrap().buffer.len()
-                    });
+                    tracing::info!(
+                        "stump scan window closed; dispatching {} batched event(s)",
+                        { self.batcher.lock().unwrap().buffer.len() }
+                    );
                     self.flush().await;
                 }
             }
@@ -342,11 +350,9 @@ impl StumpEventHandler {
                         continue;
                     };
                     let book_ids: Vec<String> = match books_cache.entry(series_id.to_string()) {
-                        std::collections::hash_map::Entry::Occupied(entry) => entry
-                            .get()
-                            .iter()
-                            .map(|b| b.id.clone())
-                            .collect(),
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            entry.get().iter().map(|b| b.id.clone()).collect()
+                        }
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             let books = self
                                 .client
@@ -536,7 +542,9 @@ mod tests {
         batcher.on_job_started("job-1");
         // MAX_BUFFER - 1 条入缓冲
         for i in 0..(MAX_BUFFER - 1) {
-            assert!(batcher.on_created(created_event(&format!("s{i}"))).is_none());
+            assert!(batcher
+                .on_created(created_event(&format!("s{i}")))
+                .is_none());
         }
         // 第 MAX_BUFFER 条触发安全阀派发
         let flushed = batcher.on_created(created_event("s-cap")).unwrap();

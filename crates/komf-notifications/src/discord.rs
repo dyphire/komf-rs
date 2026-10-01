@@ -113,9 +113,16 @@ impl DiscordVelocityTemplates {
         render_state(&state, &root)
     }
 
-    pub fn render_with(&self, context: &NotificationContext, templates: &DiscordStringTemplates) -> DiscordRenderResult {
+    pub fn render_with(
+        &self,
+        context: &NotificationContext,
+        templates: &DiscordStringTemplates,
+    ) -> DiscordRenderResult {
         let state = DiscordTemplateState {
-            title: templates.title_template.as_deref().and_then(|t| Template::parse(t).ok()),
+            title: templates
+                .title_template
+                .as_deref()
+                .and_then(|t| Template::parse(t).ok()),
             title_url: templates
                 .title_url_template
                 .as_deref()
@@ -124,7 +131,10 @@ impl DiscordVelocityTemplates {
                 .description_template
                 .as_deref()
                 .and_then(|t| Template::parse(t).ok()),
-            footer: templates.footer_template.as_deref().and_then(|t| Template::parse(t).ok()),
+            footer: templates
+                .footer_template
+                .as_deref()
+                .and_then(|t| Template::parse(t).ok()),
             fields: templates
                 .field_templates
                 .iter()
@@ -145,7 +155,8 @@ impl DiscordVelocityTemplates {
         let directory = &self.directory;
         let title = read_file_or(directory, TITLE_FILE, &default_title_template());
         let title_url = read_file_opt(directory, TITLE_URL_FILE);
-        let description = read_file_or(directory, DESCRIPTION_FILE, &default_description_template());
+        let description =
+            read_file_or(directory, DESCRIPTION_FILE, &default_description_template());
         let footer = read_file_opt(directory, FOOTER_FILE);
         let fields = read_field_string_templates(directory);
         DiscordStringTemplates {
@@ -163,7 +174,11 @@ impl DiscordVelocityTemplates {
 
         write_template_file(dir, TITLE_FILE, templates.title_template.as_deref());
         write_template_file(dir, TITLE_URL_FILE, templates.title_url_template.as_deref());
-        write_template_file(dir, DESCRIPTION_FILE, templates.description_template.as_deref());
+        write_template_file(
+            dir,
+            DESCRIPTION_FILE,
+            templates.description_template.as_deref(),
+        );
         write_template_file(dir, FOOTER_FILE, templates.footer_template.as_deref());
 
         // 清理旧的 field_* 文件
@@ -417,7 +432,8 @@ impl DiscordWebhookService {
         embed_color: String,
         template_renderer: DiscordVelocityTemplates,
     ) -> Self {
-        let embed_color = u32::from_str_radix(embed_color.trim_start_matches('#'), 16).unwrap_or(0x1F8B4C);
+        let embed_color =
+            u32::from_str_radix(embed_color.trim_start_matches('#'), 16).unwrap_or(0x1F8B4C);
         Self {
             client,
             webhooks,
@@ -451,7 +467,8 @@ impl DiscordWebhookService {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok())
                     .map(Duration::from_secs);
-                let backoff = Duration::from_secs(1u64 << attempt.min(3)).min(Duration::from_secs(10));
+                let backoff =
+                    Duration::from_secs(1u64 << attempt.min(3)).min(Duration::from_secs(10));
                 let delay = retry_after.filter(|d| *d > backoff).unwrap_or(backoff);
                 attempt += 1;
                 tokio::time::sleep(delay).await;
@@ -479,24 +496,24 @@ impl DiscordWebhookService {
             && render_result.title.is_none()
             && !self.series_cover
         {
-            tracing::warn!("empty discord message for series {}. Skipping notification", context.series.name);
+            tracing::warn!(
+                "empty discord message for series {}. Skipping notification",
+                context.series.name
+            );
             return Ok(());
         }
 
         let image = if self.series_cover {
-            context
-                .series_cover
-                .as_ref()
-                .map(|_| {
-                    let ext = context
-                        .series_cover_mime_type
-                        .as_deref()
-                        .and_then(|m| m.strip_prefix("image/"))
-                        .unwrap_or("jpeg");
-                    EmbedImage {
-                        url: format!("attachment://cover.{ext}"),
-                    }
-                })
+            context.series_cover.as_ref().map(|_| {
+                let ext = context
+                    .series_cover_mime_type
+                    .as_deref()
+                    .and_then(|m| m.strip_prefix("image/"))
+                    .unwrap_or("jpeg");
+                EmbedImage {
+                    url: format!("attachment://cover.{ext}"),
+                }
+            })
         } else {
             None
         };
@@ -586,17 +603,29 @@ mod tests {
 
         let start = Instant::now();
         limiter.acquire().await;
-        assert!(start.elapsed() < Duration::from_millis(50), "first permit should be immediate");
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "first permit should be immediate"
+        );
 
         for _ in 0..3 {
             limiter.acquire().await;
         }
         let after_four = start.elapsed();
-        assert!(after_four >= Duration::from_millis(280), "four permits should span ~300ms, got {after_four:?}");
+        assert!(
+            after_four >= Duration::from_millis(280),
+            "four permits should span ~300ms, got {after_four:?}"
+        );
 
         limiter.acquire().await; // 第 5 个许可在 400ms 槽位
         let after_five = start.elapsed();
-        assert!(after_five >= Duration::from_millis(380), "fifth permit should wait until 400ms, got {after_five:?}");
-        assert!(after_five < Duration::from_millis(800), "got {after_five:?}");
+        assert!(
+            after_five >= Duration::from_millis(380),
+            "fifth permit should wait until 400ms, got {after_five:?}"
+        );
+        assert!(
+            after_five < Duration::from_millis(800),
+            "got {after_five:?}"
+        );
     }
 }

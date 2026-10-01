@@ -1348,10 +1348,7 @@ pub fn create_provider(
         type_includes,
         type_excludes,
         cache: TtlCache::new(Duration::from_secs(30 * 60)),
-        book_cover_fetch_client: config
-            .book_metadata
-            .thumbnail
-            .then(|| http_client.clone()),
+        book_cover_fetch_client: config.book_metadata.thumbnail.then(|| http_client.clone()),
         cover_languages,
         books_enabled: config.series_metadata.books,
         images_cache: TtlCache::new(Duration::from_secs(30 * 60)),
@@ -1439,7 +1436,6 @@ fn dedup_publishers(v: &mut Vec<Publisher>) {
 
 #[async_trait::async_trait]
 impl MetadataProvider for MangaBakaMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"mangabaka\.org/(\d+)").ok()?;
         re.captures(query)
@@ -1467,7 +1463,10 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         let id: i64 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
         })?;
-        let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
+        let series = self
+            .cache
+            .get_or_load(id, || self.data_source.get_series(id))
+            .await?;
         let cover = self.fetch_cover(&series).await;
         let images = if self.books_enabled {
             self.fetch_series_images(id).await?
@@ -1486,7 +1485,10 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         let id: i64 = series_id.0.parse().map_err(|_| {
             ProviderError::message(format!("invalid MangaBaka series id: {}", series_id.0))
         })?;
-        let series = self.cache.get_or_load(id, || self.data_source.get_series(id)).await?;
+        let series = self
+            .cache
+            .get_or_load(id, || self.data_source.get_series(id))
+            .await?;
         Ok(self.fetch_cover(&series).await)
     }
 
@@ -1678,8 +1680,9 @@ impl MangaBakaDbRepository {
     }
 
     fn open(&self) -> Result<rusqlite::Connection, ProviderError> {
-        let conn = rusqlite::Connection::open(&self.database_file)
-            .map_err(|e| ProviderError::message(format!("failed to open MangaBaka database: {e}")))?;
+        let conn = rusqlite::Connection::open(&self.database_file).map_err(|e| {
+            ProviderError::message(format!("failed to open MangaBaka database: {e}"))
+        })?;
         // 自建表（下载器保留 komga_series；tags/series_tags 在下载重建时由下载器重建，
         // 这里 ensure 是为了手工放置的库也能用管理 API）。
         conn.execute_batch(
@@ -1863,14 +1866,20 @@ impl MangaBakaDbRepository {
             return Ok(None);
         };
         let series = self.fetch_series_by_ids(&conn, &[mangabaka_id])?;
-        Ok(series.into_iter().next().map(|series| MangaBakaLinkedSeriesDto {
-            komga_id: komga_id.to_string(),
-            series,
-        }))
+        Ok(series
+            .into_iter()
+            .next()
+            .map(|series| MangaBakaLinkedSeriesDto {
+                komga_id: komga_id.to_string(),
+                series,
+            }))
     }
 
     /// `findAllLinked`：批量查询 Komga 系列关联（保持输入顺序）。
-    pub fn find_all_linked(&self, komga_ids: &[String]) -> Result<Vec<MangaBakaLinkedSeriesDto>, ProviderError> {
+    pub fn find_all_linked(
+        &self,
+        komga_ids: &[String],
+    ) -> Result<Vec<MangaBakaLinkedSeriesDto>, ProviderError> {
         if komga_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1971,22 +1980,24 @@ impl MangaBakaDbRepository {
                 .get::<_, Option<String>>(5)?
                 .and_then(|v| parse_tag_weight(&v));
             let content_rating = parse_content_rating_db(&row.get::<_, Option<String>>(12)?);
-            out.entry(series_id).or_default().push(MangaBakaSeriesTagDto {
-                id: row.get(1)?,
-                is_spoiler: row.get::<_, Option<i64>>(2)?.map(|v| v != 0),
-                is_explicit: row.get::<_, i64>(3)? != 0,
-                implied_by_tag_ids: implied,
-                weight,
-                parent_id: row.get(6)?,
-                merged_with: row.get(7)?,
-                name: row.get(8)?,
-                name_path: row.get(9)?,
-                description: row.get(10)?,
-                is_genre: row.get::<_, i64>(11)? != 0,
-                content_rating: Some(content_rating),
-                series_count: row.get(13)?,
-                level: row.get(14)?,
-            });
+            out.entry(series_id)
+                .or_default()
+                .push(MangaBakaSeriesTagDto {
+                    id: row.get(1)?,
+                    is_spoiler: row.get::<_, Option<i64>>(2)?.map(|v| v != 0),
+                    is_explicit: row.get::<_, i64>(3)? != 0,
+                    implied_by_tag_ids: implied,
+                    weight,
+                    parent_id: row.get(6)?,
+                    merged_with: row.get(7)?,
+                    name: row.get(8)?,
+                    name_path: row.get(9)?,
+                    description: row.get(10)?,
+                    is_genre: row.get::<_, i64>(11)? != 0,
+                    content_rating: Some(content_rating),
+                    series_count: row.get(13)?,
+                    level: row.get(14)?,
+                });
         }
         Ok(out)
     }
@@ -2089,25 +2100,23 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
     };
 
     let cover_x350 = text(row, "cover_x350_x1")?;
-    let raw_cover = text(row, "cover_raw_url")?.map(|url| {
-        MangaBakaCoverRawDto {
-            url: Some(url),
-            size: text(row, "cover_raw_size")
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse().ok()),
-            height: text(row, "cover_raw_height")
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse().ok()),
-            width: text(row, "cover_raw_width")
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse().ok()),
-            blurhash: text(row, "cover_raw_blurhash").ok().flatten(),
-            thumbhash: text(row, "cover_raw_thumbhash").ok().flatten(),
-            format: text(row, "cover_raw_format").ok().flatten(),
-        }
+    let raw_cover = text(row, "cover_raw_url")?.map(|url| MangaBakaCoverRawDto {
+        url: Some(url),
+        size: text(row, "cover_raw_size")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok()),
+        height: text(row, "cover_raw_height")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok()),
+        width: text(row, "cover_raw_width")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok()),
+        blurhash: text(row, "cover_raw_blurhash").ok().flatten(),
+        thumbhash: text(row, "cover_raw_thumbhash").ok().flatten(),
+        format: text(row, "cover_raw_format").ok().flatten(),
     });
     let cover = MangaBakaCoverDto {
         raw: raw_cover,
@@ -2120,9 +2129,12 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
         }),
     };
 
-    let rating_col = |row: &rusqlite::Row<'_>, base: &str| -> Result<(Option<f64>, Option<i32>), ProviderError> {
+    let rating_col = |row: &rusqlite::Row<'_>,
+                      base: &str|
+     -> Result<(Option<f64>, Option<i32>), ProviderError> {
         let rating = text(row, &format!("{base}_rating"))?.and_then(|v| v.parse().ok());
-        let normalized = text(row, &format!("{base}_rating_normalized"))?.and_then(|v| v.parse().ok());
+        let normalized =
+            text(row, &format!("{base}_rating_normalized"))?.and_then(|v| v.parse().ok());
         Ok((rating, normalized))
     };
 
@@ -2136,7 +2148,8 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
             }
         }),
         anime_news_network: text(row, "source_anime_news_network_id")?.map(|v| {
-            let (rating, normalized) = rating_col(row, "source_anime_news_network").unwrap_or((None, None));
+            let (rating, normalized) =
+                rating_col(row, "source_anime_news_network").unwrap_or((None, None));
             MangaBakaSourceEntryDto {
                 id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
                 rating,
@@ -2144,7 +2157,8 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
             }
         }),
         anime_planet: text(row, "source_anime_planet_id")?.map(|v| {
-            let (rating, normalized) = rating_col(row, "source_anime_planet").unwrap_or((None, None));
+            let (rating, normalized) =
+                rating_col(row, "source_anime_planet").unwrap_or((None, None));
             MangaBakaSourceEntryDto {
                 id: Some(serde_json::Value::String(v)),
                 rating,
@@ -2160,7 +2174,8 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
             }
         }),
         manga_updates: text(row, "source_manga_updates_id")?.map(|v| {
-            let (rating, normalized) = rating_col(row, "source_manga_updates").unwrap_or((None, None));
+            let (rating, normalized) =
+                rating_col(row, "source_manga_updates").unwrap_or((None, None));
             MangaBakaSourceEntryDto {
                 id: Some(serde_json::Value::String(v)),
                 rating,
@@ -2168,7 +2183,8 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
             }
         }),
         my_anime_list: text(row, "source_my_anime_list_id")?.map(|v| {
-            let (rating, normalized) = rating_col(row, "source_my_anime_list").unwrap_or((None, None));
+            let (rating, normalized) =
+                rating_col(row, "source_my_anime_list").unwrap_or((None, None));
             MangaBakaSourceEntryDto {
                 id: Some(serde_json::Value::from(v.parse::<i64>().unwrap_or(0))),
                 rating,
@@ -2209,10 +2225,14 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
         id: row
             .get("id")
             .map_err(|e| ProviderError::message(format!("MangaBaka db id: {e}")))?,
-        has_anime: text(row, "has_anime")?.map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+        has_anime: text(row, "has_anime")?
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
         anime,
         content_rating: Some(content_rating),
-        is_licensed: text(row, "is_licensed")?.map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+        is_licensed: text(row, "is_licensed")?
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
         last_updated_at: text(row, "last_updated_at")?,
         merged_with: text(row, "merged_with")?.and_then(|v| v.parse().ok()),
         original_language: text(row, "original_language")?,
@@ -2302,7 +2322,8 @@ pub struct MangaBakaDbDownloader {
     pub database_file: PathBuf,
     pub http: reqwest::Client,
     pub download_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    pub progress: Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
+    pub progress:
+        Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
 }
 
 impl MangaBakaDbDownloader {
@@ -2364,9 +2385,7 @@ impl MangaBakaDbDownloader {
                 // 否则路由层 watch 流等不到 Finished/Error 会一直挂起（表现为断流/失败）。
                 if let Err(e) = &result {
                     tracing::error!("MangaBaka database download failed: {e}");
-                    let _ = sender.send(Some(DownloadProgress::ErrorEvent {
-                        message: e.clone(),
-                    }));
+                    let _ = sender.send(Some(DownloadProgress::ErrorEvent { message: e.clone() }));
                 }
                 // 容错：失败残留的临时文件清理（成功路径已 rename，此清理无害）
                 let _ = std::fs::remove_file(PathBuf::from(format!(
@@ -2442,9 +2461,12 @@ impl MangaBakaDbDownloader {
             },
         );
         // 小请求重试走公共工具（`util::download`，与 bangumi/ehentai/bookwalker 同口径）。
-        let new_checksum =
-            crate::util::download::fetch_text_with_retry(&self.http, MANGA_BAKA_CHECKSUM_URL, "mangabaka")
-                .await?;
+        let new_checksum = crate::util::download::fetch_text_with_retry(
+            &self.http,
+            MANGA_BAKA_CHECKSUM_URL,
+            "mangabaka",
+        )
+        .await?;
         if self.database_file.exists() && self.metadata_valid() {
             let stored = std::fs::read_to_string(self.work_dir.join("checksum.sha1"))
                 .unwrap_or_default()
@@ -2456,9 +2478,7 @@ impl MangaBakaDbDownloader {
                     emit(sender, DownloadProgress::FinishedEvent);
                     return Ok(());
                 }
-                tracing::warn!(
-                    "mangabaka database exists but is not usable; forcing redownload"
-                );
+                tracing::warn!("mangabaka database exists but is not usable; forcing redownload");
             }
         }
         // 容错：保留旧库与元数据；下载/解压/建索引写临时文件，成功后再原子替换，
@@ -2612,8 +2632,8 @@ impl MangaBakaDbDownloader {
                 "mangabaka",
             )
             .await?;
-            let response: MangaBakaTagsResponse = serde_json::from_str(&text)
-                .map_err(|e| format!("SerializationException: {e}"))?;
+            let response: MangaBakaTagsResponse =
+                serde_json::from_str(&text).map_err(|e| format!("SerializationException: {e}"))?;
             let conn = rusqlite::Connection::open(&tmp_file)
                 .map_err(|e| format!("SQLiteException: {e}"))?;
             for tag in response.data {
@@ -2708,7 +2728,6 @@ impl MangaBakaDbDownloader {
         emit(sender, DownloadProgress::FinishedEvent);
         Ok(())
     }
-
 }
 
 impl Clone for MangaBakaDbDownloader {
@@ -2727,13 +2746,17 @@ impl Clone for MangaBakaDbDownloader {
 // 管理 API 映射（core DTO -> komf-api-models DTO，对应 Kotlin `MangaBakaMapper.kt`）
 // ---------------------------------------------------------------------------
 
-fn api_content_rating(v: Option<MangaBakaContentRatingDto>) -> komf_api_models::mangabaka::MangaBakaContentRating {
+fn api_content_rating(
+    v: Option<MangaBakaContentRatingDto>,
+) -> komf_api_models::mangabaka::MangaBakaContentRating {
     match v.unwrap_or_default() {
         MangaBakaContentRatingDto::Safe => komf_api_models::mangabaka::MangaBakaContentRating::Safe,
         MangaBakaContentRatingDto::Suggestive => {
             komf_api_models::mangabaka::MangaBakaContentRating::Suggestive
         }
-        MangaBakaContentRatingDto::Erotica => komf_api_models::mangabaka::MangaBakaContentRating::Erotica,
+        MangaBakaContentRatingDto::Erotica => {
+            komf_api_models::mangabaka::MangaBakaContentRating::Erotica
+        }
         MangaBakaContentRatingDto::Pornographic => {
             komf_api_models::mangabaka::MangaBakaContentRating::Pornographic
         }
@@ -2762,11 +2785,15 @@ fn api_type(v: MangaBakaTypeDto) -> komf_api_models::mangabaka::MangaBakaType {
     }
 }
 
-fn api_state(v: Option<MangaBakaSeriesStateDto>) -> komf_api_models::mangabaka::MangaBakaSeriesState {
+fn api_state(
+    v: Option<MangaBakaSeriesStateDto>,
+) -> komf_api_models::mangabaka::MangaBakaSeriesState {
     match v.unwrap_or_default() {
         MangaBakaSeriesStateDto::Active => komf_api_models::mangabaka::MangaBakaSeriesState::Active,
         MangaBakaSeriesStateDto::Merged => komf_api_models::mangabaka::MangaBakaSeriesState::Merged,
-        MangaBakaSeriesStateDto::Deleted => komf_api_models::mangabaka::MangaBakaSeriesState::Deleted,
+        MangaBakaSeriesStateDto::Deleted => {
+            komf_api_models::mangabaka::MangaBakaSeriesState::Deleted
+        }
     }
 }
 
@@ -2774,7 +2801,9 @@ fn api_link_type(v: Option<MangaBakaLinkTypeDto>) -> komf_api_models::mangabaka:
     match v.unwrap_or(MangaBakaLinkTypeDto::Other) {
         MangaBakaLinkTypeDto::Publisher => komf_api_models::mangabaka::MangaBakaLinkType::Publisher,
         MangaBakaLinkTypeDto::Retailer => komf_api_models::mangabaka::MangaBakaLinkType::Retailer,
-        MangaBakaLinkTypeDto::Webplatform => komf_api_models::mangabaka::MangaBakaLinkType::Webplatform,
+        MangaBakaLinkTypeDto::Webplatform => {
+            komf_api_models::mangabaka::MangaBakaLinkType::Webplatform
+        }
         MangaBakaLinkTypeDto::Info => komf_api_models::mangabaka::MangaBakaLinkType::Info,
         MangaBakaLinkTypeDto::Social => komf_api_models::mangabaka::MangaBakaLinkType::Social,
         MangaBakaLinkTypeDto::News => komf_api_models::mangabaka::MangaBakaLinkType::News,
@@ -2783,7 +2812,9 @@ fn api_link_type(v: Option<MangaBakaLinkTypeDto>) -> komf_api_models::mangabaka:
     }
 }
 
-fn api_relation_type(v: MangaBakaRelationTypeDto) -> komf_api_models::mangabaka::MangaBakaRelationType {
+fn api_relation_type(
+    v: MangaBakaRelationTypeDto,
+) -> komf_api_models::mangabaka::MangaBakaRelationType {
     use komf_api_models::mangabaka::MangaBakaRelationType as A;
     match v {
         MangaBakaRelationTypeDto::Adaptation => A::Adaptation,
@@ -2811,7 +2842,9 @@ fn api_relation_type(v: MangaBakaRelationTypeDto) -> komf_api_models::mangabaka:
     }
 }
 
-fn api_chronology(v: MangaBakaRelationshipChronologyDto) -> komf_api_models::mangabaka::MangaBakaRelationshipChronology {
+fn api_chronology(
+    v: MangaBakaRelationshipChronologyDto,
+) -> komf_api_models::mangabaka::MangaBakaRelationshipChronology {
     match v {
         MangaBakaRelationshipChronologyDto::Narrative => {
             komf_api_models::mangabaka::MangaBakaRelationshipChronology::Narrative
@@ -2829,9 +2862,15 @@ fn api_weight(v: Option<MangaBakaTagWeightDto>) -> komf_api_models::mangabaka::M
     match v.unwrap_or(MangaBakaTagWeightDto::Unweighted) {
         MangaBakaTagWeightDto::Core => komf_api_models::mangabaka::MangaBakaTagWeight::Core,
         MangaBakaTagWeightDto::Defining => komf_api_models::mangabaka::MangaBakaTagWeight::Defining,
-        MangaBakaTagWeightDto::Recurrent => komf_api_models::mangabaka::MangaBakaTagWeight::Recurrent,
-        MangaBakaTagWeightDto::Incidental => komf_api_models::mangabaka::MangaBakaTagWeight::Incidental,
-        MangaBakaTagWeightDto::Unweighted => komf_api_models::mangabaka::MangaBakaTagWeight::Unweighted,
+        MangaBakaTagWeightDto::Recurrent => {
+            komf_api_models::mangabaka::MangaBakaTagWeight::Recurrent
+        }
+        MangaBakaTagWeightDto::Incidental => {
+            komf_api_models::mangabaka::MangaBakaTagWeight::Incidental
+        }
+        MangaBakaTagWeightDto::Unweighted => {
+            komf_api_models::mangabaka::MangaBakaTagWeight::Unweighted
+        }
     }
 }
 
@@ -2871,7 +2910,9 @@ macro_rules! map_source_field {
 }
 
 /// `MangaBakaSeries.toDto()`：core DTO -> 管理 API DTO（对应 Kotlin MangaBakaMapper）。
-pub fn to_api_series(series: &MangaBakaSeriesDto) -> komf_api_models::mangabaka::KomfMangaBakaSeries {
+pub fn to_api_series(
+    series: &MangaBakaSeriesDto,
+) -> komf_api_models::mangabaka::KomfMangaBakaSeries {
     use komf_api_models::mangabaka::*;
     KomfMangaBakaSeries {
         id: MangaBakaSeriesId(series.id),
@@ -2961,7 +3002,11 @@ pub fn to_api_series(series: &MangaBakaSeriesDto) -> komf_api_models::mangabaka:
                     name_path: t.name_path.clone(),
                     parent_id: t.parent_id.map(MangaBakaTagId),
                     series_count: t.series_count,
-                    implied_by_tag_ids: t.implied_by_tag_ids.iter().map(|id| MangaBakaTagId(*id)).collect(),
+                    implied_by_tag_ids: t
+                        .implied_by_tag_ids
+                        .iter()
+                        .map(|id| MangaBakaTagId(*id))
+                        .collect(),
                     is_explicit: t.is_explicit,
                     is_genre: t.is_genre,
                     merged_with: t.merged_with,
@@ -2982,7 +3027,11 @@ pub fn to_api_series(series: &MangaBakaSeriesDto) -> komf_api_models::mangabaka:
                 .collect()
         }),
         source: MangaBakaSource {
-            anilist: map_source_field!(series.source.anilist, MangaBakaAniListSource, api_source_id),
+            anilist: map_source_field!(
+                series.source.anilist,
+                MangaBakaAniListSource,
+                api_source_id
+            ),
             anime_news_network: map_source_field!(
                 series.source.anime_news_network,
                 MangaBakaAnimeNewsNetworkSource,
@@ -3004,7 +3053,11 @@ pub fn to_api_series(series: &MangaBakaSeriesDto) -> komf_api_models::mangabaka:
                 MangaBakaMyAnimeListSource,
                 api_source_id
             ),
-            shikimori: map_source_field!(series.source.shikimori, MangaBakaShikimoriSource, api_source_id),
+            shikimori: map_source_field!(
+                series.source.shikimori,
+                MangaBakaShikimoriSource,
+                api_source_id
+            ),
         },
     }
 }
@@ -3027,7 +3080,9 @@ pub fn to_api_tag(tag: &MangaBakaTagDto) -> komf_api_models::mangabaka::KomfMang
         level: tag.level,
         name: tag.name.clone(),
         name_path: tag.name_path.clone(),
-        parent_id: tag.parent_id.map(komf_api_models::mangabaka::MangaBakaTagId),
+        parent_id: tag
+            .parent_id
+            .map(komf_api_models::mangabaka::MangaBakaTagId),
         series_count: tag.series_count,
         is_genre: tag.is_genre,
         merged_with: tag.merged_with,
@@ -3035,7 +3090,9 @@ pub fn to_api_tag(tag: &MangaBakaTagDto) -> komf_api_models::mangabaka::KomfMang
 }
 
 /// `MangaBakaLinkedSeries.toDto()`：Komga 系列与其 MangaBaka 系列的关联。
-pub fn to_api_linked(linked: &MangaBakaLinkedSeriesDto) -> komf_api_models::mangabaka::KomfMangaBakaLinkedSeries {
+pub fn to_api_linked(
+    linked: &MangaBakaLinkedSeriesDto,
+) -> komf_api_models::mangabaka::KomfMangaBakaLinkedSeries {
     komf_api_models::mangabaka::KomfMangaBakaLinkedSeries {
         komga_id: komf_api_models::common::KomfServerSeriesId(linked.komga_id.clone()),
         manga_baka: to_api_series(&linked.series),
@@ -3327,20 +3384,17 @@ mod tests {
 
     #[test]
     fn top_series_tags_limits_to_20_highest_frequency() {
-        let make = |name: &str,
-                    is_genre: bool,
-                    series_count: i32,
-                    name_path: &str,
-                    is_spoiler: bool| {
-            serde_json::from_value(serde_json::json!({
-                "name": name,
-                "name_path": name_path,
-                "is_genre": is_genre,
-                "is_spoiler": is_spoiler,
-                "series_count": series_count,
-            }))
-            .unwrap()
-        };
+        let make =
+            |name: &str, is_genre: bool, series_count: i32, name_path: &str, is_spoiler: bool| {
+                serde_json::from_value(serde_json::json!({
+                    "name": name,
+                    "name_path": name_path,
+                    "is_genre": is_genre,
+                    "is_spoiler": is_spoiler,
+                    "series_count": series_count,
+                }))
+                .unwrap()
+            };
 
         // 20 个 Themes 分类标签，series_count 递减：应只保留最高频 15 个且降序。
         let tags: Vec<MangaBakaSeriesTagDto> = (1..=20)

@@ -220,7 +220,10 @@ impl AniListClient {
         Self {
             http,
             oauth,
-            limiter: crate::rate_limiter::IntervalLimiter::new(15, std::time::Duration::from_secs(10)),
+            limiter: crate::rate_limiter::IntervalLimiter::new(
+                15,
+                std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -713,7 +716,6 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for AniListMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"anilist\.co/(?:manga|anime)/(\d+)").ok()?;
         re.captures(query)
@@ -873,7 +875,9 @@ mod tests {
         )
     }
 
-    fn mapper_with_oauth(oauth: std::sync::Arc<crate::oauth::OAuthManager>) -> AniListMetadataMapper {
+    fn mapper_with_oauth(
+        oauth: std::sync::Arc<crate::oauth::OAuthManager>,
+    ) -> AniListMetadataMapper {
         AniListMetadataMapper::new(
             crate::config::SeriesMetadataConfig::default(),
             vec![AuthorRole::Writer],
@@ -943,11 +947,17 @@ mod tests {
             .iter()
             .map(|t| (t.name.as_str(), t.r#type, t.language.as_deref()))
             .collect();
-        assert_eq!(t[0], ("English Title", Some(TitleType::Localized), Some("en")));
+        assert_eq!(
+            t[0],
+            ("English Title", Some(TitleType::Localized), Some("en"))
+        );
         assert_eq!(t[1], ("ROMAJI", Some(TitleType::Romaji), Some("ja-ro")));
         assert_eq!(t[2], ("ネイティブ", Some(TitleType::Native), Some("ja")));
         assert_eq!(out.metadata.title.as_ref().unwrap().name, "English Title");
-        assert_eq!(mapper.to_series_search_result(&media).title, "English Title");
+        assert_eq!(
+            mapper.to_series_search_result(&media).title,
+            "English Title"
+        );
     }
 
     /// 登录态下 userPreferred 命中：语言版本提到主标题位、语言元数据不变、全量标题保留；
@@ -955,9 +965,21 @@ mod tests {
     #[test]
     fn user_preferred_promotes_matching_language_title() {
         let mut titles = vec![
-            SeriesTitle { name: "English Title".into(), r#type: Some(TitleType::Localized), language: Some("en".into()) },
-            SeriesTitle { name: "ROMAJI".into(), r#type: Some(TitleType::Romaji), language: Some("ja-ro".into()) },
-            SeriesTitle { name: "ネイティブ".into(), r#type: Some(TitleType::Native), language: Some("ja".into()) },
+            SeriesTitle {
+                name: "English Title".into(),
+                r#type: Some(TitleType::Localized),
+                language: Some("en".into()),
+            },
+            SeriesTitle {
+                name: "ROMAJI".into(),
+                r#type: Some(TitleType::Romaji),
+                language: Some("ja-ro".into()),
+            },
+            SeriesTitle {
+                name: "ネイティブ".into(),
+                r#type: Some(TitleType::Native),
+                language: Some("ja".into()),
+            },
         ];
         // 命中 native → 提到首位，语言元数据不变
         promote_user_preferred(&mut titles, Some("ネイティブ"));

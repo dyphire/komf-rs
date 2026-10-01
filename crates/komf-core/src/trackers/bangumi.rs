@@ -174,7 +174,12 @@ impl BangumiTracker {
         let title = if !name_cn.is_empty() { name_cn } else { name };
         Some(TrackSearchItem {
             id: id.to_string(),
-            title: if title.is_empty() { "Unknown Title" } else { title }.to_string(),
+            title: if title.is_empty() {
+                "Unknown Title"
+            } else {
+                title
+            }
+            .to_string(),
             cover_url: subject
                 .get("images")
                 .and_then(|i| i.get("large"))
@@ -224,13 +229,11 @@ impl BangumiTracker {
         let encoded: String = query
             .as_bytes()
             .iter()
-            .map(|b| {
-                match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                        (*b as char).to_string()
-                    }
-                    _ => format!("%{b:02X}"),
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (*b as char).to_string()
                 }
+                _ => format!("%{b:02X}"),
             })
             .collect();
         let response = self
@@ -251,7 +254,9 @@ impl BangumiTracker {
             self.note_unauthorized();
         }
         if !status.is_success() {
-            return Err(format!("bangumi legacy search error (HTTP {status}): {body}"));
+            return Err(format!(
+                "bangumi legacy search error (HTTP {status}): {body}"
+            ));
         }
         // 旧 API 响应字段为 list（v0 为 data），兼容两者。
         Ok(body
@@ -291,10 +296,10 @@ impl TrackerService for BangumiTracker {
         // 链接输入：bgm.tv/bangumi.tv/subject/{id} 直接定位单条目。
         if let Some(id) = Self::extract_subject_url(query) {
             let tracked = self.current_tracked_ids().await;
-            let subject = self
-                .get_json(&format!("{API_BASE}/subjects/{id}"))
-                .await?;
-            return Ok(Self::subject_to_item(&subject, &tracked).into_iter().collect());
+            let subject = self.get_json(&format!("{API_BASE}/subjects/{id}")).await?;
+            return Ok(Self::subject_to_item(&subject, &tracked)
+                .into_iter()
+                .collect());
         }
         // 用户态 tracked 标记：拉取当前用户书籍收藏集合（失败则降级为全 false）。
         let tracked = self.current_tracked_ids().await;
@@ -351,7 +356,10 @@ impl TrackerService for BangumiTracker {
             _ => "",
         };
         Ok(TrackState {
-            score: collection.get("rate").and_then(Value::as_i64).map(|v| v as i32),
+            score: collection
+                .get("rate")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32),
             status: Self::from_status_str(status_str),
             last_read_chapter: collection
                 .get("ep_status")

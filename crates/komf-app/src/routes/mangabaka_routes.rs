@@ -23,10 +23,7 @@ pub fn router() -> Router<SharedState> {
         .route("/mangabaka/series/:seriesId/cover", get(get_cover))
         .route("/mangabaka/series/tags", get(get_tags))
         .route("/mangabaka/series/linked/:seriesId", get(get_linked))
-        .route(
-            "/mangabaka/series/linked/batch",
-            axum::routing::post(batch),
-        )
+        .route("/mangabaka/series/linked/batch", axum::routing::post(batch))
         .route("/mangabaka/series/link", axum::routing::post(link))
         .route("/mangabaka/series/link", axum::routing::delete(unlink))
         .route("/mangabaka/series/link/search", get(search))
@@ -98,7 +95,10 @@ async fn batch(State(state): State<SharedState>, Json(ids): Json<Vec<String>>) -
 }
 
 /// `POST /api/mangabaka/series/link`：建立关联。
-async fn link(State(state): State<SharedState>, Json(request): Json<KomfMangaBakaLinkRequest>) -> Response {
+async fn link(
+    State(state): State<SharedState>,
+    Json(request): Json<KomfMangaBakaLinkRequest>,
+) -> Response {
     let Some(repo) = repo(&state) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -109,7 +109,10 @@ async fn link(State(state): State<SharedState>, Json(request): Json<KomfMangaBak
 }
 
 /// `DELETE /api/mangabaka/series/link`：解除关联。
-async fn unlink(State(state): State<SharedState>, Json(request): Json<KomfMangaBakaUnlinkRequest>) -> Response {
+async fn unlink(
+    State(state): State<SharedState>,
+    Json(request): Json<KomfMangaBakaUnlinkRequest>,
+) -> Response {
     let Some(repo) = repo(&state) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -194,7 +197,8 @@ async fn get_tags(State(state): State<SharedState>) -> Response {
     };
     match repo.get_all_tags() {
         Ok(tags) => {
-            let mut response = Json(tags.iter().map(to_api_tag).collect::<Vec<_>>()).into_response();
+            let mut response =
+                Json(tags.iter().map(to_api_tag).collect::<Vec<_>>()).into_response();
             response.headers_mut().insert(
                 header::CACHE_CONTROL,
                 header::HeaderValue::from_static("max-age=900"),
@@ -206,7 +210,10 @@ async fn get_tags(State(state): State<SharedState>) -> Response {
 }
 
 /// `GET /api/mangabaka/gstatic-favicon?url=...`：代理 Google favicon 服务。
-async fn get_fav_icon(State(state): State<SharedState>, Query(query): Query<FavIconQuery>) -> Response {
+async fn get_fav_icon(
+    State(state): State<SharedState>,
+    Query(query): Query<FavIconQuery>,
+) -> Response {
     let _ = &state;
     let Some(url_string) = query.url else {
         return StatusCode::BAD_REQUEST.into_response();

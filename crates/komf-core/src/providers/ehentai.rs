@@ -512,7 +512,11 @@ impl TagTranslator {
             for (tag, info) in group.data {
                 let name = info.name.as_deref().map(remove_emoji).and_then(|n| {
                     let n = n.trim().to_string();
-                    if n.is_empty() { None } else { Some(n) }
+                    if n.is_empty() {
+                        None
+                    } else {
+                        Some(n)
+                    }
                 });
                 if let Some(name) = name {
                     map.insert(tag.trim().to_lowercase(), name);
@@ -1659,7 +1663,11 @@ impl EHentaiMetadataMapper {
                             if EH_TAG_BLACKLIST.iter().any(|b| *b == name_l) {
                                 None
                             } else {
-                                let with_ns = if ns_l == "tag" { None } else { Some(ns_l.as_str()) };
+                                let with_ns = if ns_l == "tag" {
+                                    None
+                                } else {
+                                    Some(ns_l.as_str())
+                                };
                                 Some(tr(name, with_ns))
                             }
                         }
@@ -1789,10 +1797,7 @@ impl EHentaiMetadataMapper {
             // 非 non-h（SFW）内容 → hentai genre（non-h 标签格式：`non-h` / `misc:non-h`）；
             // 受 cfg.genres 控制（与其余 provider 一致）
             genres: if cfg.genres {
-                if raw_tags
-                    .iter()
-                    .any(|t| t == "non-h" || t == "misc:non-h")
-                {
+                if raw_tags.iter().any(|t| t == "non-h" || t == "misc:non-h") {
                     Vec::new()
                 } else {
                     vec!["hentai".to_string()]
@@ -1847,7 +1852,10 @@ impl EHentaiMetadataMapper {
             provider: CoreProviders::EHentai.as_str().to_string(),
             media_type: None,
             language,
-            nsfw: result.category.as_deref().map(|c| !c.eq_ignore_ascii_case("non-h")),
+            nsfw: result
+                .category
+                .as_deref()
+                .map(|c| !c.eq_ignore_ascii_case("non-h")),
         }
     }
 
@@ -1982,12 +1990,7 @@ where
     /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
     /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按遍历顺序取
     /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
-    fn insert_limited(
-        &self,
-        guard: &mut HashMap<K, (V, std::time::Instant)>,
-        key: K,
-        value: V,
-    ) {
+    fn insert_limited(&self, guard: &mut HashMap<K, (V, std::time::Instant)>, key: K, value: V) {
         if guard.len() >= self.capacity {
             let now = std::time::Instant::now();
             guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
@@ -2201,11 +2204,15 @@ fn extract_gid_from_title(title: &str) -> Option<String> {
 
 #[async_trait::async_trait]
 impl MetadataProvider for EHentaiMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"(?:e-hentai\.org|exhentai\.org)/g/(\d+)/([a-f0-9]+)").ok()?;
-        re.captures(query)
-            .map(|c| format!("{};{}", c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str()))
+        re.captures(query).map(|c| {
+            format!(
+                "{};{}",
+                c.get(1).unwrap().as_str(),
+                c.get(2).unwrap().as_str()
+            )
+        })
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::EHentai
@@ -2288,22 +2295,22 @@ impl MetadataProvider for EHentaiMetadataProvider {
                     }
                 }
                 let processed = self.metadata_mapper.apply_language_preference(&filtered);
-                let processed = match EHentaiMetadataMapper::forced_language_from_search(series_name)
-                {
-                    Some(lang) => {
-                        let (matching, rest): (Vec<EHentaiBook>, Vec<EHentaiBook>) = processed
-                            .into_iter()
-                            .partition(|b| {
-                                self.metadata_mapper.book_matches_forced_language(b, lang)
-                            });
-                        matching.into_iter().chain(rest).collect()
-                    }
-                    None => processed,
-                };
+                let processed =
+                    match EHentaiMetadataMapper::forced_language_from_search(series_name) {
+                        Some(lang) => {
+                            let (matching, rest): (Vec<EHentaiBook>, Vec<EHentaiBook>) =
+                                processed.into_iter().partition(|b| {
+                                    self.metadata_mapper.book_matches_forced_language(b, lang)
+                                });
+                            matching.into_iter().chain(rest).collect()
+                        }
+                        None => processed,
+                    };
                 let mut out = Vec::new();
                 for book in processed {
-                    let result =
-                        self.metadata_mapper.to_series_search_result(&book, series_name);
+                    let result = self
+                        .metadata_mapper
+                        .to_series_search_result(&book, series_name);
                     self.cache
                         .put(ProviderSeriesId(result.result_id.clone()), book)
                         .await;
@@ -2346,7 +2353,9 @@ impl MetadataProvider for EHentaiMetadataProvider {
 
         let mut out = Vec::new();
         for book in processed {
-            let result = self.metadata_mapper.to_series_search_result(&book, series_name);
+            let result = self
+                .metadata_mapper
+                .to_series_search_result(&book, series_name);
             self.cache
                 .put(ProviderSeriesId(result.result_id.clone()), book)
                 .await;
@@ -2382,7 +2391,10 @@ impl MetadataProvider for EHentaiMetadataProvider {
                 gid_candidates.push(file_name.clone());
             }
         }
-        if let Some(gid) = gid_candidates.iter().find_map(|c| extract_gid_from_title(c)) {
+        if let Some(gid) = gid_candidates
+            .iter()
+            .find_map(|c| extract_gid_from_title(c))
+        {
             tracing::info!("found gid {} in match title, searching gid:{}", gid, gid);
             // e-hentai-db 离线优先：gid 精准查询（未命中 → 在线 gid 搜索）
             if let Some(archive) = &self.archive {
@@ -2452,11 +2464,11 @@ impl MetadataProvider for EHentaiMetadataProvider {
             }
         }
         if raw_results.is_empty() {
-        for query in &queries {
-            let truncated: String = query.chars().take(400).collect();
-            let response = self.client.search_by_title(&truncated).await?;
-            raw_results.extend(response.gmetadata);
-        }
+            for query in &queries {
+                let truncated: String = query.chars().take(400).collect();
+                let response = self.client.search_by_title(&truncated).await?;
+                raw_results.extend(response.gmetadata);
+            }
         }
 
         let mut seen = std::collections::HashSet::new();
@@ -2492,7 +2504,6 @@ impl MetadataProvider for EHentaiMetadataProvider {
                 .cloned(),
             None => processed.into_iter().find(|book| matches(book)),
         };
-
 
         // 离线候选非空但相似度未命中 → 在线回退再匹配（保证不漏）
         if matched.is_none() && offline_used {
@@ -2657,10 +2668,8 @@ mod tests {
 
     /// 临时 db.text.json（EhTagTranslation 格式：{"data":[{"namespace":..,"data":{..}}]}）。
     fn write_test_db() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "ehentai_test_db_{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ehentai_test_db_{}.json", std::process::id()));
         let json = r#"{"data":[
             {"namespace":"female","data":{
                 "anal":{"name":"肛门","intro":""},
@@ -2688,14 +2697,20 @@ mod tests {
         let path = write_test_db();
         let tr = TagTranslator::load(&path).expect("load db");
         // 按 namespace 精确查
-        assert_eq!(tr.translate("anal", Some("female")).as_deref(), Some("肛门"));
+        assert_eq!(
+            tr.translate("anal", Some("female")).as_deref(),
+            Some("肛门")
+        );
         // 大小写/空白容错
         assert_eq!(
             tr.translate("  AHEGAO ", Some("Female")).as_deref(),
             Some("阿嘿颜")
         );
         // namespace 未命中 → 全局遍历
-        assert_eq!(tr.translate("hatsune miku", None).as_deref(), Some("初音ミク"));
+        assert_eq!(
+            tr.translate("hatsune miku", None).as_deref(),
+            Some("初音ミク")
+        );
         assert_eq!(
             tr.translate("hatsune miku", Some("female")).as_deref(),
             Some("初音ミク")
@@ -2717,10 +2732,8 @@ mod tests {
 
     #[test]
     fn tag_translator_malformed_db() {
-        let path = std::env::temp_dir().join(format!(
-            "ehentai_test_db_bad_{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ehentai_test_db_bad_{}.json", std::process::id()));
         std::fs::write(&path, "{not json").unwrap();
         assert!(TagTranslator::load(&path).is_none());
         // 空 data → None
@@ -2753,15 +2766,15 @@ mod tests {
         let mapper = mapper_with_translator();
         let mut b = book_with_jpn(1, "Title", None);
         b.tags = Some(vec![
-            "parody:original".to_string(),      // 黑名单 → 丢弃
-            "parody:to love ru".to_string(),    // 未命中 → 原名
-            "female:anal".to_string(),          // 命中 → 肛门（无前缀）
+            "parody:original".to_string(),        // 黑名单 → 丢弃
+            "parody:to love ru".to_string(),      // 未命中 → 原名
+            "female:anal".to_string(),            // 命中 → 肛门（无前缀）
             "character:hatsune miku".to_string(), // 命中 → 初音ミク（character 前缀）
-            "male:dilf".to_string(),            // male-only 命中 → 大叔
-            "male:catgirl".to_string(),         // 非 male-only → 丢弃
-            "other:extraneous ads".to_string(), // 黑名单 → 丢弃
-            "tag:gore".to_string(),             // 未命中 → 原名
-            "language:chinese".to_string(),     // 不进 tags
+            "male:dilf".to_string(),              // male-only 命中 → 大叔
+            "male:catgirl".to_string(),           // 非 male-only → 丢弃
+            "other:extraneous ads".to_string(),   // 黑名单 → 丢弃
+            "tag:gore".to_string(),               // 未命中 → 原名
+            "language:chinese".to_string(),       // 不进 tags
         ]);
         let meta = mapper.to_series_metadata(&b, None, None);
         assert_eq!(
@@ -2836,10 +2849,7 @@ mod tests {
             None,
         );
         let mut b = book_with_jpn(1, "Title", None);
-        b.tags = Some(vec![
-            "female:anal".to_string(),
-            "male:dilf".to_string(),
-        ]);
+        b.tags = Some(vec!["female:anal".to_string(), "male:dilf".to_string()]);
         let meta = mapper.to_series_metadata(&b, None, None);
         assert_eq!(meta.metadata.tags, vec!["anal", "dilf"]);
     }
@@ -2924,9 +2934,18 @@ mod tests {
             extract_gid_from_title("[Poki no Ie (Pochikin)] Aisareru Shikaku [1234567]").as_deref(),
             Some("1234567")
         );
-        assert_eq!(extract_gid_from_title("Title (7654321)").as_deref(), Some("7654321"));
-        assert_eq!(extract_gid_from_title("Title 1234567").as_deref(), Some("1234567"));
-        assert_eq!(extract_gid_from_title("[Circle] Title [Vol.1]").as_deref(), None);
+        assert_eq!(
+            extract_gid_from_title("Title (7654321)").as_deref(),
+            Some("7654321")
+        );
+        assert_eq!(
+            extract_gid_from_title("Title 1234567").as_deref(),
+            Some("1234567")
+        );
+        assert_eq!(
+            extract_gid_from_title("[Circle] Title [Vol.1]").as_deref(),
+            None
+        );
         assert_eq!(extract_gid_from_title("Title [1]").as_deref(), None);
         assert_eq!(extract_gid_from_title("Vol. 3").as_deref(), None);
         assert_eq!(extract_gid_from_title("Title [123]").as_deref(), None);

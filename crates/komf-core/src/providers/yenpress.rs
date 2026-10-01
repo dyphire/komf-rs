@@ -318,7 +318,10 @@ impl YenPressClient {
         Self {
             http,
             search_key: std::sync::Mutex::new("search-vhfh3tijxttuxhjjmzgajcd4".to_string()),
-            limiter: crate::rate_limiter::IntervalLimiter::new(10, std::time::Duration::from_secs(10)),
+            limiter: crate::rate_limiter::IntervalLimiter::new(
+                10,
+                std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -836,7 +839,6 @@ pub fn create_provider(
 
 #[async_trait::async_trait]
 impl MetadataProvider for YenPressMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
         let re = regex::Regex::new(r"yenpress\.com/series/([^/?#]+)").ok()?;
         re.captures(query)

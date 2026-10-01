@@ -1001,12 +1001,16 @@ impl BookWalkerMetadataProvider {
 
 #[async_trait::async_trait]
 impl MetadataProvider for BookWalkerMetadataProvider {
-
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"(?:bookwalker\.com\.tw|bookwalker\.jp)/series/([^/?#]+)").ok()?;
+        let re =
+            regex::Regex::new(r"(?:bookwalker\.com\.tw|bookwalker\.jp)/series/([^/?#]+)").ok()?;
         re.captures(query).map(|c| {
             let id = c.get(1).unwrap().as_str();
-            if id.starts_with("CNT_") { id.to_string() } else { format!("CNT_{id}") }
+            if id.starts_with("CNT_") {
+                id.to_string()
+            } else {
+                format!("CNT_{id}")
+            }
         })
     }
     fn provider_name(&self) -> CoreProviders {
@@ -1014,7 +1018,9 @@ impl MetadataProvider for BookWalkerMetadataProvider {
     }
 
     fn alternative_titles_enabled(&self) -> bool {
-        self.metadata_mapper.series_metadata_config.alternative_titles
+        self.metadata_mapper
+            .series_metadata_config
+            .alternative_titles
     }
 
     async fn resolve_link_search_result(&self, query: &str) -> Option<SeriesSearchResult> {
@@ -1188,7 +1194,10 @@ pub fn create_provider(
         http_client: (config.series_metadata.thumbnail || config.book_metadata.thumbnail)
             .then(|| http_client.clone()),
         category,
-        cover_limiter: crate::rate_limiter::ThroughputLimiter::new(2, std::time::Duration::from_secs(1)),
+        cover_limiter: crate::rate_limiter::ThroughputLimiter::new(
+            2,
+            std::time::Duration::from_secs(1),
+        ),
     })
 }
 
@@ -1464,8 +1473,8 @@ impl BookWalkerDbDownloader {
         );
         let input =
             std::fs::File::open(&archive).map_err(|e| format!("FileSystemException: {e}"))?;
-        let output = std::fs::File::create(&tmp_file)
-            .map_err(|e| format!("FileSystemException: {e}"))?;
+        let output =
+            std::fs::File::create(&tmp_file).map_err(|e| format!("FileSystemException: {e}"))?;
         // 压缩包损坏（size 对但 CRC/帧错误）：删包让下次重试重下，避免毒缓存反复失败。
         zstd::stream::copy_decode(input, output).map_err(|e| {
             let _ = std::fs::remove_file(&archive);
@@ -1500,8 +1509,8 @@ impl BookWalkerDbDownloader {
     }
 
     fn create_search_index_on(&self, db_file: &std::path::Path) -> Result<(), String> {
-        let conn = rusqlite::Connection::open(db_file)
-            .map_err(|e| format!("SQLiteException: {e}"))?;
+        let conn =
+            rusqlite::Connection::open(db_file).map_err(|e| format!("SQLiteException: {e}"))?;
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS series_fts USING fts5 \
              (id, title, alt_titles, type, tokenize = 'trigram');",

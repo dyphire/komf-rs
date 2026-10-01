@@ -86,8 +86,7 @@ pub fn resize_towards(image: &Image, target_bytes: u64) -> Option<Image> {
     // 因此单轴缩放比例为：
     //
     //   sqrt(target / current)
-    let ratio = ((target_bytes as f64 / current_bytes as f64).sqrt()
-        * RESIZE_SAFETY_FACTOR)
+    let ratio = ((target_bytes as f64 / current_bytes as f64).sqrt() * RESIZE_SAFETY_FACTOR)
         .clamp(MIN_RESIZE_RATIO, 0.95);
 
     let new_width = ((width as f64 * ratio).round() as u32).max(1);
@@ -98,19 +97,12 @@ pub fn resize_towards(image: &Image, target_bytes: u64) -> Option<Image> {
         return None;
     }
 
-    let resized = decoded.resize(
-        new_width,
-        new_height,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = decoded.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
 
     let mut output = Vec::new();
 
     resized
-        .write_to(
-            &mut Cursor::new(&mut output),
-            image::ImageFormat::Jpeg,
-        )
+        .write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
         .ok()?;
 
     // 极端情况下，即使尺寸发生变化，编码结果也可能没有变小。
@@ -119,10 +111,7 @@ pub fn resize_towards(image: &Image, target_bytes: u64) -> Option<Image> {
         return None;
     }
 
-    Some(Image::new(
-        output,
-        Some("image/jpeg".to_string()),
-    ))
+    Some(Image::new(output, Some("image/jpeg".to_string())))
 }
 
 /// 把图片最长边减半并重编码为 JPEG。
@@ -153,29 +142,19 @@ pub fn downscale_image(image: &Image) -> Option<Image> {
         return None;
     }
 
-    let resized = decoded.resize(
-        new_width,
-        new_height,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = decoded.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
 
     let mut output = Vec::new();
 
     resized
-        .write_to(
-            &mut Cursor::new(&mut output),
-            image::ImageFormat::Jpeg,
-        )
+        .write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
         .ok()?;
 
     if output.len() >= image.bytes.len() {
         return None;
     }
 
-    Some(Image::new(
-        output,
-        Some("image/jpeg".to_string()),
-    ))
+    Some(Image::new(output, Some("image/jpeg".to_string())))
 }
 
 /// 如果图片超过 `limit`，按目标字节数比例逐轮缩放，直到：
@@ -220,24 +199,14 @@ mod tests {
 
     /// 生成一张已知尺寸的 JPEG 用于测试。
     fn make_jpeg(width: u32, height: u32) -> Image {
-        let img = image::RgbImage::from_pixel(
-            width,
-            height,
-            image::Rgb([200u8, 60u8, 90u8]),
-        );
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([200u8, 60u8, 90u8]));
 
         let mut output = Vec::new();
 
-        img.write_to(
-            &mut Cursor::new(&mut output),
-            image::ImageFormat::Jpeg,
-        )
-        .expect("encode jpeg");
+        img.write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
+            .expect("encode jpeg");
 
-        Image::new(
-            output,
-            Some("image/jpeg".to_string()),
-        )
+        Image::new(output, Some("image/jpeg".to_string()))
     }
 
     fn decode_dimensions(image: &Image) -> (u32, u32) {
@@ -254,17 +223,13 @@ mod tests {
     fn downscale_halves_dimensions_and_reencodes_jpeg() {
         let image = make_jpeg(800, 400);
 
-        let downscaled =
-            downscale_image(&image).expect("downscale should succeed");
+        let downscaled = downscale_image(&image).expect("downscale should succeed");
 
         let (width, height) = decode_dimensions(&downscaled);
 
         assert_eq!(width, 400);
         assert_eq!(height, 200);
-        assert_eq!(
-            downscaled.mime_type.as_deref(),
-            Some("image/jpeg")
-        );
+        assert_eq!(downscaled.mime_type.as_deref(), Some("image/jpeg"));
         assert!(
             downscaled.bytes.len() < image.bytes.len(),
             "downscaled image should be smaller"
@@ -287,10 +252,7 @@ mod tests {
 
     #[test]
     fn downscale_invalid_bytes_returns_none() {
-        let image = Image::new(
-            vec![0u8, 1, 2, 3],
-            Some("image/jpeg".to_string()),
-        );
+        let image = Image::new(vec![0u8, 1, 2, 3], Some("image/jpeg".to_string()));
 
         assert!(downscale_image(&image).is_none());
     }
@@ -301,10 +263,7 @@ mod tests {
 
         let original_bytes = image.bytes.clone();
 
-        let fitted = ensure_within_limit(
-            &image,
-            u64::MAX,
-        );
+        let fitted = ensure_within_limit(&image, u64::MAX);
 
         assert_eq!(fitted.bytes, original_bytes);
         assert_eq!(fitted.mime_type, image.mime_type);
@@ -314,10 +273,7 @@ mod tests {
     fn ensure_within_limit_downscales_large_image() {
         let image = make_jpeg(2000, 2000);
 
-        let fitted = ensure_within_limit(
-            &image,
-            200_000,
-        );
+        let fitted = ensure_within_limit(&image, 200_000);
 
         assert!(
             fitted.bytes.len() as u64 <= 200_000,
@@ -330,11 +286,7 @@ mod tests {
     fn resize_towards_returns_same_when_within_target() {
         let image = make_jpeg(64, 64);
 
-        let output = resize_towards(
-            &image,
-            1024 * 1024,
-        )
-        .expect("within target returns clone");
+        let output = resize_towards(&image, 1024 * 1024).expect("within target returns clone");
 
         assert_eq!(output.bytes, image.bytes);
         assert_eq!(output.mime_type, image.mime_type);
@@ -344,12 +296,9 @@ mod tests {
     fn resize_towards_scales_proportionally_not_halving() {
         let image = make_jpeg(1200, 1200);
 
-        let target =
-            (image.bytes.len() as u64) * 70 / 100;
+        let target = (image.bytes.len() as u64) * 70 / 100;
 
-        let output =
-            resize_towards(&image, target)
-                .expect("resize should succeed");
+        let output = resize_towards(&image, target).expect("resize should succeed");
 
         let (width, height) = decode_dimensions(&output);
 
@@ -363,11 +312,7 @@ mod tests {
             width
         );
 
-        assert_eq!(
-            width,
-            height,
-            "square image should remain square"
-        );
+        assert_eq!(width, height, "square image should remain square");
 
         assert!(
             output.bytes.len() < image.bytes.len(),
@@ -390,10 +335,7 @@ mod tests {
     fn resize_towards_invalid_bytes_returns_none() {
         // target 小于 current 才会触发解码路径；
         // 非法字节解码失败 -> None。
-        let image = Image::new(
-            vec![0u8, 1, 2, 3],
-            Some("image/jpeg".to_string()),
-        );
+        let image = Image::new(vec![0u8, 1, 2, 3], Some("image/jpeg".to_string()));
 
         assert!(resize_towards(&image, 1).is_none());
     }
@@ -410,15 +352,11 @@ mod tests {
         let image = make_jpeg(1600, 800);
 
         let output =
-            resize_towards(&image, image.bytes.len() as u64 / 2)
-                .expect("resize should succeed");
+            resize_towards(&image, image.bytes.len() as u64 / 2).expect("resize should succeed");
 
         let (width, height) = decode_dimensions(&output);
 
-        assert_eq!(
-            width as f64 / height as f64,
-            2.0
-        );
+        assert_eq!(width as f64 / height as f64, 2.0);
     }
 
     #[test]
@@ -426,13 +364,9 @@ mod tests {
         let image = make_jpeg(1200, 1200);
 
         let output =
-            resize_towards(&image, image.bytes.len() as u64 / 2)
-                .expect("resize should succeed");
+            resize_towards(&image, image.bytes.len() as u64 / 2).expect("resize should succeed");
 
-        assert_eq!(
-            output.mime_type.as_deref(),
-            Some("image/jpeg")
-        );
+        assert_eq!(output.mime_type.as_deref(), Some("image/jpeg"));
     }
 
     #[test]
@@ -441,8 +375,7 @@ mod tests {
 
         let original_size = image.bytes.len();
 
-        let fitted =
-            ensure_within_limit(&image, original_size as u64 / 4);
+        let fitted = ensure_within_limit(&image, original_size as u64 / 4);
 
         assert!(
             fitted.bytes.len() < original_size,
@@ -452,13 +385,9 @@ mod tests {
 
     #[test]
     fn ensure_within_limit_returns_original_when_resize_fails() {
-        let image = Image::new(
-            vec![0u8, 1, 2, 3],
-            Some("image/jpeg".to_string()),
-        );
+        let image = Image::new(vec![0u8, 1, 2, 3], Some("image/jpeg".to_string()));
 
-        let result =
-            ensure_within_limit(&image, 1);
+        let result = ensure_within_limit(&image, 1);
 
         assert_eq!(result.bytes, image.bytes);
     }

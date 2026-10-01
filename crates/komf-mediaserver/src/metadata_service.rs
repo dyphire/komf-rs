@@ -1,13 +1,16 @@
 //! 元数据服务 —— 对应 `MetadataService.kt` 与 `MetadataServiceProvider.kt`。
 use crate::client::{MediaServerClient, MediaServerError};
 use crate::config::{ChineseConversionConfig, ChineseField, SearchTitleExtractionConfig};
-use crate::jobs::{JobEventSender, KomfJobTracker, KomfJobsRepository, MetadataJobEvent, MetadataJobId, SeriesMatch};
+use crate::jobs::{
+    JobEventSender, KomfJobTracker, KomfJobsRepository, MetadataJobEvent, MetadataJobId,
+    SeriesMatch,
+};
 use crate::metadata_merger::MetadataMerger;
 use crate::metadata_updater::MetadataUpdater;
 use crate::model::*;
 use komf_core::model::{
-    BookMetadata, BookQualifier, BookRange, Image, MatchQuery, MediaType, ProviderSeriesId, ProviderSeriesMetadata,
-    SeriesBook, SeriesSearchResult, WebLink,
+    BookMetadata, BookQualifier, BookRange, Image, MatchQuery, MediaType, ProviderSeriesId,
+    ProviderSeriesMetadata, SeriesBook, SeriesSearchResult, WebLink,
 };
 use komf_core::providers::{CoreProviders, MetadataProvider};
 use komf_core::util::BookNameParser;
@@ -132,9 +135,7 @@ impl MetadataService {
         let mut tasks = Vec::new();
         let library_type = self.library_type;
         // Rust 扩展：简繁转换应用于搜索关键词（chineseConversion.search）。
-        let name = if self.chinese_conversion.enabled
-            && self.chinese_conversion.search
-        {
+        let name = if self.chinese_conversion.enabled && self.chinese_conversion.search {
             match &self.chinese_converter {
                 Some(c) => c.convert(series_name),
                 None => series_name.to_string(),
@@ -151,10 +152,17 @@ impl MetadataService {
                 if let Some(result) = provider_ref.resolve_link_search_result(&name).await {
                     return vec![result];
                 }
-                match provider_ref.search_series(&name, 20, Some(library_type)).await {
+                match provider_ref
+                    .search_series(&name, 20, Some(library_type))
+                    .await
+                {
                     Ok(results) => results,
                     Err(error) => {
-                        tracing::error!("search failed for provider {}: {}", provider_ref.provider_name(), error);
+                        tracing::error!(
+                            "search failed for provider {}: {}",
+                            provider_ref.provider_name(),
+                            error
+                        );
                         Vec::new()
                     }
                 }
@@ -178,7 +186,12 @@ impl MetadataService {
         let provider = self
             .metadata_providers
             .provider(&library_id.0, provider_name)
-            .ok_or_else(|| MediaServerError::message(format!("Provider {provider_name} is not enabled for library {}", library_id.0)))?;
+            .ok_or_else(|| {
+                MediaServerError::message(format!(
+                    "Provider {provider_name} is not enabled for library {}",
+                    library_id.0
+                ))
+            })?;
         provider
             .get_series_cover(provider_series_id)
             .await
@@ -269,13 +282,15 @@ impl MetadataService {
                         .update_metadata(&series, &metadata, Some(provider))
                         .await
                         .map_err(|e| (Some(provider), e.to_string()))?;
-                    let _ = self.series_match_repository.save_series_match(&SeriesMatch {
-                        series_id: series.id.clone(),
-                        r#type: "MANUAL".to_string(),
-                        media_server: self.media_server.to_string(),
-                        provider,
-                        provider_series_id,
-                    });
+                    let _ = self
+                        .series_match_repository
+                        .save_series_match(&SeriesMatch {
+                            series_id: series.id.clone(),
+                            r#type: "MANUAL".to_string(),
+                            media_server: self.media_server.to_string(),
+                            provider,
+                            provider_series_id,
+                        });
                     tracing::info!(
                         "finished metadata update of series \"{series_title}\" {}",
                         series.id.0
@@ -286,8 +301,14 @@ impl MetadataService {
             }
         }
         // 回退：请求指定的 provider（links 未启用 / 无候选 / 全部失败）
-        self.set_series_metadata_inner(tx, series_id, fallback_provider, fallback_provider_series_id, edition)
-            .await
+        self.set_series_metadata_inner(
+            tx,
+            series_id,
+            fallback_provider,
+            fallback_provider_series_id,
+            edition,
+        )
+        .await
     }
 
     /// links 直用（Auto-Identify 与 identify 共用）：收集 links 中所有可解析的
@@ -323,7 +344,9 @@ impl MetadataService {
         let mut result: Option<SeriesAndBookMetadata> = None;
         let mut first: Option<(CoreProviders, String)> = None;
         for (provider_name, provider_series_id) in candidates {
-            let Some(provider) = self.metadata_providers.provider(&series.library_id.0, provider_name)
+            let Some(provider) = self
+                .metadata_providers
+                .provider(&series.library_id.0, provider_name)
             else {
                 continue;
             };
@@ -419,7 +442,9 @@ impl MetadataService {
             .provider(&series.library_id.0, provider_name)
             .ok_or_else(|| (None, format!("Provider {provider_name} is not enabled")))?;
 
-        let _ = tx.send(MetadataJobEvent::ProviderSeries { provider: provider_name });
+        let _ = tx.send(MetadataJobEvent::ProviderSeries {
+            provider: provider_name,
+        });
         let provider_metadata = provider
             .get_series_metadata(provider_series_id)
             .await
@@ -428,7 +453,9 @@ impl MetadataService {
         let book_metadata = self
             .get_book_metadata(&books, &provider_metadata, provider, edition, &tx)
             .await;
-        let _ = tx.send(MetadataJobEvent::ProviderCompleted { provider: provider_name });
+        let _ = tx.send(MetadataJobEvent::ProviderCompleted {
+            provider: provider_name,
+        });
 
         let metadata = if self.aggregate_metadata {
             let providers: Vec<Arc<dyn MetadataProvider>> = self
@@ -440,11 +467,9 @@ impl MetadataService {
             // 聚合前先按主 provider 翻译其标签（非 bangumi/ehentai 时），
             // 保证合并结果中主 provider 的英文标签仍被翻译；其余 provider 的
             // 标签在 aggregate_metadata_from_providers 内 merge 前逐 provider 处理。
-            let mut primary = SeriesAndBookMetadata::new(
-                provider_metadata.metadata,
-                book_metadata.clone(),
-            )
-            .with_oneshots(&books);
+            let mut primary =
+                SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata.clone())
+                    .with_oneshots(&books);
             primary.excluded_alt_titles = excluded;
             let primary = self
                 .metadata_update_service
@@ -462,8 +487,8 @@ impl MetadataService {
             .await
         } else {
             // Kotlin key 为 MediaServerBook（内嵌 oneshot），Rust 以 book_oneshots 等价承载。
-            let mut manual =
-                SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata).with_oneshots(&books);
+            let mut manual = SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata)
+                .with_oneshots(&books);
             manual.excluded_alt_titles = excluded;
             manual
         };
@@ -476,15 +501,20 @@ impl MetadataService {
             .await
             .map_err(|e| (None, e.to_string()))?;
 
-        let _ = self.series_match_repository.save_series_match(&SeriesMatch {
-            series_id: series.id.clone(),
-            r#type: "MANUAL".to_string(),
-            media_server: self.media_server.to_string(),
-            provider: provider_name,
-            provider_series_id: provider_series_id.0.clone(),
-        });
+        let _ = self
+            .series_match_repository
+            .save_series_match(&SeriesMatch {
+                series_id: series.id.clone(),
+                r#type: "MANUAL".to_string(),
+                media_server: self.media_server.to_string(),
+                provider: provider_name,
+                provider_series_id: provider_series_id.0.clone(),
+            });
 
-        tracing::info!("finished metadata update of series \"{series_title}\" {}", series.id.0);
+        tracing::info!(
+            "finished metadata update of series \"{series_title}\" {}",
+            series.id.0
+        );
         Ok(())
     }
 
@@ -541,11 +571,13 @@ impl MetadataService {
         {
             Ok(()) => tracing::info!(
                 "removed series {} from collection \"{}\" (matched)",
-                series_id.0, collection.name
+                series_id.0,
+                collection.name
             ),
             Err(error) => tracing::warn!(
                 "failed to remove series {} from collection \"{}\": {error}",
-                series_id.0, collection.name
+                series_id.0,
+                collection.name
             ),
         }
     }
@@ -559,12 +591,19 @@ impl MetadataService {
         // 之后本地维护 seriesIds 缓存，避免每个系列一次 GET。
         let collection_names = self.failed_collection_names().await;
         let mut collection: Option<(String, Vec<String>)> = match &collection_names {
-            Some(names) => self.find_collection(names).await.map(|c| (c.id, c.series_ids)),
+            Some(names) => self
+                .find_collection(names)
+                .await
+                .map(|c| (c.id, c.series_ids)),
             None => None,
         };
         let mut page_number = 1;
         loop {
-            let page = match self.media_server_client.get_series_page(library_id, page_number).await {
+            let page = match self
+                .media_server_client
+                .get_series_page(library_id, page_number)
+                .await
+            {
                 Ok(page) => page,
                 Err(error) => {
                     tracing::error!("library scan failed: {error}");
@@ -613,7 +652,9 @@ impl MetadataService {
                     }
                 } else if outcome == MatchOutcome::NoMatch {
                     // 匹配失败 → 加入收藏夹（不存在则创建）；被跳过（Skipped）不加入。
-                    let Some(names) = &collection_names else { continue };
+                    let Some(names) = &collection_names else {
+                        continue;
+                    };
                     match &mut collection {
                         Some((collection_id, ids)) => {
                             ids.push(series.id.0.clone());
@@ -629,7 +670,9 @@ impl MetadataService {
                             } else {
                                 tracing::info!(
                                     "added series \"{}\" {} to failed-match collection \"{}\"",
-                                    series.name, series.id.0, collection_name_display
+                                    series.name,
+                                    series.id.0,
+                                    collection_name_display
                                 );
                             }
                         }
@@ -643,7 +686,8 @@ impl MetadataService {
                             if created.is_err() && names.0 != names.1 {
                                 tracing::warn!(
                                     "collection \"{}\" creation failed, falling back to \"{}\"",
-                                    names.0, names.1
+                                    names.0,
+                                    names.1
                                 );
                                 created = self
                                     .media_server_client
@@ -658,10 +702,15 @@ impl MetadataService {
                                         series.name,
                                         series.id.0
                                     );
-                                    collection = Some((created_collection.id, created_collection.series_ids));
+                                    collection = Some((
+                                        created_collection.id,
+                                        created_collection.series_ids,
+                                    ));
                                 }
                                 Err(error) => {
-                                    tracing::warn!("failed to create failed-match collection: {error}");
+                                    tracing::warn!(
+                                        "failed to create failed-match collection: {error}"
+                                    );
                                 }
                             }
                         }
@@ -697,8 +746,13 @@ impl MetadataService {
         apply_links_skip: bool,
     ) -> MetadataJobId {
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
-        let result = self.match_series_metadata_inner(&tx, series_id, apply_links_skip).await;
-        if result.as_ref().is_ok_and(|outcome| *outcome == MatchOutcome::Updated) {
+        let result = self
+            .match_series_metadata_inner(&tx, series_id, apply_links_skip)
+            .await;
+        if result
+            .as_ref()
+            .is_ok_and(|outcome| *outcome == MatchOutcome::Updated)
+        {
             self.maybe_remove_from_failed_collection(series_id).await;
         }
         self.finish_job(&job_id, &tx, result.map(|_| ())).await;
@@ -746,25 +800,33 @@ impl MetadataService {
             .ok()
             .flatten();
         let mut matched_provider: Option<CoreProviders> = None;
-        let existing_provider = existing_match
-            .as_ref()
-            .and_then(|existing| self.metadata_providers.provider(&series.library_id.0, existing.provider));
-        let match_result = if let (Some(existing), Some(provider)) = (existing_match.as_ref(), existing_provider) {
+        let existing_provider = existing_match.as_ref().and_then(|existing| {
+            self.metadata_providers
+                .provider(&series.library_id.0, existing.provider)
+        });
+        let match_result = if let (Some(existing), Some(provider)) =
+            (existing_match.as_ref(), existing_provider)
+        {
             tracing::info!(
                 "using {} from previous manual identification for {series_title} {}",
                 provider.provider_name(),
                 series.id.0
             );
-            let _ = tx.send(MetadataJobEvent::ProviderSeries { provider: existing.provider });
+            let _ = tx.send(MetadataJobEvent::ProviderSeries {
+                provider: existing.provider,
+            });
             let provider_metadata = provider
                 .get_series_metadata(&ProviderSeriesId(existing.provider_series_id.clone()))
                 .await
                 .map_err(|e| (Some(existing.provider), e.to_string()))?;
-            let excluded = excluded_alt_names(provider.as_ref(), &provider_metadata.metadata.titles);
-            let book_metadata = self.get_book_metadata(&books, &provider_metadata, provider, None, &tx).await;
+            let excluded =
+                excluded_alt_names(provider.as_ref(), &provider_metadata.metadata.titles);
+            let book_metadata = self
+                .get_book_metadata(&books, &provider_metadata, provider, None, &tx)
+                .await;
             matched_provider = Some(existing.provider);
-            let mut manual =
-                SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata).with_oneshots(&books);
+            let mut manual = SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata)
+                .with_oneshots(&books);
             manual.excluded_alt_titles = excluded;
             Some(manual)
         } else {
@@ -774,7 +836,9 @@ impl MetadataService {
             // oneshot 单本系列：书籍级链接参与已匹配判定（聚合优先，books 回退）
             let combined_links = series_links_including_books(&series, &books);
             let links_match = links_indicate_matched(&combined_links);
-            let from_link: Option<SeriesAndBookMetadata> = if links_match && self.links_match_enabled {
+            let from_link: Option<SeriesAndBookMetadata> = if links_match
+                && self.links_match_enabled
+            {
                 // 链接直用：多 provider 合并（与 identify 共用 fetch_from_links）
                 match self.fetch_from_links(&series, &books, &tx).await {
                     LinksFetchOutcome::Success(metadata, provider, _) => {
@@ -813,12 +877,15 @@ impl MetadataService {
             } else {
                 // 无手动匹配：尝试各 provider
                 let search_titles = build_search_titles(
-                &series_title,
-                &series.metadata.alternative_titles,
-                &self.search_title_extraction,
-            );
+                    &series_title,
+                    &series.metadata.alternative_titles,
+                    &self.search_title_extraction,
+                );
 
-                tracing::info!("attempting to match series \"{series_title}\" {}", series.id.0);
+                tracing::info!(
+                    "attempting to match series \"{series_title}\" {}",
+                    series.id.0
+                );
 
                 let providers = self.metadata_providers.providers(&series.library_id.0);
                 let mut result = None;
@@ -877,7 +944,10 @@ impl MetadataService {
             .update_metadata(&series, &metadata, matched_provider)
             .await
             .map_err(|e| (None, e.to_string()))?;
-        tracing::info!("finished metadata update of series \"{series_title}\" {}", series.id.0);
+        tracing::info!(
+            "finished metadata update of series \"{series_title}\" {}",
+            series.id.0
+        );
         Ok(MatchOutcome::Updated)
     }
 
@@ -904,7 +974,9 @@ impl MetadataService {
                     .await;
             }
             Err((None, message)) => {
-                let _ = tx.send(MetadataJobEvent::ProcessingError { message: message.clone() });
+                let _ = tx.send(MetadataJobEvent::ProcessingError {
+                    message: message.clone(),
+                });
                 self.job_tracker.fail_job(job_id, message, true).await;
             }
         }
@@ -930,26 +1002,35 @@ impl MetadataService {
         tx: &JobEventSender,
     ) -> Option<SeriesAndBookMetadata> {
         for search_title in search_titles {
-            tracing::info!("searching \"{search_title}\" using {}", provider.provider_name());
-            let _ = tx.send(MetadataJobEvent::ProviderSeries { provider: provider.provider_name() });
+            tracing::info!(
+                "searching \"{search_title}\" using {}",
+                provider.provider_name()
+            );
+            let _ = tx.send(MetadataJobEvent::ProviderSeries {
+                provider: provider.provider_name(),
+            });
 
             let query = self.create_match_query(search_title, series, books).await;
             // Rust 扩展：搜索标题为 provider 网页链接时直接按 id 获取（跳过搜索/相似度匹配）
             if let Some(id) = provider.resolve_link_id(&query.series_name) {
-                if let Ok(result) = provider
-                    .get_series_metadata(&ProviderSeriesId(id))
-                    .await
-                {
+                if let Ok(result) = provider.get_series_metadata(&ProviderSeriesId(id)).await {
                     tracing::info!(
                         "found match via link: \"{}\" from {}  {}",
-                        result.metadata.titles.first().map(|t| t.name.clone()).unwrap_or_default(),
+                        result
+                            .metadata
+                            .titles
+                            .first()
+                            .map(|t| t.name.clone())
+                            .unwrap_or_default(),
                         provider.provider_name(),
                         result.id.0
                     );
                     let excluded = excluded_alt_names(provider.as_ref(), &result.metadata.titles);
-                    let book_metadata = self.get_book_metadata(books, &result, provider.clone(), edition, tx).await;
-                    let mut matched =
-                        SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books);
+                    let book_metadata = self
+                        .get_book_metadata(books, &result, provider.clone(), edition, tx)
+                        .await;
+                    let mut matched = SeriesAndBookMetadata::new(result.metadata, book_metadata)
+                        .with_oneshots(books);
                     matched.excluded_alt_titles = excluded;
                     return Some(matched);
                 }
@@ -957,7 +1038,11 @@ impl MetadataService {
             let result = match provider.match_series_metadata(&query).await {
                 Ok(result) => result,
                 Err(error) => {
-                    tracing::error!("match failed for provider {}: {}", provider.provider_name(), error);
+                    tracing::error!(
+                        "match failed for provider {}: {}",
+                        provider.provider_name(),
+                        error
+                    );
                     let _ = tx.send(MetadataJobEvent::ProviderError {
                         provider: provider.provider_name(),
                         message: error.to_string(),
@@ -969,12 +1054,19 @@ impl MetadataService {
             if let Some(result) = result {
                 tracing::info!(
                     "found match: \"{}\" from {}  {}",
-                    result.metadata.titles.first().map(|t| t.name.clone()).unwrap_or_default(),
+                    result
+                        .metadata
+                        .titles
+                        .first()
+                        .map(|t| t.name.clone())
+                        .unwrap_or_default(),
                     provider.provider_name(),
                     result.id.0
                 );
                 let excluded = excluded_alt_names(provider.as_ref(), &result.metadata.titles);
-                let book_metadata = self.get_book_metadata(books, &result, provider.clone(), edition, tx).await;
+                let book_metadata = self
+                    .get_book_metadata(books, &result, provider.clone(), edition, tx)
+                    .await;
                 let mut matched =
                     SeriesAndBookMetadata::new(result.metadata, book_metadata).with_oneshots(books);
                 matched.excluded_alt_titles = excluded;
@@ -1002,7 +1094,11 @@ impl MetadataService {
         let mut result = HashMap::new();
         for (book, series_book) in metadata_match {
             if let Some(series_book) = series_book {
-                tracing::info!("({}) fetching metadata for book {}", provider.provider_name(), series_book.name.as_deref().unwrap_or(""));
+                tracing::info!(
+                    "({}) fetching metadata for book {}",
+                    provider.provider_name(),
+                    series_book.name.as_deref().unwrap_or("")
+                );
                 let _ = tx.send(MetadataJobEvent::ProviderBook {
                     provider: provider.provider_name(),
                     total_books: fetch_size as i32,
@@ -1010,7 +1106,10 @@ impl MetadataService {
                 });
                 progress += 1;
                 // 逐本 .ok()：单本失败只影响该书；失败留痕（warn 日志）便于排障。
-                let metadata = match provider.get_book_metadata(&series_meta.id, &series_book.id).await {
+                let metadata = match provider
+                    .get_book_metadata(&series_meta.id, &series_book.id)
+                    .await
+                {
                     Ok(result) => Some(result.metadata),
                     Err(error) => {
                         tracing::warn!(
@@ -1040,7 +1139,10 @@ impl MetadataService {
         // Kotlin: providerBooks.groupBy { it.edition }（edition 恒为 null，键集合仅含 None）
         let mut edition_books: HashMap<Option<String>, Vec<SeriesBook>> = HashMap::new();
         for book in provider_books {
-            edition_books.entry(book.edition.clone()).or_default().push(book.clone());
+            edition_books
+                .entry(book.edition.clone())
+                .or_default()
+                .push(book.clone());
         }
 
         if let Some(edition) = edition {
@@ -1052,9 +1154,9 @@ impl MetadataService {
                     let matched = edition_books
                         .get(&Some(edition_name.clone()))
                         .and_then(|candidates| {
-                            candidates
-                                .iter()
-                                .find(|pb| pb.number.is_some() && pb.number.as_ref() == book_number.as_ref())
+                            candidates.iter().find(|pb| {
+                                pb.number.is_some() && pb.number.as_ref() == book_number.as_ref()
+                            })
                         })
                         .cloned();
                     (book.clone(), matched)
@@ -1093,9 +1195,9 @@ impl MetadataService {
                 let matched = edition_books
                     .get(&edition_key)
                     .and_then(|candidates| {
-                        candidates
-                            .iter()
-                            .find(|pb| pb.number.is_some() && pb.number.as_ref() == book_number.as_ref())
+                        candidates.iter().find(|pb| {
+                            pb.number.is_some() && pb.number.as_ref() == book_number.as_ref()
+                        })
                     })
                     .cloned();
                 (book.clone(), matched)
@@ -1107,7 +1209,8 @@ impl MetadataService {
         match self.library_type {
             MediaType::Manga => BookNameParser::get_volumes(book_name),
             MediaType::Novel | MediaType::Comic => BookNameParser::get_book_number(book_name),
-            MediaType::Webtoon => BookNameParser::get_chapters(book_name).or_else(|| BookNameParser::get_book_number(book_name)),
+            MediaType::Webtoon => BookNameParser::get_chapters(book_name)
+                .or_else(|| BookNameParser::get_book_number(book_name)),
         }
     }
 
@@ -1136,13 +1239,16 @@ impl MetadataService {
             .filter(|t| !t.trim().is_empty())
             .collect();
 
-        let mut current = SeriesAndBookMetadata::new(series_metadata, book_metadata).with_oneshots(books);
+        let mut current =
+            SeriesAndBookMetadata::new(series_metadata, book_metadata).with_oneshots(books);
         current.excluded_alt_titles = excluded_alt_titles;
         for provider in providers {
             let matched = self
                 .match_series(series, books, &search_titles, provider.clone(), edition, tx)
                 .await;
-            let _ = tx.send(MetadataJobEvent::ProviderCompleted { provider: provider.provider_name() });
+            let _ = tx.send(MetadataJobEvent::ProviderCompleted {
+                provider: provider.provider_name(),
+            });
             if let Some(new_metadata) = matched {
                 // 逐 provider 翻译标签（非 bangumi/ehentai），保证聚合结果中
                 // 非 bangumi/ehentai 来源的标签仍被翻译、bangumi/ehentai 原样。
@@ -1173,7 +1279,9 @@ impl MetadataService {
             .iter()
             .map(|(id, m)| (id.0.clone(), m.clone()))
             .collect();
-        let merged = self.metadata_merger.merge_book_metadata(&original_map, &new_map);
+        let merged = self
+            .metadata_merger
+            .merge_book_metadata(&original_map, &new_map);
 
         let original_books: HashMap<String, MediaServerBookId> = original
             .book_metadata
@@ -1190,8 +1298,8 @@ impl MetadataService {
         // 将双方 excluded 从各自 titles 剔除），excluded 名单不再透传后处理（置空），
         // 避免后处理对并集按名剔除误伤他人。
         let excluded_alt_titles = Vec::new();
-        let mut merged_meta =
-            SeriesAndBookMetadata::new(merged_series, merged_books).with_book_oneshots(original.book_oneshots);
+        let mut merged_meta = SeriesAndBookMetadata::new(merged_series, merged_books)
+            .with_book_oneshots(original.book_oneshots);
         merged_meta.all_series_titles = all_series_titles;
         merged_meta.excluded_alt_titles = excluded_alt_titles;
         merged_meta
@@ -1206,7 +1314,8 @@ impl MetadataService {
     ) -> MatchQuery {
         // 搜索请求标题：searchTitleExtraction 启用时应用完整候选处理（符号归一 + 字符映射 + trim），
         // 使标题链中所有候选（含 series_title 原始名）都以处理后的形式调 provider 搜索 API。
-        let query_series_name = normalized_search_title(search_title, &self.search_title_extraction);
+        let query_series_name =
+            normalized_search_title(search_title, &self.search_title_extraction);
         let mut sorted: Vec<&MediaServerBook> = books.iter().collect();
         sorted.sort_by_key(|b| b.number);
         let (first_book, range) = sorted
@@ -1216,7 +1325,11 @@ impl MetadataService {
                     .unwrap_or_else(|| BookRange::single(book.number as f64));
                 (book, number)
             })
-            .min_by(|(_, a), (_, b)| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|(_, a), (_, b)| {
+                a.start
+                    .partial_cmp(&b.start)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(book, number)| ((*book).clone(), number))
             .unwrap_or_else(|| {
                 let book = books.first().cloned().unwrap_or_else(|| MediaServerBook {
@@ -1254,7 +1367,11 @@ impl MetadataService {
                 (book, BookRange::single(0.0))
             });
 
-        let cover = self.media_server_client.get_book_thumbnail(&first_book.id).await.unwrap_or(None);
+        let cover = self
+            .media_server_client
+            .get_book_thumbnail(&first_book.id)
+            .await
+            .unwrap_or(None);
         let release_year = series.metadata.release_year.filter(|y| *y != 0);
 
         MatchQuery::new(
@@ -1278,11 +1395,13 @@ impl MetadataService {
         .with_media_type(Some(self.library_type))
         // Rust 扩展：简繁转换应用于自动匹配（chineseConversion.matching；
         // normalized_series_name/normalize_titles 两侧双向应用）
-        .with_chinese(if self.chinese_conversion.enabled && self.chinese_conversion.matching {
-            self.chinese_converter.clone()
-        } else {
-            None
-        })
+        .with_chinese(
+            if self.chinese_conversion.enabled && self.chinese_conversion.matching {
+                self.chinese_converter.clone()
+            } else {
+                None
+            },
+        )
         // Rust 扩展：oneshot 标志 + 第一本书文件名（eHentai gid 提取候选）
         .with_book_context(
             sorted.len() == 1 && first_book.oneshot,
@@ -1320,7 +1439,10 @@ fn merge_series_metadata_with_exclusions(
     merger: &MetadataMerger,
     original: &SeriesAndBookMetadata,
     new: &SeriesAndBookMetadata,
-) -> (komf_core::model::SeriesMetadata, Vec<komf_core::model::SeriesTitle>) {
+) -> (
+    komf_core::model::SeriesMetadata,
+    Vec<komf_core::model::SeriesTitle>,
+) {
     let mut new_series_metadata = new.series_metadata.clone();
     if !new.excluded_alt_titles.is_empty() {
         let excluded: std::collections::HashSet<String> = new
@@ -1328,9 +1450,9 @@ fn merge_series_metadata_with_exclusions(
             .iter()
             .map(|n| crate::metadata_post_processor::distinct_name(n))
             .collect();
-        new_series_metadata
-            .titles
-            .retain(|t| !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name)));
+        new_series_metadata.titles.retain(|t| {
+            !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name))
+        });
     }
     // original（主 provider）的 excluded 同样先从自身 titles 剔除（对称处理）：
     // 备选排除只影响该 provider 自身，不连坐其他 provider 的同名备选。
@@ -1341,11 +1463,12 @@ fn merge_series_metadata_with_exclusions(
             .iter()
             .map(|n| crate::metadata_post_processor::distinct_name(n))
             .collect();
-        original_series_metadata
-            .titles
-            .retain(|t| !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name)));
+        original_series_metadata.titles.retain(|t| {
+            !excluded.contains(&crate::metadata_post_processor::distinct_name(&t.name))
+        });
     }
-    let merged_series = merger.merge_series_metadata(&original_series_metadata, &new_series_metadata);
+    let merged_series =
+        merger.merge_series_metadata(&original_series_metadata, &new_series_metadata);
     let mut all_series_titles = original.all_series_titles.clone();
     all_series_titles.extend(new.all_series_titles.iter().cloned());
     (merged_series, all_series_titles)
@@ -1598,7 +1721,10 @@ fn extract_series_titles(name: &str, cfg: &SearchTitleExtractionConfig) -> Vec<S
     }
 
     // 4. 候选 = 标题拆分段 → 作者段，归一 + 去重保序
-    for segment in title_segments.into_iter().chain(authors.into_iter().map(str::to_string)) {
+    for segment in title_segments
+        .into_iter()
+        .chain(authors.into_iter().map(str::to_string))
+    {
         let candidate = normalize_candidate(&segment, cfg);
         if !candidate.is_empty() && !candidates.contains(&candidate) {
             candidates.push(candidate);
@@ -1722,9 +1848,23 @@ fn series_links_including_books(
 
 fn links_indicate_matched(links: &[WebLink]) -> bool {
     const KNOWN_LABELS: [&str; 17] = [
-        "bangumi", "e-hentai", "yenpress", "anilist", "myanimelist", "bookwalker", "webtoon",
-        "viz", "comicvine", "mangadex", "mangaupdates", "mangabaka", "animenewsnetwork",
-        "animeplanet", "anime-planet", "kitsu", "shikimori",
+        "bangumi",
+        "e-hentai",
+        "yenpress",
+        "anilist",
+        "myanimelist",
+        "bookwalker",
+        "webtoon",
+        "viz",
+        "comicvine",
+        "mangadex",
+        "mangaupdates",
+        "mangabaka",
+        "animenewsnetwork",
+        "animeplanet",
+        "anime-planet",
+        "kitsu",
+        "shikimori",
     ];
     links.iter().any(|link| {
         let label = link.label.to_lowercase();
@@ -1751,32 +1891,34 @@ fn links_match_providers(links: &[WebLink]) -> Vec<(CoreProviders, ProviderSerie
     let mut result: Vec<(CoreProviders, ProviderSeriesId)> = Vec::new();
     for link in links {
         let url = link.url.to_lowercase();
-        let parsed: Option<(CoreProviders, ProviderSeriesId)> = if url.contains("bgm.tv") || url.contains("bangumi.tv")
-        {
-            // bangumi: bgm.tv / bangumi.tv /subject/{id}
-            extract_path_segment(&url, "/subject/").map(|id| (CoreProviders::Bangumi, ProviderSeriesId(id)))
-        } else if url.contains("e-hentai.org") || url.contains("exhentai.org") {
-            // ehentai: /g/{gid}/{token} → "{gid};{token}"
-            extract_ehentai_gid(&url).map(|id| (CoreProviders::EHentai, ProviderSeriesId(id)))
-        } else if url.contains("anilist.co") {
-            // anilist: anilist.co/(anime|manga)/{id}
-            extract_path_segment_any(&url, &["/anime/", "/manga/"])
-                .map(|id| (CoreProviders::Anilist, ProviderSeriesId(id)))
-        } else if url.contains("myanimelist.net") {
-            // mal: myanimelist.net/(anime|manga)/{id}
-            extract_path_segment_any(&url, &["/anime/", "/manga/"])
-                .map(|id| (CoreProviders::Mal, ProviderSeriesId(id)))
-        } else if url.contains("mangadex.org") {
-            // mangadex: mangadex.org/title/{id}
-            extract_path_segment(&url, "/title/").map(|id| (CoreProviders::Mangadex, ProviderSeriesId(id)))
-        } else if url.contains("mangaupdates.com") {
-            // mangaupdates: /series/{id} 或 series.html?id={id}
-            extract_path_segment(&url, "/series/")
-                .or_else(|| extract_query_param(&url, "id"))
-                .map(|id| (CoreProviders::MangaUpdates, ProviderSeriesId(id)))
-        } else {
-            None
-        };
+        let parsed: Option<(CoreProviders, ProviderSeriesId)> =
+            if url.contains("bgm.tv") || url.contains("bangumi.tv") {
+                // bangumi: bgm.tv / bangumi.tv /subject/{id}
+                extract_path_segment(&url, "/subject/")
+                    .map(|id| (CoreProviders::Bangumi, ProviderSeriesId(id)))
+            } else if url.contains("e-hentai.org") || url.contains("exhentai.org") {
+                // ehentai: /g/{gid}/{token} → "{gid};{token}"
+                extract_ehentai_gid(&url).map(|id| (CoreProviders::EHentai, ProviderSeriesId(id)))
+            } else if url.contains("anilist.co") {
+                // anilist: anilist.co/(anime|manga)/{id}
+                extract_path_segment_any(&url, &["/anime/", "/manga/"])
+                    .map(|id| (CoreProviders::Anilist, ProviderSeriesId(id)))
+            } else if url.contains("myanimelist.net") {
+                // mal: myanimelist.net/(anime|manga)/{id}
+                extract_path_segment_any(&url, &["/anime/", "/manga/"])
+                    .map(|id| (CoreProviders::Mal, ProviderSeriesId(id)))
+            } else if url.contains("mangadex.org") {
+                // mangadex: mangadex.org/title/{id}
+                extract_path_segment(&url, "/title/")
+                    .map(|id| (CoreProviders::Mangadex, ProviderSeriesId(id)))
+            } else if url.contains("mangaupdates.com") {
+                // mangaupdates: /series/{id} 或 series.html?id={id}
+                extract_path_segment(&url, "/series/")
+                    .or_else(|| extract_query_param(&url, "id"))
+                    .map(|id| (CoreProviders::MangaUpdates, ProviderSeriesId(id)))
+            } else {
+                None
+            };
         if let Some(p) = parsed {
             if !result.iter().any(|(prov, _)| *prov == p.0) {
                 result.push(p);
@@ -1877,7 +2019,11 @@ mod tests {
     #[test]
     fn repeated_title_collapses_into_single_search_title() {
         let c = cfg();
-        let titles = build_search_titles("All about My Best Friend - All about My Best Friend", &[], &c);
+        let titles = build_search_titles(
+            "All about My Best Friend - All about My Best Friend",
+            &[],
+            &c,
+        );
         assert_eq!(
             titles,
             vec![
@@ -1886,10 +2032,17 @@ mod tests {
             ]
         );
         // 大小写/空白差异仍折叠（en dash）
-        let titles2 = build_search_titles("All about  My Best Friend  –  all about my best friend", &[], &c);
+        let titles2 = build_search_titles(
+            "All about  My Best Friend  –  all about my best friend",
+            &[],
+            &c,
+        );
         assert!(titles2.contains(&"All about  My Best Friend".to_string()));
         // 单词内破折号不折叠
-        assert_eq!(build_search_titles("Spider-Man", &[], &c), vec!["Spider-Man"]);
+        assert_eq!(
+            build_search_titles("Spider-Man", &[], &c),
+            vec!["Spider-Man"]
+        );
         assert_eq!(build_search_titles("X-Men", &[], &c), vec!["X-Men"]);
         // 两侧不同不折叠
         assert_eq!(
@@ -2051,20 +2204,29 @@ mod tests {
             ..Default::default()
         };
         // 启用：完整候选处理（符号归一 + trim）
-        assert_eq!(normalized_search_title("進撃の巨人：完全版", &c), "進撃の巨人 完全版");
+        assert_eq!(
+            normalized_search_title("進撃の巨人：完全版", &c),
+            "進撃の巨人 完全版"
+        );
         // charMappings 也生效
         let c2 = SearchTitleExtractionConfig {
             enabled: true,
             char_mappings: vec![("／".to_string(), "/".to_string())],
             ..Default::default()
         };
-        assert_eq!(normalized_search_title("死亡笔记／另一个笔记", &c2), "死亡笔记/另一个笔记");
+        assert_eq!(
+            normalized_search_title("死亡笔记／另一个笔记", &c2),
+            "死亡笔记/另一个笔记"
+        );
     }
 
     #[test]
     fn search_title_unchanged_when_disabled() {
         let c = cfg();
-        assert_eq!(normalized_search_title("進撃の巨人：完全版", &c), "進撃の巨人：完全版");
+        assert_eq!(
+            normalized_search_title("進撃の巨人：完全版", &c),
+            "進撃の巨人：完全版"
+        );
     }
 
     #[test]
@@ -2088,9 +2250,20 @@ mod tests {
         // 链内保留原始串；去重键用归一后（"："→空格）。series_title 与 no_parens 归一后不同（
         // 前者含 [完全版] 括号、后者不含），故都保留；提取候选 "完全版" 与二者归一后均不等。
         let titles = build_search_titles("進撃の巨人：完全版 [完全版]", &[alt("進撃の巨人")], &c);
-        assert_eq!(titles, vec!["進撃の巨人：完全版 [完全版]", "完全版", "進撃の巨人：完全版", "進撃の巨人"]);
+        assert_eq!(
+            titles,
+            vec![
+                "進撃の巨人：完全版 [完全版]",
+                "完全版",
+                "進撃の巨人：完全版",
+                "進撃の巨人"
+            ]
+        );
         // 断言去重后没有归一相等的重复项
-        let keys: Vec<String> = titles.iter().map(|t| normalized_search_title(t, &c)).collect();
+        let keys: Vec<String> = titles
+            .iter()
+            .map(|t| normalized_search_title(t, &c))
+            .collect();
         let mut unique = keys.clone();
         unique.sort();
         unique.dedup();
@@ -2140,7 +2313,10 @@ mod tests {
             number: 1,
             oneshot: true,
             metadata: MediaServerBookMetadata {
-                links: vec![link("e-hentai", "https://e-hentai.org/g/4177551/f277732e1c/")],
+                links: vec![link(
+                    "e-hentai",
+                    "https://e-hentai.org/g/4177551/f277732e1c/",
+                )],
                 ..Default::default()
             },
             deleted: false,
@@ -2175,17 +2351,44 @@ mod tests {
 
     #[test]
     fn links_indicate_matched_matches_provider_labels() {
-        assert!(links_indicate_matched(&[link("Bangumi", "https://bgm.tv/subject/3510")]));
-        assert!(links_indicate_matched(&[link("e-hentai", "https://e-hentai.org/g/1/t")]));
-        assert!(links_indicate_matched(&[link("MyAnimeList", "https://myanimelist.net/anime/1")]));
-        assert!(links_indicate_matched(&[link("MangaDex", "https://mangadex.org/title/1")]));
-        assert!(links_indicate_matched(&[link("Shikimori", "https://shikimori.one/manga/1")]));
+        assert!(links_indicate_matched(&[link(
+            "Bangumi",
+            "https://bgm.tv/subject/3510"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "e-hentai",
+            "https://e-hentai.org/g/1/t"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "MyAnimeList",
+            "https://myanimelist.net/anime/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "MangaDex",
+            "https://mangadex.org/title/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "Shikimori",
+            "https://shikimori.one/manga/1"
+        )]));
         // MangaDex 第三方外链 label（Anime-Planet 带连字符，与 MangaBaka 的 AnimePlanet 并存）
-        assert!(links_indicate_matched(&[link("Anime-Planet", "https://www.anime-planet.com/manga/1")]));
-        assert!(links_indicate_matched(&[link("MangaDex", "https://mangadex.org/title/1")]));
+        assert!(links_indicate_matched(&[link(
+            "Anime-Planet",
+            "https://www.anime-planet.com/manga/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "MangaDex",
+            "https://mangadex.org/title/1"
+        )]));
         // 大小写不敏感
-        assert!(links_indicate_matched(&[link("BANGUMI", "https://bgm.tv/subject/1")]));
-        assert!(links_indicate_matched(&[link("e-hentai".to_uppercase().as_str(), "https://x.org/1")]));
+        assert!(links_indicate_matched(&[link(
+            "BANGUMI",
+            "https://bgm.tv/subject/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "e-hentai".to_uppercase().as_str(),
+            "https://x.org/1"
+        )]));
     }
 
     #[test]
@@ -2223,7 +2426,10 @@ mod tests {
         let input = SeriesAndBookMetadata::new(meta, std::collections::HashMap::new());
         let out = apply_chinese_conversion_to_metadata(input, &cfg, Some(&converter));
         // 标题转简
-        assert_eq!(out.series_metadata.title.unwrap().name, "爱される资格は过去に落としてきました");
+        assert_eq!(
+            out.series_metadata.title.unwrap().name,
+            "爱される资格は过去に落としてきました"
+        );
         assert_eq!(out.series_metadata.titles[0].name, "繁体别名");
         // 标签转简
         assert_eq!(out.series_metadata.tags, vec!["汉化"]);
@@ -2255,22 +2461,52 @@ mod tests {
     #[test]
     fn links_indicate_matched_domain_compat() {
         // bangumi 兼容 bgm.tv / bangumi.tv（label 或 url）
-        assert!(links_indicate_matched(&[link("btv", "https://btv/subject/1")]));
-        assert!(links_indicate_matched(&[link("bgm.tv", "https://bgm.tv/subject/1")]));
-        assert!(links_indicate_matched(&[link("bangumi.tv", "https://x.example/subject/1")]));
-        assert!(links_indicate_matched(&[link("other", "https://bgm.tv/subject/1")]));
+        assert!(links_indicate_matched(&[link(
+            "btv",
+            "https://btv/subject/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "bgm.tv",
+            "https://bgm.tv/subject/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "bangumi.tv",
+            "https://x.example/subject/1"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "other",
+            "https://bgm.tv/subject/1"
+        )]));
         // ehentai 兼容 e-hentai.org / exhentai.org（label 或 url）
-        assert!(links_indicate_matched(&[link("e-hentai.org", "https://x.example/g/1/t")]));
-        assert!(links_indicate_matched(&[link("exhentai.org", "https://x.example/g/1/t")]));
-        assert!(links_indicate_matched(&[link("other", "https://exhentai.org/g/1/t")]));
+        assert!(links_indicate_matched(&[link(
+            "e-hentai.org",
+            "https://x.example/g/1/t"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "exhentai.org",
+            "https://x.example/g/1/t"
+        )]));
+        assert!(links_indicate_matched(&[link(
+            "other",
+            "https://exhentai.org/g/1/t"
+        )]));
     }
 
     #[test]
     fn links_indicate_matched_no_match() {
         assert!(!links_indicate_matched(&[]));
-        assert!(!links_indicate_matched(&[link("Random", "https://example.com/x")]));
-        assert!(!links_indicate_matched(&[link("Wiki", "https://en.wikipedia.org/bgm")]));
-        assert!(!links_indicate_matched(&[link("Pixiv", "https://www.pixiv.net/artworks/1")]));
+        assert!(!links_indicate_matched(&[link(
+            "Random",
+            "https://example.com/x"
+        )]));
+        assert!(!links_indicate_matched(&[link(
+            "Wiki",
+            "https://en.wikipedia.org/bgm"
+        )]));
+        assert!(!links_indicate_matched(&[link(
+            "Pixiv",
+            "https://www.pixiv.net/artworks/1"
+        )]));
     }
 
     #[test]
@@ -2285,8 +2521,14 @@ mod tests {
             vec![(CoreProviders::Bangumi, ProviderSeriesId("123".to_string()))]
         );
         assert_eq!(
-            links_match_providers(&[link("e-hentai", "https://e-hentai.org/g/4194822/bacf336cff")]),
-            vec![(CoreProviders::EHentai, ProviderSeriesId("4194822;bacf336cff".to_string()))]
+            links_match_providers(&[link(
+                "e-hentai",
+                "https://e-hentai.org/g/4194822/bacf336cff"
+            )]),
+            vec![(
+                CoreProviders::EHentai,
+                ProviderSeriesId("4194822;bacf336cff".to_string())
+            )]
         );
         assert_eq!(
             links_match_providers(&[link("exhentai.org", "https://exhentai.org/g/1/t")]),
@@ -2302,15 +2544,30 @@ mod tests {
         );
         assert_eq!(
             links_match_providers(&[link("MangaDex", "https://mangadex.org/title/abc-def")]),
-            vec![(CoreProviders::Mangadex, ProviderSeriesId("abc-def".to_string()))]
+            vec![(
+                CoreProviders::Mangadex,
+                ProviderSeriesId("abc-def".to_string())
+            )]
         );
         assert_eq!(
-            links_match_providers(&[link("MangaUpdates", "https://www.mangaupdates.com/series/789")]),
-            vec![(CoreProviders::MangaUpdates, ProviderSeriesId("789".to_string()))]
+            links_match_providers(&[link(
+                "MangaUpdates",
+                "https://www.mangaupdates.com/series/789"
+            )]),
+            vec![(
+                CoreProviders::MangaUpdates,
+                ProviderSeriesId("789".to_string())
+            )]
         );
         assert_eq!(
-            links_match_providers(&[link("MangaUpdates", "https://www.mangaupdates.com/series.html?id=42")]),
-            vec![(CoreProviders::MangaUpdates, ProviderSeriesId("42".to_string()))]
+            links_match_providers(&[link(
+                "MangaUpdates",
+                "https://www.mangaupdates.com/series.html?id=42"
+            )]),
+            vec![(
+                CoreProviders::MangaUpdates,
+                ProviderSeriesId("42".to_string())
+            )]
         );
         // 多链接：收集所有可解析的（跳过不可解析的第三方 label），保持 links 顺序
         assert_eq!(
@@ -2321,7 +2578,10 @@ mod tests {
             ]),
             vec![
                 (CoreProviders::Bangumi, ProviderSeriesId("1902".to_string())),
-                (CoreProviders::Mangadex, ProviderSeriesId("abc-def".to_string())),
+                (
+                    CoreProviders::Mangadex,
+                    ProviderSeriesId("abc-def".to_string())
+                ),
             ]
         );
         // 同 provider 重复链接：去重保留首个
@@ -2333,10 +2593,19 @@ mod tests {
             vec![(CoreProviders::Bangumi, ProviderSeriesId("1902".to_string()))]
         );
         // 无法映射到 komf provider 的第三方 label / 空 / 无关链接 → 空 Vec
-        assert_eq!(links_match_providers(&[link("Kitsu", "https://kitsu.app/manga/1")]), vec![]);
-        assert_eq!(links_match_providers(&[link("Shikimori", "https://shikimori.one/manga/1")]), vec![]);
+        assert_eq!(
+            links_match_providers(&[link("Kitsu", "https://kitsu.app/manga/1")]),
+            vec![]
+        );
+        assert_eq!(
+            links_match_providers(&[link("Shikimori", "https://shikimori.one/manga/1")]),
+            vec![]
+        );
         assert_eq!(links_match_providers(&[]), vec![]);
-        assert_eq!(links_match_providers(&[link("Random", "https://example.com/x")]), vec![]);
+        assert_eq!(
+            links_match_providers(&[link("Random", "https://example.com/x")]),
+            vec![]
+        );
     }
 
     #[test]
@@ -2384,7 +2653,10 @@ mod tests {
             order_by_provider_config(candidates.clone(), &[]),
             candidates
         );
-        assert_eq!(order_by_provider_config(vec![], &[CoreProviders::Bangumi]), vec![]);
+        assert_eq!(
+            order_by_provider_config(vec![], &[CoreProviders::Bangumi]),
+            vec![]
+        );
     }
 
     /// 聚合 merge：备选剔除按来源（双方 excluded 从各自 titles 剔除）。
@@ -2396,8 +2668,16 @@ mod tests {
         let merger = MetadataMerger::new(false, false);
         // 主 provider：禁写备选（excluded = 全部标题名）
         let original_titles = vec![
-            SeriesTitle { name: "ベルセルク".into(), r#type: None, language: Some("ja".into()) },
-            SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) },
+            SeriesTitle {
+                name: "ベルセルク".into(),
+                r#type: None,
+                language: Some("ja".into()),
+            },
+            SeriesTitle {
+                name: "Berserk".into(),
+                r#type: None,
+                language: Some("en".into()),
+            },
         ];
         let mut original = SeriesAndBookMetadata::new(
             SeriesMetadata {
@@ -2410,8 +2690,16 @@ mod tests {
         original.excluded_alt_titles = original_titles.iter().map(|t| t.name.clone()).collect();
         // 其他 provider：备选开启（excluded 空），含与主 provider 同名的 Berserk
         let new_titles = vec![
-            SeriesTitle { name: "Berserk".into(), r#type: None, language: Some("en".into()) },
-            SeriesTitle { name: "剣風伝奇ベルセルク".into(), r#type: None, language: Some("ja-ro".into()) },
+            SeriesTitle {
+                name: "Berserk".into(),
+                r#type: None,
+                language: Some("en".into()),
+            },
+            SeriesTitle {
+                name: "剣風伝奇ベルセルク".into(),
+                r#type: None,
+                language: Some("ja-ro".into()),
+            },
         ];
         let new = SeriesAndBookMetadata::new(
             SeriesMetadata {
@@ -2428,7 +2716,10 @@ mod tests {
         assert_eq!(names, vec!["Berserk", "剣風伝奇ベルセルク"]);
         // 全量候选 = 双方拼接（4 项，不剔除），主标题候选始终全量
         let all_names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(all_names, vec!["ベルセルク", "Berserk", "Berserk", "剣風伝奇ベルセルク"]);
+        assert_eq!(
+            all_names,
+            vec!["ベルセルク", "Berserk", "Berserk", "剣風伝奇ベルセルク"]
+        );
     }
 
     /// 聚合 merge 不合并 title（对齐 Kotlin，恒 None）：
@@ -2440,16 +2731,32 @@ mod tests {
         let merger = MetadataMerger::new(false, false);
         let original = SeriesAndBookMetadata::new(
             SeriesMetadata {
-                title: Some(SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }),
-                titles: vec![SeriesTitle { name: "ベルセルク".into(), r#type: None, language: None }],
+                title: Some(SeriesTitle {
+                    name: "ベルセルク".into(),
+                    r#type: None,
+                    language: None,
+                }),
+                titles: vec![SeriesTitle {
+                    name: "ベルセルク".into(),
+                    r#type: None,
+                    language: None,
+                }],
                 ..Default::default()
             },
             std::collections::HashMap::new(),
         );
         let new = SeriesAndBookMetadata::new(
             SeriesMetadata {
-                title: Some(SeriesTitle { name: "Berserk".into(), r#type: None, language: None }),
-                titles: vec![SeriesTitle { name: "Berserk".into(), r#type: None, language: None }],
+                title: Some(SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: None,
+                }),
+                titles: vec![SeriesTitle {
+                    name: "Berserk".into(),
+                    r#type: None,
+                    language: None,
+                }],
                 ..Default::default()
             },
             std::collections::HashMap::new(),
@@ -2470,9 +2777,21 @@ mod tests {
         let merger = MetadataMerger::new(false, false);
         // 主 provider（bangumi）：alternativeTitles=false → excluded = 全量标题名
         let original_titles = vec![
-            SeriesTitle { name: "葬送のフリーレン".into(), r#type: None, language: None },
-            SeriesTitle { name: "葬送的芙莉莲".into(), r#type: None, language: Some("zh".into()) },
-            SeriesTitle { name: "Frieren".into(), r#type: None, language: Some("en".into()) },
+            SeriesTitle {
+                name: "葬送のフリーレン".into(),
+                r#type: None,
+                language: None,
+            },
+            SeriesTitle {
+                name: "葬送的芙莉莲".into(),
+                r#type: None,
+                language: Some("zh".into()),
+            },
+            SeriesTitle {
+                name: "Frieren".into(),
+                r#type: None,
+                language: Some("en".into()),
+            },
         ];
         let mut original = SeriesAndBookMetadata::new(
             SeriesMetadata {
@@ -2484,8 +2803,16 @@ mod tests {
         original.excluded_alt_titles = original_titles.iter().map(|t| t.name.clone()).collect();
         // 其他 provider（anilist）：备选开启 → excluded 空
         let new_titles = vec![
-            SeriesTitle { name: "Frieren".into(), r#type: None, language: Some("en".into()) },
-            SeriesTitle { name: "葬送のフリーレン 第二部".into(), r#type: None, language: Some("ja".into()) },
+            SeriesTitle {
+                name: "Frieren".into(),
+                r#type: None,
+                language: Some("en".into()),
+            },
+            SeriesTitle {
+                name: "葬送のフリーレン 第二部".into(),
+                r#type: None,
+                language: Some("ja".into()),
+            },
         ];
         let new = SeriesAndBookMetadata::new(
             SeriesMetadata {
@@ -2496,10 +2823,15 @@ mod tests {
         );
         let (merged_series, all) = merge_series_metadata_with_exclusions(&merger, &original, &new);
         // merge 后：主 provider 标题被自身名单剔除，其他 provider 标题保留
-        let merged_names: Vec<&str> = merged_series.titles.iter().map(|t| t.name.as_str()).collect();
+        let merged_names: Vec<&str> = merged_series
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(merged_names, vec!["Frieren", "葬送のフリーレン 第二部"]);
         // 模拟 merge_metadata 收尾：全量候选覆盖、excluded 置空（不再透传后处理）
-        let mut merged = SeriesAndBookMetadata::new(merged_series, std::collections::HashMap::new());
+        let mut merged =
+            SeriesAndBookMetadata::new(merged_series, std::collections::HashMap::new());
         merged.all_series_titles = all;
         merged.excluded_alt_titles = Vec::new();
         // 聚合配置：seriesTitle=true、seriesTitleLanguage=zh、alternativeSeriesTitles=true
@@ -2519,9 +2851,17 @@ mod tests {
         );
         let out = p.process(&merged);
         // 主标题 = zh（来自禁写备选的主 provider，全量候选仍含其标题 → 不受影响）
-        assert_eq!(out.series_metadata.title.as_ref().unwrap().name, "葬送的芙莉莲");
+        assert_eq!(
+            out.series_metadata.title.as_ref().unwrap().name,
+            "葬送的芙莉莲"
+        );
         // 其他 provider 的备选写入（不连坐、不被主 provider 名单剔除）
-        let names: Vec<&str> = out.series_metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<&str> = out
+            .series_metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Frieren", "葬送のフリーレン 第二部"]);
     }
 }

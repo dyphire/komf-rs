@@ -184,7 +184,9 @@ impl MangaBakaTracker {
         if !status.is_success() {
             return Err(format!(
                 "mangabaka API error (HTTP {status}): {}",
-                body.get("message").and_then(serde_json::Value::as_str).unwrap_or("")
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
             ));
         }
         Ok(body)
@@ -206,7 +208,9 @@ impl MangaBakaTracker {
         if !status.is_success() {
             return Err(format!(
                 "mangabaka API error (HTTP {status}): {}",
-                body.get("message").and_then(serde_json::Value::as_str).unwrap_or("")
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
             ));
         }
         Ok(body)
@@ -240,7 +244,10 @@ impl MangaBakaTracker {
                 return t.title.clone();
             }
         }
-        if let Some(native) = titles.iter().find(|t| t.traits.iter().any(|x| x == "native")) {
+        if let Some(native) = titles
+            .iter()
+            .find(|t| t.traits.iter().any(|x| x == "native"))
+        {
             return native.title.clone();
         }
         if let Some(primary_en) = titles
@@ -288,7 +295,11 @@ impl MangaBakaTracker {
         let body = self
             .get_json(&format!("{BASE_URL}/v1/my/library/batch?{query}"))
             .await?;
-        let data = body.get("data").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let data = body
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         Ok(data
             .iter()
             .filter_map(|e| e.get("series_id").and_then(serde_json::Value::as_i64))
@@ -335,7 +346,9 @@ impl TrackerService for MangaBakaTracker {
     async fn search(&self, query: &str, nsfw: bool) -> Result<Vec<TrackSearchItem>, String> {
         // 链接输入：mangabaka.org/{id} 直接定位单条目（tracked 单查）。
         if let Some(id) = Self::extract_series_url(query) {
-            let body = self.get_public(&format!("{BASE_URL}/v1/series/{id}")).await?;
+            let body = self
+                .get_public(&format!("{BASE_URL}/v1/series/{id}"))
+                .await?;
             let series: SeriesDto = serde_json::from_value(
                 body.get("data").cloned().unwrap_or(serde_json::Value::Null),
             )
@@ -348,13 +361,17 @@ impl TrackerService for MangaBakaTracker {
             return Ok(vec![self.series_to_item(&series, tracked)]);
         }
 
-        let mut url = format!("{BASE_URL}/v1/series/search?q={}", url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>());
+        let mut url = format!(
+            "{BASE_URL}/v1/series/search?q={}",
+            url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
+        );
         if !nsfw {
             url.push_str("&not_content_rating=erotica&not_content_rating=pornographic");
         }
         let body = self.get_public(&url).await?;
-        let series: Vec<SeriesDto> = serde_json::from_value(body.get("data").cloned().unwrap_or(serde_json::Value::Null))
-            .map_err(|e| format!("mangabaka search parse failed: {e}"))?;
+        let series: Vec<SeriesDto> =
+            serde_json::from_value(body.get("data").cloned().unwrap_or(serde_json::Value::Null))
+                .map_err(|e| format!("mangabaka search parse failed: {e}"))?;
         let ids = series.iter().map(|s| s.id).collect::<Vec<_>>();
         let tracked = self.tracked_ids(&ids).await.unwrap_or_default();
         Ok(series
@@ -373,12 +390,18 @@ impl TrackerService for MangaBakaTracker {
             .await
             .ok()
             .and_then(|b| {
-                let s: Option<SeriesDto> = serde_json::from_value(b.get("data").cloned().unwrap_or(serde_json::Value::Null)).ok();
+                let s: Option<SeriesDto> = serde_json::from_value(
+                    b.get("data").cloned().unwrap_or(serde_json::Value::Null),
+                )
+                .ok();
                 s.map(|s| s.totals())
             });
         let (total_chapters, total_volumes) = totals.unwrap_or((None, None));
         // 收藏状态：404 = 未收藏 → 空状态（总数仍返回）。
-        let Ok(body) = self.get_json(&format!("{BASE_URL}/v1/my/library/{id}")).await else {
+        let Ok(body) = self
+            .get_json(&format!("{BASE_URL}/v1/my/library/{id}"))
+            .await
+        else {
             return Ok(TrackState {
                 total_chapters,
                 total_volumes,
@@ -415,16 +438,25 @@ impl TrackerService for MangaBakaTracker {
 
         let mut body: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         if let Some(status) = update.status {
-            body.insert("state".into(), serde_json::Value::String(Self::to_status_str(status).into()));
+            body.insert(
+                "state".into(),
+                serde_json::Value::String(Self::to_status_str(status).into()),
+            );
         }
         if let Some(score) = update.score {
             body.insert("rating".into(), serde_json::Value::Number(score.into()));
         }
         if let Some(chapter) = update.last_read_chapter {
-            body.insert("progress_chapter".into(), serde_json::Value::Number((chapter.floor() as i64).into()));
+            body.insert(
+                "progress_chapter".into(),
+                serde_json::Value::Number((chapter.floor() as i64).into()),
+            );
         }
         if let Some(volume) = update.last_read_volume {
-            body.insert("progress_volume".into(), serde_json::Value::Number(volume.into()));
+            body.insert(
+                "progress_volume".into(),
+                serde_json::Value::Number(volume.into()),
+            );
         }
         // 哨兵日期（1969-12-31 / 1970-01-01）丢弃：源站不接受该值。
         if let Some(date) = &update.start_read_date {
@@ -434,7 +466,10 @@ impl TrackerService for MangaBakaTracker {
         }
         if let Some(date) = &update.finish_read_date {
             if date != "1969-12-31" && date != "1970-01-01" {
-                body.insert("finish_date".into(), serde_json::Value::String(date.clone()));
+                body.insert(
+                    "finish_date".into(),
+                    serde_json::Value::String(date.clone()),
+                );
             }
         }
         if body.is_empty() {
@@ -451,7 +486,10 @@ impl TrackerService for MangaBakaTracker {
 
         let mut response = self
             .http
-            .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), format!("{BASE_URL}/v1/my/library/{id}"))
+            .request(
+                reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+                format!("{BASE_URL}/v1/my/library/{id}"),
+            )
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(serde_json::to_string(&body).unwrap_or_default())
@@ -469,7 +507,10 @@ impl TrackerService for MangaBakaTracker {
                 token = new_token;
                 response = self
                     .http
-                    .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), format!("{BASE_URL}/v1/my/library/{id}"))
+                    .request(
+                        reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+                        format!("{BASE_URL}/v1/my/library/{id}"),
+                    )
                     .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(serde_json::to_string(&body).unwrap_or_default())
@@ -486,7 +527,10 @@ impl TrackerService for MangaBakaTracker {
             let resp_body: serde_json::Value = response.json().await.unwrap_or_default();
             return Err(format!(
                 "mangabaka update error (HTTP {status}): {}",
-                resp_body.get("message").and_then(serde_json::Value::as_str).unwrap_or("")
+                resp_body
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
             ));
         }
         Ok(())
