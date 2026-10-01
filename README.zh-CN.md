@@ -14,9 +14,9 @@
 - ComicInfo 读写、书籍排序、评分标签、阅读方向覆盖
 - 配置热更新（`PATCH /api/config`）、任务跟踪、元数据搜索/识别/匹配/重置端点
 - 用户脚本兼容的配置界面
-- 内置 WebUI 工作台：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi）、离线 DB 下载、明暗主题
-- **MAL / AniList / Bangumi OAuth 登录**：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
-- **阅读状态同步（Tracker，仅 Rust）**：AniList / MyAnimeList / Bangumi 阅读状态同步，含 WebUI 页面与 `/api/tracker/*` 接口——支持标题或平台链接搜索、tracked 标记、状态读取与状态/评分/进度推送
+- 内置 WebUI 工作台（仅 Rust）：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi）、离线 DB 下载、明暗主题
+- **MAL / AniList / MangaBaka / Bangumi OAuth 登录**（仅 Rust）：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
+- **阅读状态同步（Tracker，仅 Rust）**：AniList / MyAnimeList / MangaBaka / Bangumi 阅读状态同步，含 WebUI 页面与 `/api/tracker/*` 接口——支持标题或平台链接搜索、tracked 标记、状态读取与状态/评分/进度推送
 
 ## 元数据 provider
 
@@ -72,26 +72,26 @@ copy examples/application.example.yml application.yml # Windows
 
 环境变量（与 Kotlin 版一致）：
 
-| 变量                                             | 说明                                         |
-| ---------------------------------------------- | ------------------------------------------ |
-| `KOMF_KOMGA_BASE_URI`                          | Komga 服务地址                                 |
-| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                           |
-| `KOMF_KOMGA_API_KEY`                           | Komga API key（`X-API-Key` 认证，设置后优先于账号密码）   |
-| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita 地址 + API key                        |
-| `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump 地址 + API key（`stump_` 前缀，设置后优先于账号密码） |
-| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump 账号密码（仅当未配置 API key 时用于换取 JWT）        |
-| `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085，需重启）                     |
-| `KOMF_SERVER_BIND`                             | HTTP 监听地址（默认 `0.0.0.0`；仅本机用 `127.0.0.1`，需重启） |
-| `KOMF_LOG_LEVEL`                               | 日志级别（默认 INFO）                              |
-| `KOMF_DISCORD_WEBHOOKS`                        | 逗号分隔的 Discord webhook URL                  |
-| `KOMF_APPRISE_URLS`                            | 逗号分隔的 Apprise URL                          |
-| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | MAL provider 必需                            |
-| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | ComicVine provider 必需                      |
-| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token（显示 NSFW 条目）                  |
+| 变量                                             | 说明                                                                                                                         |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `KOMF_KOMGA_BASE_URI`                          | Komga 服务地址                                                                                                                 |
+| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                                                                                                           |
+| `KOMF_KOMGA_API_KEY`                           | Komga API key（`X-API-Key` 认证，设置后优先于账号密码）                                                                                   |
+| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita 地址 + API key                                                                                                        |
+| `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump 地址 + API key（`stump_` 前缀，设置后优先于账号密码）                                                                                 |
+| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump 账号密码（仅当未配置 API key 时用于换取 JWT）                                                                                        |
+| `KOMF_SERVER_PORT`                             | HTTP 端口（默认 8085，需重启）                                                                                                       |
+| `KOMF_SERVER_BIND`                             | HTTP 监听地址（默认 `0.0.0.0`；仅本机用 `127.0.0.1`，需重启）                                                                               |
+| `KOMF_LOG_LEVEL`                               | 日志级别（默认 INFO）                                                                                                              |
+| `KOMF_DISCORD_WEBHOOKS`                        | 逗号分隔的 Discord webhook URL                                                                                                  |
+| `KOMF_APPRISE_URLS`                            | 逗号分隔的 Apprise URL                                                                                                          |
+| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | MAL provider 必需                                                                                                            |
+| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | ComicVine provider 必需                                                                                                      |
+| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token（显示 NSFW 条目）                                                                                                  |
 | `KOMF_AUTH_KEY`                                | 敏感操作访问密钥（可选，公网暴露强烈建议设置）：设置后，非本地/局域网的敏感请求必须输入（本地/局域网免密钥）；`GET /version` 与 `GET /api/health` 照常放行；旧变量 `KOMF_WEBUI_KEY` 仍兼容回退 |
-| `KOMF_WEB_DIR`                                 | WebUI 静态目录覆盖（查找顺序 `web/dist` -> `ui`） |
-| `KOMF_AUTH_FORCE_REMOTE`                       | 仅调试：`1` 时把所有来源按远程处理，强制走密钥校验 |
-| `KOMF_TAG_TRANSLATION`                        | 仅环境变量开关（无配置项）：内置标签翻译（seriesTitleLanguage 为中文时的英文→中文 tags 映射，非 ehentai 独有翻译）默认启用；设为 `0` 或 `false`（大小写不敏感）时禁用 |
+| `KOMF_WEB_DIR`                                 | WebUI 静态目录覆盖（查找顺序 `web/dist` -> `ui`）                                                                                      |
+| `KOMF_AUTH_FORCE_REMOTE`                       | 仅调试：`1` 时把所有来源按远程处理，强制走密钥校验                                                                                                |
+| `KOMF_TAG_TRANSLATION`                         | 仅环境变量开关（无配置项）：内置标签翻译（seriesTitleLanguage 为中文时的英文→中文 tags 映射，非 ehentai 独有翻译）默认启用；设为 `0` 或 `false`（大小写不敏感）时禁用                |
 
 ### Docker
 
@@ -120,13 +120,16 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
 未启用密钥门时服务**没有内置鉴权**：任何能连上 HTTP 端口的人都可以读取（脱敏后的）配置、通过 `PATCH /api/config` 修改配置并调用元数据接口。请把它当数据库管理后台对待：
 
 - **仅本机（家用推荐）：** 绑定回环地址，只有本机能连：
+  
   ```yaml
   server:
     bind: 127.0.0.1
     port: 8085
   ```
+  
   或 `KOMF_SERVER_BIND=127.0.0.1`（需重启）。需要远程访问时走 SSH 隧道。
 - **局域网/VPS 暴露：** 在前面架带鉴权的反向代理，并用防火墙封掉原始端口。示例：
+  
   ```nginx
   # nginx：basic auth
   server {
@@ -137,6 +140,7 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
     }
   }
   ```
+  
   ```caddy
   # Caddy：basic auth（一行）
   komf.example.com {
@@ -217,7 +221,6 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 ### 封面重定向
 
 - `GET /api/cover/redirect?url=<encoded>` —— `302` + `Referrer-Policy: no-referrer` 跳转到目标封面 URL。WebUI 用它展示搜索结果封面：MangaDex 等封面 CDN 对白名单外 `Referer`（自部署域名、局域网 IP 等）返回占位横幅，无 `Referer` 时放行真实封面——重定向让浏览器丢弃 Referer 后直连加载真封面。目标 host 经 provider 封面域名白名单校验（防开放重定向 / SSRF），白名单外返回 `400`。搜索 API 的 `imageUrl` 保持直链，第三方服务端消费者不受影响，也可按需使用本端点。
-
 
 ### OAuth 登录（`{provider}` = `anilist`、`mal`、`bangumi` 或 `mangabaka`）
 

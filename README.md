@@ -14,9 +14,9 @@ This is the **Rust implementation** of [komf](https://github.com/Snd-R/komf), a 
 - ComicInfo reading/writing, book ordering, score tags, reading direction override
 - Config hot-reload (`PATCH /api/config`), job tracking, metadata search/identify/match/reset endpoints
 - userscript compatible configuration UI
-- Built-in WebUI workbench: 12-provider matrix, per-library overrides, notification template editor, jobs with live SSE progress, search trial with one-click identify, tracker page (AniList / MAL / Bangumi reading-status sync), offline DB download, light/dark theme
-- **OAuth login for MAL / AniList / Bangumi**: server-side OAuth2 with a shared client + official relay page — no per-instance callback registration needed; login/logout/status in the Providers page, token auto-refresh and SQLite persistence
-- **Reading-list tracker sync** (Rust-only): AniList / MyAnimeList / Bangumi reading-status sync with a WebUI page and `/api/tracker/*` endpoints — search by title or platform link, `tracked` marking, state read and status/score/progress push
+- Built-in WebUI workbench (Rust-only): 12-provider matrix, per-library overrides, notification template editor, jobs with live SSE progress, search trial with one-click identify, tracker page (AniList / MAL / Bangumi reading-status sync), offline DB download, light/dark theme
+- **OAuth login for MAL / AniList / MangaBaka / Bangumi** (Rust-only):: server-side OAuth2 with a shared client + official relay page — no per-instance callback registration needed; login/logout/status in the Providers page, token auto-refresh and SQLite persistence
+- **Reading-list tracker sync** (Rust-only): AniList / MyAnimeList / MangaBaka / Bangumi reading-status sync with a WebUI page and `/api/tracker/*` endpoints — search by title or platform link, `tracked` marking, state read and status/score/progress push
 
 ## Metadata providers
 
@@ -72,26 +72,26 @@ If no path is given, the `KOMF_CONFIG_DIR` environment variable is used. If neit
 
 Environment variables (same as the Kotlin version):
 
-| Variable                                       | Description                                                 |
-| ---------------------------------------------- | ----------------------------------------------------------- |
-| `KOMF_KOMGA_BASE_URI`                          | Komga base URL                                              |
-| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                                            |
-| `KOMF_KOMGA_API_KEY`                           | Komga API key (`X-API-Key` auth, takes precedence when set) |
-| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita base URL + API key                                   |
-| `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump base URL + API key (`stump_` prefix, takes precedence when set) |
-| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump account password (only used to exchange a JWT when no API key is set) |
-| `KOMF_SERVER_PORT`                             | HTTP port (default 8085, restart required)                  |
-| `KOMF_SERVER_BIND`                             | HTTP bind address (default `0.0.0.0`; use `127.0.0.1` for local-only, restart required) |
-| `KOMF_LOG_LEVEL`                               | Log level (default INFO)                                    |
-| `KOMF_DISCORD_WEBHOOKS`                        | Comma-separated Discord webhook URLs                        |
-| `KOMF_APPRISE_URLS`                            | Comma-separated Apprise URLs                                |
-| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | Required for MAL provider                                   |
-| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | Required for ComicVine provider                             |
-| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token (shows NSFW items)                            |
+| Variable                                       | Description                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KOMF_KOMGA_BASE_URI`                          | Komga base URL                                                                                                                                                                                                                                                                              |
+| `KOMF_KOMGA_USER` / `KOMF_KOMGA_PASSWORD`      | Komga basic auth                                                                                                                                                                                                                                                                            |
+| `KOMF_KOMGA_API_KEY`                           | Komga API key (`X-API-Key` auth, takes precedence when set)                                                                                                                                                                                                                                 |
+| `KOMF_KAVITA_BASE_URI` / `KOMF_KAVITA_API_KEY` | Kavita base URL + API key                                                                                                                                                                                                                                                                   |
+| `KOMF_STUMP_BASE_URI` / `KOMF_STUMP_API_KEY`   | Stump base URL + API key (`stump_` prefix, takes precedence when set)                                                                                                                                                                                                                       |
+| `KOMF_STUMP_USER` / `KOMF_STUMP_PASSWORD`      | Stump account password (only used to exchange a JWT when no API key is set)                                                                                                                                                                                                                 |
+| `KOMF_SERVER_PORT`                             | HTTP port (default 8085, restart required)                                                                                                                                                                                                                                                  |
+| `KOMF_SERVER_BIND`                             | HTTP bind address (default `0.0.0.0`; use `127.0.0.1` for local-only, restart required)                                                                                                                                                                                                     |
+| `KOMF_LOG_LEVEL`                               | Log level (default INFO)                                                                                                                                                                                                                                                                    |
+| `KOMF_DISCORD_WEBHOOKS`                        | Comma-separated Discord webhook URLs                                                                                                                                                                                                                                                        |
+| `KOMF_APPRISE_URLS`                            | Comma-separated Apprise URLs                                                                                                                                                                                                                                                                |
+| `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`        | Required for MAL provider                                                                                                                                                                                                                                                                   |
+| `KOMF_METADATA_PROVIDERS_COMIC_VINE_API_KEY`   | Required for ComicVine provider                                                                                                                                                                                                                                                             |
+| `KOMF_METADATA_PROVIDERS_BANGUMI_TOKEN`        | Bangumi token (shows NSFW items)                                                                                                                                                                                                                                                            |
 | `KOMF_AUTH_KEY`                                | Access key for sensitive operations (optional, strongly recommended for public exposure): when set, sensitive requests from outside the local network must present it (local/LAN bypass); `GET /version` and `GET /api/health` stay public; legacy `KOMF_WEBUI_KEY` still works as fallback |
-| `KOMF_WEB_DIR`                                 | WebUI static directory override (`web/dist` -> `ui` lookup order) |
-| `KOMF_AUTH_FORCE_REMOTE`                       | Debug only: `1` treats every client as remote to force the key path |
-| `KOMF_TAG_TRANSLATION`                        | Env-only switch (no config option): built-in tag translation (EN→ZH tags mapping when seriesTitleLanguage is Chinese; not the ehentai-specific translator) is enabled by default; set to `0` or `false` (case-insensitive) to disable |
+| `KOMF_WEB_DIR`                                 | WebUI static directory override (`web/dist` -> `ui` lookup order)                                                                                                                                                                                                                           |
+| `KOMF_AUTH_FORCE_REMOTE`                       | Debug only: `1` treats every client as remote to force the key path                                                                                                                                                                                                                         |
+| `KOMF_TAG_TRANSLATION`                         | Env-only switch (no config option): built-in tag translation (EN→ZH tags mapping when seriesTitleLanguage is Chinese; not the ehentai-specific translator) is enabled by default; set to `0` or `false` (case-insensitive) to disable                                                       |
 
 ### Docker
 
@@ -120,13 +120,17 @@ The service ships with an **optional key-based access gate** — **setting `KOMF
 Without the key gate the service has **no built-in authentication**: anyone who can reach the HTTP port can read the (credential-masked) configuration and change it via `PATCH /api/config`, and use the metadata endpoints. Treat it like a database admin panel:
 
 - **Local-only (recommended for home servers):** bind to loopback so only the machine itself can connect:
+  
   ```yaml
   server:
     bind: 127.0.0.1
     port: 8085
   ```
+  
   or `KOMF_SERVER_BIND=127.0.0.1` (restart required). Access the WebUI via SSH tunnel if needed.
+
 - **LAN/VPS exposure:** put a reverse proxy with authentication in front and firewall the raw port. Examples:
+  
   ```nginx
   # nginx: basic auth
   server {
@@ -137,6 +141,7 @@ Without the key gate the service has **no built-in authentication**: anyone who 
     }
   }
   ```
+  
   ```caddy
   # Caddy: basic auth (one line)
   komf.example.com {
@@ -248,7 +253,6 @@ Notes: `tracked` is user-scoped — AniList via `mediaListEntry`, MAL via `my_li
 - `GET /api/tracker/links` — the local ledger of items linked through this komf instance: every successful `update` upserts `{provider, trackId, title, coverUrl, url, updatedAt}` (newest first) into the `tracker_links` table in `<configDir>/oauth.sqlite`. `update` accepts optional `title` / `coverUrl` fields that are not sent to the platform but are stored for this list.
 
 In the WebUI Tracker page, the ledger is shown under **Linked** (mutually exclusive with search results); picking an item expands the state form inline under it, and clicking it again collapses it.
-
 
 ### Legacy (no `/api` prefix, kept for compatibility)
 

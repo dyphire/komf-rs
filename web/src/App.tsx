@@ -401,7 +401,11 @@ function ProviderList(props: {
                   {key === 'bangumi' && (
                     <>
                       <Field label={t('f.tagWhitelist')}><CommaField value={cur.tagWhitelist} onChange={(v) => upd([...base, 'tagWhitelist'], v)} /></Field>
+                      <Field label={t('f.seriesTitleLanguage')}><TriText value={cur.seriesTitleLanguage} onChange={(v) => upd([...base, 'seriesTitleLanguage'], v)} placeholder="zh" /></Field>
                       <SwitchField label={t('f.archiveEnabled')} value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
+                      <Field label={t('f.archiveDir')}><TriText value={cur.archive?.dir} onChange={(v) => upd([...base, 'archive', 'dir'], v)} /></Field>
+                      <Field label={t('f.archiveUpdateIntervalHours')}><input type="number" min="0" value={cur.archive?.updateIntervalHours ?? 168} onChange={(e) => upd([...base, 'archive', 'updateIntervalHours'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.archiveIdleReleaseSecs')}><input type="number" min="0" value={cur.archive?.idleReleaseSecs ?? 60} onChange={(e) => upd([...base, 'archive', 'idleReleaseSecs'], Number(e.target.value))} /></Field>
                     </>
                   )}
                   {key === 'bookWalker' && (
@@ -413,7 +417,17 @@ function ProviderList(props: {
                       <Field label={t('f.titlePriority')}><select value={cur.titlePriority ?? 'jpn'} onChange={(e) => upd([...base, 'titlePriority'], e.target.value)}><option value="jpn">jpn</option><option value="title">title</option></select></Field>
                       <SwitchField label={t('f.gidOnlyMatch')} value={cur.gidOnlyMatch} onChange={(v) => upd([...base, 'gidOnlyMatch'], v)} />
                       <Field label={t('f.preferredLanguages')}><CommaField value={cur.preferredLanguages} onChange={(v) => upd([...base, 'preferredLanguages'], v)} /></Field>
+                      <Field label={t('f.tagWhitelist')}><CommaField value={cur.tagWhitelist} onChange={(v) => upd([...base, 'tagWhitelist'], v)} /></Field>
+                      <Field label={t('f.maleOnlyTagsFile')}><TriText value={cur.maleOnlyTagsFile} onChange={(v) => upd([...base, 'maleOnlyTagsFile'], v)} /></Field>
+                      <Field label={t('f.ipbMemberId')} hint={t('sensitive')}><Text password value={cur.ipbMemberId?.includes('*') ? '' : (cur.ipbMemberId ?? '')} onChange={(v) => upd([...base, 'ipbMemberId'], v)} placeholder="********" /></Field>
+                      <Field label={t('f.ipbPassHash')} hint={t('sensitive')}><Text password value={cur.ipbPassHash?.includes('*') ? '' : (cur.ipbPassHash ?? '')} onChange={(v) => upd([...base, 'ipbPassHash'], v)} placeholder="********" /></Field>
                       <SwitchField label={t('f.archiveEnabled')} value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
+                      <Field label={t('f.archiveUrl')}><TriText value={cur.archive?.url} onChange={(v) => upd([...base, 'archive', 'url'], v)} /></Field>
+                      <Field label={t('f.archiveDbFile')}><TriText value={cur.archive?.dbFile} onChange={(v) => upd([...base, 'archive', 'dbFile'], v)} /></Field>
+                      <Field label={t('f.archiveUpdateIntervalHours')}><input type="number" min="0" value={cur.archive?.updateIntervalHours ?? 4} onChange={(e) => upd([...base, 'archive', 'updateIntervalHours'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.archiveIdleReleaseSecs')}><input type="number" min="0" value={cur.archive?.idleReleaseSecs ?? 60} onChange={(e) => upd([...base, 'archive', 'idleReleaseSecs'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.archiveSearchCategoryFilter')}><CommaField value={cur.archive?.searchCategoryFilter} onChange={(v) => upd([...base, 'archive', 'searchCategoryFilter'], v)} /></Field>
+                      <Field label={t('f.archiveSearchUploaderFilter')}><CommaField value={cur.archive?.searchUploaderFilter} onChange={(v) => upd([...base, 'archive', 'searchUploaderFilter'], v)} /></Field>
                       <SwitchField label={t('f.tagTranslationEnabled')} value={cur.tagTranslationEnabled} onChange={(v) => upd([...base, 'tagTranslationEnabled'], v)} />
                       <Field label={t('f.tagTranslationUrl')}><Text value={cur.tagTranslationUrl} onChange={(v) => upd([...base, 'tagTranslationUrl'], v || null)} placeholder={t('ph.tagTranslationUrl')} /></Field>
                       <Field label={t('f.titleTemplate')}><Text value={cur.titleTemplate} onChange={(v) => upd([...base, 'titleTemplate'], v || null)} /></Field>
@@ -1337,7 +1351,7 @@ export default function App() {
               </div>
               <div className="row" style={{ marginTop: 8 }}>
                 <span className="badge">{t('ov.enabledProviders', { a: enabledCount, b: PROVIDER_KEYS.length })}</span>
-                <span className="badge">nameMatchingMode: {draft.metadataProviders?.nameMatchingMode ?? '-'}</span>
+                <span className="badge">{t('ov.nameMatchingMode')}: {draft.metadataProviders?.nameMatchingMode ? t('mode.' + draft.metadataProviders.nameMatchingMode) : '-'}</span>
                 <span className="badge">{t('ov.mangaBakaDb', { v: draft.metadataProviders?.mangaBakaDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
                 <span className="badge">{t('ov.bookWalkerDb', { v: draft.metadataProviders?.bookWalkerDownloadDate ?? t('db.undownloaded') })}</span>
                 <span className="badge">{t('ov.bangumiDb', { v: draft.metadataProviders?.bangumiDatabase?.downloadTimestamp ?? t('db.undownloaded') })}</span>
@@ -1437,7 +1451,7 @@ export default function App() {
               <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
                 <Field label={t('f.nameMatchingMode')}>
                   <select value={draft.metadataProviders?.nameMatchingMode ?? 'CLOSEST_MATCH'} onChange={(e) => upd(['metadataProviders', 'nameMatchingMode'], e.target.value)}>
-                    {NAME_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
+                    {NAME_MODES.map((m) => <option key={m} value={m}>{t('mode.' + m)}</option>)}
                   </select>
                 </Field>
                 <Field label={t('f.malClientId')} hint={t('sensitive')}><Text password value={draft.metadataProviders?.malClientId?.includes('*') ? '' : (draft.metadataProviders?.malClientId ?? '')} onChange={(v) => upd(['metadataProviders', 'malClientId'], v)} placeholder="********" /></Field>
