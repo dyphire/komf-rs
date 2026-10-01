@@ -9,7 +9,7 @@ use crate::model::{
 use crate::providers::bangumi_archive::{ArchiveSubject, BangumiArchiveService, PersonInfo};
 use crate::providers::{CoreProviders, MetadataProvider, OfflineArchive, ProviderError};
 use crate::util::chinese::{ChineseConverter, ChineseDirection};
-use crate::util::NameSimilarityMatcher;
+use crate::util::{similarity_score, NameSimilarityMatcher};
 use serde::Deserialize;
 
 const BASE_URL: &str = "https://api.bgm.tv";
@@ -2285,11 +2285,9 @@ impl MetadataProvider for BangumiMetadataProvider {
                 return Ok(Vec::new());
             };
             let results = store.search(series_name);
-            let mut out: Vec<SeriesSearchResult> = Vec::new();
+            // 召回层：相似度只排序不拦截，候选尽可能宽泛（精排由 match 路径负责）。
+            let mut candidates: Vec<(f32, SeriesSearchResult)> = Vec::new();
             for v in results {
-                if out.len() >= limit {
-                    break;
-                }
                 let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
                 if arch.id == 0 {
                     continue;
@@ -2343,11 +2341,13 @@ impl MetadataProvider for BangumiMetadataProvider {
                     }
                 }
                 let titles = self.variant_titles(titles);
-                if !self.name_matcher.matches(series_name, &titles) {
-                    continue;
-                }
-                out.push(self.metadata_mapper.to_series_search_result(&bs));
+                let score = similarity_score(series_name, &titles);
+                candidates.push((score, self.metadata_mapper.to_series_search_result(&bs)));
             }
+            // 按相似度降序取前 limit 个；候选不再被相似度拦截。
+            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut out: Vec<SeriesSearchResult> =
+                candidates.into_iter().take(limit).map(|(_, r)| r).collect();
             if !out.is_empty() {
                 // 元数据离线 + 封面在线：离线命中后对每个结果在线补封面 URL；
                 // 在线失败保持 None（不影响搜索结果）。

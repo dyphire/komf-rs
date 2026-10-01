@@ -9,6 +9,6 @@ pub mod string_utils;
 
 pub use book_name_parser::BookNameParser;
 pub use chinese::{ChineseConverter, ChineseDirection};
-pub use name_similarity::NameSimilarityMatcher;
+pub use name_similarity::{similarity_score, NameSimilarityMatcher};
 pub use natural_comparator::{case_insensitive_nat_sort, SimpleNaturalComparator};
 pub use string_utils::{replace_fullwidth_chars, strip_accents};
