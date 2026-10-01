@@ -186,14 +186,28 @@ async fn global_job_events(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
 }
 
+/// 连接建立时立即发出的存活注释帧（`: ok`），消除 axum `KeepAlive` 首个 15s 静默期：
+/// 空闲流首个字节不再等到 +15s，客户端/代理可即时确认端到端存活。
+/// SSE 注释帧被浏览器 EventSource 忽略，不产生任何业务事件，不改变协议语义。
+fn sse_ok() -> Result<Event, Infallible> {
+    Ok(Event::default().comment("ok"))
+}
+
 /// `?ids=` 全非法时的空流：只保活，不断开。
 fn empty_global_stream() -> Response {
-    let stream = async_stream::stream! {
+    let stream = empty_global_stream_inner();
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
+}
+
+/// `?ids=` 全非法时的空流数据源：连接即发存活注释帧，然后永久 pending 保活。
+fn empty_global_stream_inner() -> impl Stream<Item = Result<Event, Infallible>> {
+    async_stream::stream! {
+        // 存活注释帧必须放在 pending().await 之前，否则永远不可达。
+        yield sse_ok();
         futures::future::pending::<()>().await;
         #[allow(unreachable_code)]
         yield Ok::<Event, Infallible>(Event::default().data(""));
-    };
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response()
+    }
 }
 
 fn global_event_stream(
@@ -202,6 +216,8 @@ fn global_event_stream(
     filter: Option<HashSet<String>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
+        // 连接建立立即发存活注释帧（`: ok`），先于快照回放。
+        yield sse_ok();
         let mut seen: HashSet<String> = HashSet::new();
         // 快照回放：当前 RUNNING job 各补一帧 JobCreatedEvent。
         for record in &snapshot {
@@ -315,6 +331,8 @@ fn event_stream(
     mut receiver: tokio::sync::broadcast::Receiver<MetadataJobEvent>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
+        // 连接建立立即发存活注释帧（`: ok`），先于 recv 循环。
+        yield sse_ok();
         loop {
             match receiver.recv().await {
                 Ok(event) => {
@@ -450,5 +468,74 @@ mod global_stream_tests {
             .unwrap();
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"global");
+    }
+}
+
+#[cfg(test)]
+mod sse_connect_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt as _;
+
+    /// per-job 流连接后第一个 wire 帧必须是立即发出的注释帧（`: ok`），
+    /// 消除 KeepAlive 首个 15s 静默期（sender 关闭 → 注释帧后流结束，可完整读取）。
+    #[tokio::test]
+    async fn per_job_stream_first_frame_is_immediate_comment() {
+        let (tx, rx) = tokio::sync::broadcast::channel::<MetadataJobEvent>(16);
+        drop(tx);
+        let response = Sse::new(event_stream(rx))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+            .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(
+            bytes.starts_with(b": ok\n\n"),
+            "首帧应为 `: ok` 注释帧，实际：{:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    /// 全局 firehose：注释帧必须先于 RUNNING 快照回放发出。
+    #[tokio::test]
+    async fn global_stream_comment_precedes_snapshot_replay() {
+        let (tx, rx) = tokio::sync::broadcast::channel::<GlobalJobEvent>(16);
+        drop(tx);
+        let snapshot = vec![komf_mediaserver::jobs::KomfJobRecord {
+            id: komf_mediaserver::jobs::MetadataJobId(Uuid::new_v4()),
+            series_id: komf_mediaserver::model::MediaServerSeriesId("s".into()),
+            status: MetadataJobStatus::Running,
+            message: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+        }];
+        let response = Sse::new(global_event_stream(rx, snapshot, None))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+            .into_response();
+        let text = String::from_utf8_lossy(
+            &axum::body::to_bytes(response.into_body(), 8192).await.unwrap(),
+        )
+        .into_owned();
+        assert!(
+            text.starts_with(": ok\n\n"),
+            "注释帧必须先于快照回放，实际：{text}"
+        );
+        assert!(
+            text.contains(JOB_CREATED_EVENT_NAME),
+            "快照回放帧应紧随注释帧之后"
+        );
+    }
+
+    /// 空流（`?ids=` 全非法）：连接即发注释帧，然后永久 pending 保活。
+    /// 用 timeout 只读首帧，验证 yield 位于 pending 之前（防止回归为不可达代码）。
+    #[tokio::test]
+    async fn empty_stream_first_frame_is_immediate_comment() {
+        let response = empty_global_stream();
+        let mut body = response.into_body();
+        let first = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("2s 内应收到首个帧（否则注释帧未在 pending 之前发出）")
+            .expect("有帧")
+            .expect("帧无错误");
+        let data = first.into_data().expect("SSE 帧应为 data 帧");
+        assert_eq!(&data[..], b": ok\n\n");
     }
 }

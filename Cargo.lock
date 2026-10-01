@@ -1323,6 +1323,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "http-body-util",
  "komf-api-models",
  "komf-core",
  "komf-mediaserver",
