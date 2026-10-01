@@ -14,8 +14,8 @@
 - ComicInfo 读写、书籍排序、评分标签、阅读方向覆盖
 - 配置热更新（`PATCH /api/config`）、任务跟踪、元数据搜索/识别/匹配/重置端点
 - 用户脚本兼容的配置界面
-- 内置 WebUI 工作台（仅 Rust）：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi）、离线 DB 下载、明暗主题
-- **MAL / AniList / MangaBaka / Bangumi OAuth 登录**（仅 Rust）：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
+- 内置 WebUI 工作台 **（仅 Rust）**：12 个 Provider 矩阵、按库覆盖、通知模板编辑器、任务与实时 SSE 进度、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi）、离线 DB 下载、明暗主题
+- **MAL / AniList / MangaBaka / Bangumi OAuth 登录（仅 Rust）**：服务端 OAuth2，采用「共享 client + 官方中转页」方案——无需为每个实例注册回调；Provider 页面提供登录/退出/状态展示，token 自动刷新并持久化于 SQLite
 - **阅读状态同步（Tracker，仅 Rust）**：AniList / MyAnimeList / MangaBaka / Bangumi 阅读状态同步，含 WebUI 页面与 `/api/tracker/*` 接口——支持标题或平台链接搜索、tracked 标记、状态读取与状态/评分/进度推送
 
 ## 元数据 provider
@@ -128,6 +128,7 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
   ```
   
   或 `KOMF_SERVER_BIND=127.0.0.1`（需重启）。需要远程访问时走 SSH 隧道。
+
 - **局域网/VPS 暴露：** 在前面架带鉴权的反向代理，并用防火墙封掉原始端口。示例：
   
   ```nginx
@@ -281,7 +282,7 @@ cd web && npm install && npm run build # 生成 web/dist
 npm run dev                            # 开发模式（/api 代理到 127.0.0.1:8085）
 ```
 
-它是完整工作台：媒体服务器连接与库列表、12 个 Provider 矩阵（启用/优先级/字段开关、Provider 专属选项）、元数据更新默认策略、按库覆盖（库选择 + Provider 门控、长尾字段如 `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`）、通知模板编辑器（编辑/渲染/发送）、任务（match/reset 触发 + 实时 SSE 事件流）、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / Bangumi：标题或链接搜索、已关联台账、内联状态编辑）、离线 DB 下载进度，以及 PATCH 预览（增量语义：缺省=保持、`null`=清空；密码留空=不发送）。UI 跟随系统明暗主题，并支持顶栏手动切换（持久化在 `localStorage`）。后端把 `web/dist`（Docker 内为 `./ui`，可用 `KOMF_WEB_DIR` 覆盖）作为默认路由并 SPA fallback；未构建时纯 API 模式。Release 镜像会自动把 `web/dist` 打进 `/app/ui`。
+它是完整工作台：媒体服务器连接与库列表、12 个 Provider 矩阵（启用/优先级/字段开关、Provider 专属选项）、元数据更新默认策略、按库覆盖（库选择 + Provider 门控、长尾字段如 `publisherTagNames` / `alternateTitleLabels` / `chineseConversion.update.fields`）、通知模板编辑器（编辑/渲染/发送）、任务（match/reset 触发 + 实时 SSE 事件流）、搜索试跑一键设元数据、阅读状态同步页（AniList / MAL / MangaBaka / Bangumi：标题或链接搜索、已关联台账、内联状态编辑）、离线 DB 下载进度，以及 PATCH 预览（增量语义：缺省=保持、`null`=清空；密码留空=不发送）。UI 跟随系统明暗主题，并支持顶栏手动切换（持久化在 `localStorage`）。后端把 `web/dist`（Docker 内为 `./ui`，可用 `KOMF_WEB_DIR` 覆盖）作为默认路由并 SPA fallback；未构建时纯 API 模式。Release 镜像会自动把 `web/dist` 打进 `/app/ui`。
 
 ## 与 Kotlin 版的差异
 

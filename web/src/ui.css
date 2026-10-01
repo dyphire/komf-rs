@@ -87,6 +87,7 @@ a { color: var(--accent); }
 .card h2 { margin: 0 0 4px; font-size: 15px; }
 .card p.desc { margin: 4px 0 10px; color: var(--muted); font-size: 12.5px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.grid3 { grid-template-columns: repeat(3, 1fr); }
 .field { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
 .field label { font-size: 12.5px; color: var(--muted); }
 .field input, .field select, .field textarea {
@@ -257,3 +258,30 @@ input, select, textarea { max-width: 100%; }
 /* DB 下载进度 */
 .db-prog { margin-top: 8px; max-width: 520px; display: flex; flex-direction: column; gap: 4px; }
 .db-prog .ev-progress { min-width: 0; }
+
+/* ================= 移动端（<640px） ================= */
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+  .topbar h1 { font-size: 15px; }
+  .topbar .ver { display: none; }
+  .topbar .btn { padding: 6px 10px; }
+  .tabs { flex-wrap: nowrap; overflow-x: auto; padding: 10px 10px 0; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button { flex: none; white-space: nowrap; padding: 6px 10px; }
+  .main { padding: 10px 10px 40px; }
+  .card { padding: 12px; border-radius: 10px; }
+  .grid { grid-template-columns: 1fr; }
+  .grid3 { grid-template-columns: 1fr; }
+  .checks { grid-template-columns: 1fr; }
+  .field input, .field select, .field textarea { padding: 6px 8px; }
+  .provider-head { flex-wrap: wrap; gap: 8px; }
+  .prio { flex-wrap: wrap; }
+  .prio input { width: 60px; }
+  .search-hit { flex-wrap: wrap; }
+  .search-hit .hit-cover { width: 40px; height: 54px; }
+  .job-table { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+  .ev-line { flex-wrap: wrap; }
+  .ev-progress { min-width: 100%; }
+  .row { gap: 6px; }
+  .btn { padding: 6px 10px; }
+}

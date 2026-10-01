@@ -22,7 +22,7 @@ const PROVIDER_LABEL: Record<string, string> = {
 const PROVIDER_HINT: Record<string, string> = {
   mangaUpdates: 'hint.mangaUpdates', mangaDex: '', aniList: '',
   mal: 'hint.mal', bangumi: 'hint.bangumi', eHentai: 'hint.eHentai',
-  comicVine: 'hint.comicVine', bookWalker: '', mangaBaka: 'hint.mangaBaka', yenPress: '', viz: '',
+  comicVine: 'hint.comicVine', bookWalker: 'hint.bookWalker', mangaBaka: 'hint.mangaBaka', yenPress: '', viz: '',
   webtoons: '',
 };
 
@@ -348,7 +348,7 @@ function ProviderList(props: {
             <div className="provider-head">
               <Switch value={cur.enabled} onChange={(v) => upd([...base, 'enabled'], v)} />
               <b>{PROVIDER_LABEL[key]}</b>
-              <span className="badge">{PROVIDER_HINT[key] ? t(PROVIDER_HINT[key]) : ''}</span>
+              {PROVIDER_HINT[key] ? <span className="badge">{t(PROVIDER_HINT[key])}</span> : null}
               <span style={{ flex: 1 }} />
               <span className="prio">{t('priority')}
                 <input type="number" value={cur.priority ?? 10} onChange={(e) => upd([...base, 'priority'], Number(e.target.value))} />
@@ -518,7 +518,7 @@ function MetadataUpdateForm(props: {
             onChange={(rows) => upd([s, ...b, 'postProcessing', 'publisherTagNames'], rows)}
           />
         </Field>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
+        <div className="grid grid3">
           <Field label={t('f.altLabelRomaji')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'romaji'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'romaji'], v)} /></Field>
           <Field label={t('f.altLabelNative')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'native'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'native'], v)} /></Field>
           <Field label={t('f.altLabelLocalized')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'alternateTitleLabels', 'localized'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'alternateTitleLabels', 'localized'], v)} /></Field>
