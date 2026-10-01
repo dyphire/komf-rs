@@ -2049,8 +2049,21 @@ fn row_to_series_dto(row: &rusqlite::Row<'_>) -> Result<MangaBakaSeriesDto, Prov
             }
         };
     let text = |row: &rusqlite::Row<'_>, col: &str| -> Result<Option<String>, ProviderError> {
-        row.get(col)
-            .map_err(|e| ProviderError::message(format!("MangaBaka db col {col}: {e}")))
+        // 宽容读取：真实库部分列为 INTEGER/REAL（source_anilist_id、
+        // source_kitsu_id、*_rating、*_rating_normalized、cover_raw_size 等），
+        // 统一转成字符串，避免 `Invalid column type` 导致整次搜索失败。
+        match row.get::<_, Option<String>>(col) {
+            Ok(v) => Ok(v),
+            Err(_) => match row.get::<_, Option<i64>>(col) {
+                Ok(v) => Ok(v.map(|n| n.to_string())),
+                Err(_) => match row.get::<_, Option<f64>>(col) {
+                    Ok(v) => Ok(v.map(|n| n.to_string())),
+                    Err(e) => Err(ProviderError::message(format!(
+                        "MangaBaka db col {col}: {e}"
+                    ))),
+                },
+            },
+        }
     };
 
     let status = match text(row, "status")?
