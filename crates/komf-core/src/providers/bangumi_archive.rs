@@ -485,15 +485,16 @@ impl BangumiArchiveStore {
         let conn = rusqlite::Connection::open(db_path).map_err(|e| {
             ProviderError::message(format!("archive sqlite open failed: {e}"))
         })?;
+        // 读写在应用层已串行（同一把 Mutex，重建期共享槽位置 None），WAL 无收益；
+        // 改用 DELETE：单事务构建的 rollback journal 随 COMMIT 自动删除，无遗留大文件、
+        // 无需手动 checkpoint。journal_mode 持久化于 db 文件头，旧 WAL 库首次打开时
+        // SQLite 会自动 checkpoint 并清理 -wal/-shm。
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
+            "PRAGMA journal_mode=DELETE;
              PRAGMA synchronous=NORMAL;
              PRAGMA cache_size=-32000;",
         )
         .map_err(|e| ProviderError::message(format!("archive pragma failed: {e}")))?;
-        // 历史全量重建可能残留大 WAL（数百万行单事务 → 数百 MB）：打开时合并回主库并截断，
-        // 避免 WAL 文件长期占用磁盘、读路径额外遍历 WAL 页。WAL 干净时该操作近乎零成本。
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
         let mm = std::fs::File::open(subjects_path).ok().and_then(|f| unsafe {
             memmap2::Mmap::map(&f).ok()
         });
@@ -649,8 +650,7 @@ impl BangumiArchiveStore {
         match result {
             Ok(v) => {
                 tx("COMMIT")?;
-                // 单事务全量构建的 WAL 可达数百 MB：COMMIT 后立即 checkpoint 合并回主库并截断
-                let _ = c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+                // DELETE 模式下 rollback journal 随 COMMIT 自动清理，无需 checkpoint
                 Ok(v)
             }
             Err(e) => {
