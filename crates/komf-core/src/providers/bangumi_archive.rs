@@ -1560,8 +1560,59 @@ fn create_extracted_file(target: &Path, name: &str) -> Result<std::fs::File, Pro
     )))
 }
 
+/// 构建索引到 `db_path.tmp`，成功后 rename 原子替换正式文件（对齐 ehentai 整文件替换模式）：
+/// - 坏正式库天然被覆盖自愈（无需先删除/重试打开坏文件）；
+/// - 构建中途崩溃只残留 .tmp（下次构建先清理），正式库不受影响；
+/// - meta（last_updated）在 tmp 上写入，随 rename 一起生效；
+/// - Windows：正式 db 可能被在途搜索短暂持有的旧 store 连接占用 → rename 短重试。
+/// 返回 (新 store, 各表行数)。
+fn build_db_then_swap(
+    db_path: &Path,
+    subjects_path: &Path,
+    relations_path: &Path,
+    persons_path: &Path,
+    subject_persons_path: &Path,
+    idle_release_secs: u64,
+    meta_updated_at: &str,
+) -> Result<(BangumiArchiveStore, (usize, usize, usize, usize)), ProviderError> {
+    let tmp_path = db_path.with_extension("db.tmp");
+    // 上次崩溃/失败可能残留 .tmp：先清理
+    let _ = std::fs::remove_file(&tmp_path);
+    let tmp_store = BangumiArchiveStore::open(&tmp_path, subjects_path, idle_release_secs)
+        .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
+    tmp_store
+        .init_schema()
+        .map_err(|e| ProviderError::message(format!("archive schema: {e}")))?;
+    let counts = tmp_store
+        .build(subjects_path, relations_path, persons_path, subject_persons_path)
+        .map_err(|e| ProviderError::message(format!("archive build: {e}")))?;
+    tmp_store.set_meta("last_updated", meta_updated_at);
+    // Windows：SQLite 打开的 tmp 文件无 FILE_SHARE_DELETE 共享标志，rename 前必须
+    // 释放连接（与 ehentai build_fts drop(conn) 同理）；rename 后重新打开正式库返回。
+    drop(tmp_store);
+    let mut renamed = false;
+    for _ in 0..5 {
+        if std::fs::rename(&tmp_path, db_path).is_ok() {
+            renamed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !renamed {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(ProviderError::message(format!(
+            "archive db rename failed after 5 attempts: {}",
+            db_path.display()
+        )));
+    }
+    let store = BangumiArchiveStore::open(db_path, subjects_path, idle_release_secs)
+        .map_err(|e| ProviderError::message(format!("archive open after swap: {e}")))?;
+    Ok((store, counts))
+}
+
 /// 下载 zip → 解压 → 全量重建 → 返回新 store。
 /// `meta` 为已获取的 latest.json（避免重复请求）；`emit` 输出进度事件（可选）。
+
 async fn download_and_rebuild(
     dir: &Path,
     db_path: &Path,
@@ -1679,15 +1730,15 @@ async fn download_and_rebuild(
             info: Some("building index".to_string()),
         });
     }
-    let new_store = BangumiArchiveStore::open(db_path, subjects_path, idle_release_secs)
-        .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
-    new_store
-        .init_schema()
-        .map_err(|e| ProviderError::message(format!("archive schema: {e}")))?;
-    let (subj, rel, persons, sp) = new_store
-        .build(subjects_path, relations_path, persons_path, subject_persons_path)
-        .map_err(|e| ProviderError::message(format!("archive build: {e}")))?;
-    new_store.set_meta("last_updated", &meta.updated_at.clone().unwrap_or_default());
+    let (new_store, (subj, rel, persons, sp)) = build_db_then_swap(
+        db_path,
+        subjects_path,
+        relations_path,
+        persons_path,
+        subject_persons_path,
+        idle_release_secs,
+        &meta.updated_at.clone().unwrap_or_default(),
+    )?;
     tracing::info!(
         "bangumi archive rebuilt: {subj} subjects, {rel} relations, {persons} persons, {sp} subject-persons"
     );
@@ -1987,5 +2038,41 @@ mod tests {
             "\"attack\"* OR \"on\"* OR \"titan\"*"
         );
         assert_eq!(fts_query(""), "\"\"");
+    }
+
+    #[test]
+    fn build_db_then_swap_replaces_corrupt_db() {
+        let dir = tmp_dir("swap_corrupt");
+        let db = dir.join("archive_index.db");
+        let subjects = dir.join("subject.jsonlines");
+        let relations = dir.join("subject-relations.jsonlines");
+        let persons = dir.join("person.jsonlines");
+        let sp = dir.join("subject-persons.jsonlines");
+        // 正式库：坏文件（随机字节，open 阶段即失败）；数据文件正常
+        std::fs::write(&db, vec![0xabu8; 4096]).unwrap();
+        write_subjects(&subjects, &[r#"{"id":42,"type":1,"name":"Test","series":true}"#]);
+        write_subjects(
+            &relations,
+            &[r#"{"subject_id":42,"relation_type":1003,"related_subject_id":9}"#],
+        );
+        std::fs::write(&persons, "").unwrap();
+        std::fs::write(&sp, "").unwrap();
+        let (store, (subj, rel, _, _)) =
+            build_db_then_swap(&db, &subjects, &relations, &persons, &sp, 0, "2026-10-01")
+                .expect("build+swap should replace corrupt db");
+        assert_eq!(subj, 1);
+        assert_eq!(rel, 1);
+        // .tmp 不残留；正式库已被替换为可用新库（坏文件天然被覆盖）
+        assert!(!db.with_extension("db.tmp").exists(), "tmp must not remain");
+        assert!(store.validate());
+        assert_eq!(
+            store.get_meta("last_updated").as_deref(),
+            Some("2026-10-01")
+        );
+        drop(store);
+        let reopened = BangumiArchiveStore::open(&db, &subjects, 0).expect("reopen ok");
+        assert!(reopened.validate());
+        drop(reopened);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
