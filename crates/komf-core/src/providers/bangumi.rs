@@ -458,10 +458,11 @@ impl BangumiMetadataMapper {
             }
         }
 
-        // titles: name→Native（日文原名），nameCn→null/zh（保持 Kotlin），别名→Localized
+        // titles: name→Native（日文原名），nameCn→null/zh（保持 Kotlin），别名→Localized。
+        // title 关闭仅表示不写入主标题（title 字段恒 None，主标题由后处理全量候选决定）；
+        // titles 列表无条件构建——alternativeTitles 写入与聚合备选依赖它，清空/置空会误伤备选。
         let mut titles: Vec<SeriesTitle> = Vec::new();
-        if cfg.title {
-            titles.push(SeriesTitle {
+        titles.push(SeriesTitle {
                 name: subject.name.clone(),
                 r#type: Some(TitleType::Native),
                 language: None,
@@ -524,7 +525,6 @@ impl BangumiMetadataMapper {
                     language,
                 });
             }
-        }
         let title = None;
 
         let release_date = cfg

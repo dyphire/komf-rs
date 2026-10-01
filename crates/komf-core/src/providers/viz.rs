@@ -533,14 +533,10 @@ impl VizMetadataMapper {
         };
         let title_field = cfg.title.then_some(title.clone());
 
-        // Kotlin MetadataConfigApplier.seriesTitles：title 禁用时保留全部标题仅清空 type/language
-        let mut titles = vec![title.clone()];
-        if !cfg.title {
-            for t in titles.iter_mut() {
-                t.r#type = None;
-                t.language = None;
-            }
-        }
+        // title 关闭仅表示不写入主标题（title 字段）；titles 列表的 type/language
+        // 保留——alternativeTitles 写入（Komga 备选 label 由 type/language 生成）与
+        // 聚合备选排序依赖语言信息，清空会误伤备选写入。
+        let titles = vec![title.clone()];
         let status = if cfg.status {
             if all_books.iter().any(|b| b.final_) {
                 Some(SeriesStatus::Ended)

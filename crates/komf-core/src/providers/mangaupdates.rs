@@ -485,19 +485,15 @@ impl MangaUpdatesMetadataMapper {
         // Kotlin mangaupdates 不设置 totalBookCount（保持 None）。
         let total_book_count: Option<i32> = None;
 
-        // Kotlin titles: [main] + associated；title 禁用时保留全部仅清空 type/language
+        // Kotlin titles: [main] + associated；title 关闭仅表示不写入主标题（title
+        // 字段），titles 列表的 type/language 保留——alternativeTitles 写入（Komga
+        // 备选 label 由 type/language 生成）与聚合备选排序依赖语言信息，清空会误伤备选写入。
         let mut titles = vec![title.clone()];
         titles.extend(series.associated.iter().map(|assoc| SeriesTitle {
             name: assoc.title.clone(),
             r#type: None,
             language: None,
         }));
-        if !cfg.title {
-            for t in titles.iter_mut() {
-                t.r#type = None;
-                t.language = None;
-            }
-        }
         let metadata = SeriesMetadata {
             status: status_field,
             title: title_field,
@@ -1048,16 +1044,13 @@ mod tests {
         assert_eq!(meta.metadata.titles[1].name, "Alt Title");
         assert_eq!(meta.metadata.titles[1].r#type, None);
         assert_eq!(meta.metadata.titles[1].language, None);
-        // title 禁用时保留 titles 仅清空 type/language（Kotlin seriesTitles）
+        // title 禁用仅表示不写入主标题（title 字段）；titles 的 type/language 保留
         let mut cfg = crate::config::SeriesMetadataConfig::default();
         cfg.title = false;
         let meta = test_mapper(cfg).to_series_metadata(&series, None);
         assert_eq!(meta.metadata.titles.len(), 2);
-        assert!(meta
-            .metadata
-            .titles
-            .iter()
-            .all(|t| t.r#type.is_none() && t.language.is_none()));
+        assert_eq!(meta.metadata.titles[0].r#type, Some(TitleType::Romaji));
+        assert_eq!(meta.metadata.titles[0].language.as_deref(), Some("ja-ro"));
         assert!(meta.metadata.title.is_none());
     }
 

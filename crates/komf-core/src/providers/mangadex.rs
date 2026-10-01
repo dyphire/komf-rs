@@ -349,19 +349,10 @@ impl MangaDexMetadataMapper {
                 ));
             }
         }
-        let alt_titles: Vec<SeriesTitle> = if cfg.title {
-            built_titles
-        } else {
-            // Kotlin seriesTitles：title 关闭时保留标题列表，仅清空 type/language
-            built_titles
-                .into_iter()
-                .map(|t| SeriesTitle {
-                    r#type: None,
-                    language: None,
-                    ..t
-                })
-                .collect()
-        };
+        // title 关闭仅表示不写入主标题（title 字段）；titles 列表的 type/language
+        // 保留——alternativeTitles 写入（Komga 备选 label 由 type/language 生成）与
+        // 聚合备选排序依赖语言信息，清空会误伤备选写入。
+        let alt_titles: Vec<SeriesTitle> = built_titles;
 
         let status = if cfg.status {
             manga.attributes.status.as_deref().and_then(map_status)

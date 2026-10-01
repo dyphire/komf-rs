@@ -532,14 +532,10 @@ impl YenPressMetadataMapper {
         };
         let title_field = cfg.title.then_some(title.clone());
 
-        // Kotlin MetadataConfigApplier.seriesTitles：title 禁用时保留全部标题仅清空 type/language
-        let mut titles = vec![title.clone()];
-        if !cfg.title {
-            for t in titles.iter_mut() {
-                t.r#type = None;
-                t.language = None;
-            }
-        }
+        // title 关闭仅表示不写入主标题（title 字段）；titles 列表的 type/language
+        // 保留——alternativeTitles 写入（Komga 备选 label 由 type/language 生成）与
+        // 聚合备选排序依赖语言信息，清空会误伤备选写入。
+        let titles = vec![title.clone()];
         let authors = if cfg.authors {
             self.authors(&book.authors)
         } else {
@@ -1045,8 +1041,9 @@ mod tests {
     }
 
     #[test]
-    fn titles_cleared_when_title_disabled() {
-        // Kotlin MetadataConfigApplier.seriesTitles：title=false 时保留 name、清空 type/language
+    fn titles_preserved_when_title_disabled() {
+        // title=false 仅不写入主标题（title 字段）；titles 的 type/language 保留
+        // （alternativeTitles 写入与聚合备选排序依赖语言信息）
         let mut cfg = crate::config::SeriesMetadataConfig::default();
         cfg.title = false;
         let mapper = YenPressMetadataMapper::new(
@@ -1074,8 +1071,10 @@ mod tests {
         let meta = mapper.to_series_metadata(&book, &[], None);
         let t = meta.metadata.titles.first().unwrap();
         assert_eq!(t.name, "Test Series");
-        assert_eq!(t.r#type, None);
-        assert_eq!(t.language, None);
+        assert_eq!(t.r#type, Some(TitleType::Localized));
+        assert_eq!(t.language.as_deref(), Some("en"));
+        // 主标题不写入
+        assert!(meta.metadata.title.is_none());
         // books 配置关闭 -> 空列表
         assert!(meta.books.is_empty());
     }

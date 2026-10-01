@@ -247,29 +247,29 @@ impl MalMetadataMapper {
     ) -> ProviderSeriesMetadata {
         let cfg = &self.metadata_config;
 
+        // titles 无条件构建：title 关闭仅表示不写入主标题（title 字段），titles 列表
+        // 的 type/language 保留——alternativeTitles 写入与聚合备选依赖它。
         let mut titles: Vec<SeriesTitle> = Vec::new();
-        if cfg.title {
+        titles.push(SeriesTitle {
+            name: manga.title.clone(),
+            r#type: Some(TitleType::Romaji),
+            language: None,
+        });
+        if let Some(en) = manga.alternative_titles.as_ref().and_then(|a| a.en.clone()) {
             titles.push(SeriesTitle {
-                name: manga.title.clone(),
-                r#type: Some(TitleType::Romaji),
-                language: None,
+                name: en,
+                r#type: Some(TitleType::Localized),
+                language: Some("en".into()),
             });
-            if let Some(en) = manga.alternative_titles.as_ref().and_then(|a| a.en.clone()) {
-                titles.push(SeriesTitle {
-                    name: en,
-                    r#type: Some(TitleType::Localized),
-                    language: Some("en".into()),
-                });
-            }
-            if let Some(ja) = manga.alternative_titles.as_ref().and_then(|a| a.ja.clone()) {
-                titles.push(SeriesTitle {
-                    name: ja,
-                    r#type: Some(TitleType::Native),
-                    language: Some("ja".into()),
-                });
-            }
         }
-        let title = titles.first().cloned();
+        if let Some(ja) = manga.alternative_titles.as_ref().and_then(|a| a.ja.clone()) {
+            titles.push(SeriesTitle {
+                name: ja,
+                r#type: Some(TitleType::Native),
+                language: Some("ja".into()),
+            });
+        }
+        let title = cfg.title.then(|| titles.first().cloned()).flatten();
 
         let status = if cfg.status {
             manga.status.as_deref().and_then(map_status)

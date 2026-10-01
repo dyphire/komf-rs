@@ -743,19 +743,10 @@ impl MangaBakaMetadataMapper {
                 language: None,
             })
         });
-        // Kotlin seriesTitles：title 配置关闭时保留标题列表，仅清空 type/language
-        let titles_field = if cfg.title {
-            titles.clone()
-        } else {
-            titles
-                .iter()
-                .map(|t| SeriesTitle {
-                    r#type: None,
-                    language: None,
-                    ..t.clone()
-                })
-                .collect()
-        };
+        // title 关闭仅表示不写入主标题（title 字段）；titles 列表的 type/language
+        // 保留——alternativeTitles 写入（Komga 备选 label 由 type/language 生成）与
+        // 聚合备选排序依赖语言信息，清空会误伤备选写入。
+        let titles_field = titles.clone();
 
         // 作者 / 艺术家
         let authors = if cfg.authors {

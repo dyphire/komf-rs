@@ -397,13 +397,9 @@ impl AniListMetadataMapper {
         if self.prefer_user_preferred() {
             promote_user_preferred(&mut titles, media.title.user_preferred.as_deref());
         }
-        // Kotlin MetadataConfigApplier.seriesTitles：title 关闭时保留标题名但清空 type/language。
-        if !cfg.title {
-            for t in titles.iter_mut() {
-                t.r#type = None;
-                t.language = None;
-            }
-        }
+        // title 关闭仅表示不写入主标题（title 字段）；titles 列表的 type/language
+        // 保留——alternativeTitles 写入（Komga 备选 label 由 type/language 生成）与
+        // 聚合备选排序依赖语言信息，清空会误伤备选写入。
         let title = cfg.title.then(|| titles.first().cloned()).flatten();
 
         let status = if cfg.status {
