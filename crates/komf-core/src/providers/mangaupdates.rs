@@ -62,6 +62,10 @@ pub struct SeriesRecord {
     pub genres: Vec<Genre>,
     pub year: Option<String>,
     pub url: String,
+    /// 真实 API 返回类型字符串（"Manga"/"Novel"/"Manhwa"/...）；Kotlin 原版未解析，
+    /// Rust 用于搜索结果显示 media_type。
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -544,10 +548,21 @@ impl MangaUpdatesMetadataMapper {
             title: record.title.clone(),
             provider: CoreProviders::MangaUpdates.as_str().to_string(),
             result_id: record.series_id.to_string(),
-            media_type: None,
+            media_type: mangaupdates_type_media_type(record.type_.as_deref()),
             language: None,
             nsfw: None,
         }
+    }
+}
+
+/// MangaUpdates 类型字符串 → MediaType（搜索结果显示用；对齐 MAL 归类：
+/// Manhua/Manhwa → Webtoon、Doujinshi/OEL → Manga，语言类/未知 → None）。
+fn mangaupdates_type_media_type(t: Option<&str>) -> Option<crate::model::MediaType> {
+    match t {
+        Some("Manga" | "Doujinshi" | "OEL") => Some(crate::model::MediaType::Manga),
+        Some("Novel") => Some(crate::model::MediaType::Novel),
+        Some("Manhua" | "Manhwa") => Some(crate::model::MediaType::Webtoon),
+        _ => None,
     }
 }
 
@@ -820,6 +835,47 @@ impl MetadataProvider for MangaUpdatesMetadataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MangaUpdates 类型字符串 → MediaType 映射（对齐 MAL 归类）。
+    #[test]
+    fn type_media_type_mapping() {
+        assert_eq!(
+            mangaupdates_type_media_type(Some("Manga")),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            mangaupdates_type_media_type(Some("Doujinshi")),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            mangaupdates_type_media_type(Some("OEL")),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            mangaupdates_type_media_type(Some("Novel")),
+            Some(crate::model::MediaType::Novel)
+        );
+        assert_eq!(
+            mangaupdates_type_media_type(Some("Manhua")),
+            Some(crate::model::MediaType::Webtoon)
+        );
+        assert_eq!(
+            mangaupdates_type_media_type(Some("Manhwa")),
+            Some(crate::model::MediaType::Webtoon)
+        );
+        assert_eq!(mangaupdates_type_media_type(Some("Artbook")), None);
+        assert_eq!(mangaupdates_type_media_type(Some("Filipino")), None);
+        assert_eq!(mangaupdates_type_media_type(None), None);
+    }
+
+    /// 搜索响应解析：record.type 字段（真实 API 返回 "Manga" 等）被保留。
+    #[test]
+    fn search_record_keeps_type() {
+        let json = r#"{"total_hits":1,"page":1,"per_page":1,"results":[{"record":{"series_id":123,"title":"Grand Blue","type":"Manga","year":"2014","url":"https://www.mangaupdates.com/series/x/grand-blue","description":"desc","image":null,"genres":[]}}]}"#;
+        let page: SearchResultPage = serde_json::from_str(json).unwrap();
+        assert_eq!(page.results[0].record.type_.as_deref(), Some("Manga"));
+        assert_eq!(page.results[0].record.series_id, 123);
+    }
 
     #[test]
     fn parses_description() {

@@ -101,7 +101,6 @@ pub struct MangaBakaSeriesDto {
     #[serde(default)]
     pub rating: Option<f64>,
     pub status: MangaBakaStatusDto,
-    #[allow(dead_code)]
     r#type: MangaBakaTypeDto,
     #[serde(default)]
     pub links_v2: Option<Vec<MangaBakaLinkDto>>,
@@ -976,10 +975,22 @@ impl MangaBakaMetadataMapper {
             title: primary_title(series, self.series_title_language.as_deref()),
             provider: CoreProviders::MangaBaka.as_str().to_string(),
             result_id: series.id.to_string(),
-            media_type: None,
+            media_type: mangabaka_type_media_type(&series.r#type),
             language: None,
             nsfw: None,
         }
+    }
+}
+
+/// MangaBakaTypeDto → MediaType（搜索结果显示用；对齐 MAL 归类：Manhwa/Manhua → Webtoon）。
+fn mangabaka_type_media_type(t: &MangaBakaTypeDto) -> Option<crate::model::MediaType> {
+    match t {
+        MangaBakaTypeDto::Manga => Some(crate::model::MediaType::Manga),
+        MangaBakaTypeDto::Novel => Some(crate::model::MediaType::Novel),
+        MangaBakaTypeDto::Manhwa | MangaBakaTypeDto::Manhua => {
+            Some(crate::model::MediaType::Webtoon)
+        }
+        MangaBakaTypeDto::Oel | MangaBakaTypeDto::Other => None,
     }
 }
 
@@ -3119,6 +3130,29 @@ pub fn to_api_linked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MangaBakaTypeDto → MediaType 映射（对齐 MAL 归类：Manhwa/Manhua → Webtoon）。
+    #[test]
+    fn type_media_type_mapping() {
+        assert_eq!(
+            mangabaka_type_media_type(&MangaBakaTypeDto::Manga),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            mangabaka_type_media_type(&MangaBakaTypeDto::Novel),
+            Some(crate::model::MediaType::Novel)
+        );
+        assert_eq!(
+            mangabaka_type_media_type(&MangaBakaTypeDto::Manhwa),
+            Some(crate::model::MediaType::Webtoon)
+        );
+        assert_eq!(
+            mangabaka_type_media_type(&MangaBakaTypeDto::Manhua),
+            Some(crate::model::MediaType::Webtoon)
+        );
+        assert_eq!(mangabaka_type_media_type(&MangaBakaTypeDto::Oel), None);
+        assert_eq!(mangabaka_type_media_type(&MangaBakaTypeDto::Other), None);
+    }
 
     #[test]
     fn database_usable_detects_corrupt() {

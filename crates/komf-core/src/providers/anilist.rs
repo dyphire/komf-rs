@@ -18,6 +18,7 @@ query ($search: String, $type: MediaType, $perPage: Int, $formats: [MediaFormat!
   mediaSearch: Page(page: 1, perPage: $perPage) {
     media(search: $search, type: $type, format_in: $formats) {
       id
+      format
       title { romaji english native userPreferred }
       coverImage { large extraLarge }
       startDate { year month day }
@@ -41,6 +42,7 @@ const GET_QUERY: &str = r#"
 query ($id: Int) {
   Media(id: $id, type: MANGA) {
     id
+    format
     title { romaji english native userPreferred }
     coverImage { large extraLarge }
     startDate { year month day }
@@ -92,6 +94,8 @@ pub struct AniListMediaSearchMedia {
 #[serde(rename_all = "camelCase")]
 pub struct AniListMedia {
     pub id: u64,
+    #[serde(default)]
+    pub format: Option<String>,
     pub title: AniListTitle,
     #[serde(default)]
     pub cover_image: Option<AniListCoverImage>,
@@ -526,10 +530,20 @@ impl AniListMetadataMapper {
             title,
             provider: CoreProviders::Anilist.as_str().to_string(),
             result_id: media.id.to_string(),
-            media_type: None,
+            media_type: anilist_format_media_type(media.format.as_deref()),
             language: None,
             nsfw: None,
         }
+    }
+}
+
+/// AniList MediaFormat → MediaType（搜索结果显示用；对齐 MAL 归类：
+/// ONE_SHOT → Manga，未知格式 → None）。
+fn anilist_format_media_type(format: Option<&str>) -> Option<crate::model::MediaType> {
+    match format {
+        Some("MANGA") | Some("ONE_SHOT") => Some(crate::model::MediaType::Manga),
+        Some("NOVEL") => Some(crate::model::MediaType::Novel),
+        _ => None,
     }
 }
 
@@ -850,6 +864,25 @@ mod tests {
         assert_eq!(edge.role.as_deref(), Some("Story & Art"));
         assert_eq!(edge.node.name.full, "Eiichirou Oda");
         assert_eq!(edge.node.language_v2.as_deref(), Some("Japanese"));
+    }
+
+    /// AniList MediaFormat → MediaType 映射（对齐 MAL 归类：ONE_SHOT → Manga）。
+    #[test]
+    fn format_media_type_mapping() {
+        assert_eq!(
+            anilist_format_media_type(Some("MANGA")),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            anilist_format_media_type(Some("ONE_SHOT")),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            anilist_format_media_type(Some("NOVEL")),
+            Some(crate::model::MediaType::Novel)
+        );
+        assert_eq!(anilist_format_media_type(Some("TV")), None);
+        assert_eq!(anilist_format_media_type(None), None);
     }
 
     /// 单个 Media 响应（GET 查询）：`data.Media`。

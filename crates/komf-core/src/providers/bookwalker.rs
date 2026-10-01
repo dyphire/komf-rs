@@ -30,8 +30,10 @@ const DATABASE_URL: &str = "https://static.bookwalker.com/data/bkwk-db.sqlite.zs
 // 内容类型 / 格式 / 角色（valueOf 语义 = `entries.getOrNull(number) ?: 默认`）
 // ---------------------------------------------------------------------------
 
-/// 对应 `BookWalkerContentType.kt`。Kotlin `valueOf(number)` 按 **entries 索引**
-/// 取值：`[0]=MANGA [1]=NOVEL [2]=WEBTOONS [3]=AUDIOBOOK`，越界回退 MANGA。
+/// 对应 `BookWalkerContentType.kt`。真实 DB（下载器写入 + 官方数据库）的
+/// `series.type` / `products.content_type` 列存储 **1 基声明值**（`MANGA=1 NOVEL=2
+/// WEBTOONS=3 AUDIOBOOK=4`），与 `number()` 属性一致。Kotlin 原版 `valueOf` 误用
+/// entries 下标（0 基）读取属 off-by-one bug；Rust 以真实库语义为准按 1 基读取。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookWalkerContentType {
     Manga,
@@ -41,15 +43,16 @@ pub enum BookWalkerContentType {
 }
 
 impl BookWalkerContentType {
-    /// 读方向：对应 Kotlin `valueOf(number)`，按 **entries 索引** 取值
-    /// （`[0]=MANGA [1]=NOVEL [2]=WEBTOONS [3]=AUDIOBOOK`，越界回退 MANGA）。
-    /// 这是 Kotlin 原版的既有行为（疑似 off-by-one bug），Rust 忠实复刻。
+    /// 读方向：真实库 `series.type` / `products.content_type` 存 1 基声明值
+    /// （`MANGA=1 NOVEL=2 WEBTOONS=3 AUDIOBOOK=4`），越界回退 MANGA。
+    /// 与 `number()` 声明值一一对应；Kotlin 原版按 entries 下标读取属 off-by-one
+    /// bug（会把 type=1 的漫画误读为 Novel），Rust 按真实库语义修正。
     fn value_of(number: i64) -> Self {
         match number {
-            0 => Self::Manga,
-            1 => Self::Novel,
-            2 => Self::Webtoons,
-            3 => Self::Audiobook,
+            1 => Self::Manga,
+            2 => Self::Novel,
+            3 => Self::Webtoons,
+            4 => Self::Audiobook,
             _ => Self::Manga,
         }
     }
@@ -68,7 +71,9 @@ impl BookWalkerContentType {
     }
 }
 
-/// 对应 `BookWalkerBookFormat.kt`：`valueOf` 按 entries 索引，越界回退 EBOOK。
+/// 对应 `BookWalkerBookFormat.kt`。真实库 `products.product_type` 存 1 基声明值
+/// （`EBOOK=1 AUDIOBOOK=2`）；Kotlin 原版 `valueOf` 误用 entries 下标（0 基）属
+/// off-by-one bug，Rust 按真实库语义 1 基读取，越界回退 EBOOK。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookWalkerBookFormat {
     Ebook,
@@ -78,8 +83,8 @@ pub enum BookWalkerBookFormat {
 impl BookWalkerBookFormat {
     fn value_of(number: i64) -> Self {
         match number {
-            0 => Self::Ebook,
-            1 => Self::Audiobook,
+            1 => Self::Ebook,
+            2 => Self::Audiobook,
             _ => Self::Ebook,
         }
     }
@@ -845,7 +850,7 @@ impl BookWalkerMetadataMapper {
             title: series.title.clone(),
             provider: CoreProviders::BookWalker.as_str().to_string(),
             result_id: series.id.clone(),
-            media_type: None,
+            media_type: category_media_type(series.type_),
             language: None,
             nsfw: None,
         }
@@ -1087,11 +1092,7 @@ impl MetadataProvider for BookWalkerMetadataProvider {
             .search(series_name, &[self.effective_category(media_type)])?;
         Ok(results
             .iter()
-            .map(|s| {
-                let mut result = self.metadata_mapper.to_series_search_result(s);
-                result.media_type = category_media_type(self.effective_category(media_type));
-                result
-            })
+            .map(|s| self.metadata_mapper.to_series_search_result(s))
             .collect())
     }
 
@@ -1547,6 +1548,24 @@ mod tests {
     use super::*;
     use crate::config::{BookMetadataConfig, SeriesMetadataConfig};
 
+    /// BookWalkerContentType → MediaType 映射（搜索结果显示用）。
+    #[test]
+    fn category_media_type_mapping() {
+        assert_eq!(
+            category_media_type(BookWalkerContentType::Manga),
+            Some(crate::model::MediaType::Manga)
+        );
+        assert_eq!(
+            category_media_type(BookWalkerContentType::Novel),
+            Some(crate::model::MediaType::Novel)
+        );
+        assert_eq!(
+            category_media_type(BookWalkerContentType::Webtoons),
+            Some(crate::model::MediaType::Webtoon)
+        );
+        assert_eq!(category_media_type(BookWalkerContentType::Audiobook), None);
+    }
+
     #[test]
     fn database_usable_detects_corrupt() {
         let dir = std::env::temp_dir().join(format!(
@@ -1644,32 +1663,55 @@ mod tests {
     }
 
     #[test]
-    fn content_type_value_of_matches_kotlin_entries_index() {
-        // Kotlin entries.getOrNull(number) ?: MANGA → [0]=MANGA [1]=NOVEL [2]=WEBTOONS [3]=AUDIOBOOK
+    fn content_type_value_of_matches_real_db_1_based_values() {
+        // 真实库 series.type / products.content_type 存 1 基声明值
+        // （与 number() 一致）：1=MANGA 2=NOVEL 3=WEBTOONS 4=AUDIOBOOK。
+        assert_eq!(
+            BookWalkerContentType::value_of(1),
+            BookWalkerContentType::Manga
+        );
+        assert_eq!(
+            BookWalkerContentType::value_of(2),
+            BookWalkerContentType::Novel
+        );
+        assert_eq!(
+            BookWalkerContentType::value_of(3),
+            BookWalkerContentType::Webtoons
+        );
+        assert_eq!(
+            BookWalkerContentType::value_of(4),
+            BookWalkerContentType::Audiobook
+        );
+        // 越界 / 0（Kotlin 原版误用 entries 下标的取值）回退 MANGA
         assert_eq!(
             BookWalkerContentType::value_of(0),
             BookWalkerContentType::Manga
         );
         assert_eq!(
-            BookWalkerContentType::value_of(1),
-            BookWalkerContentType::Novel
-        );
-        assert_eq!(
-            BookWalkerContentType::value_of(2),
-            BookWalkerContentType::Webtoons
-        );
-        assert_eq!(
-            BookWalkerContentType::value_of(3),
-            BookWalkerContentType::Audiobook
-        );
-        assert_eq!(
-            BookWalkerContentType::value_of(4),
+            BookWalkerContentType::value_of(5),
             BookWalkerContentType::Manga
         );
         assert_eq!(
             BookWalkerContentType::value_of(-1),
             BookWalkerContentType::Manga
         );
+        // 写方向 number() 与读方向 value_of 互逆（真实库 1 基）。
+        assert_eq!(BookWalkerContentType::Manga.number(), 1);
+        assert_eq!(BookWalkerContentType::Novel.number(), 2);
+        assert_eq!(BookWalkerContentType::Webtoons.number(), 3);
+        assert_eq!(BookWalkerContentType::Audiobook.number(), 4);
+    }
+
+    #[test]
+    fn book_format_value_of_matches_real_db_1_based_values() {
+        // 真实库 products.product_type：1=EBOOK 2=AUDIOBOOK。
+        assert_eq!(BookWalkerBookFormat::value_of(1), BookWalkerBookFormat::Ebook);
+        assert_eq!(
+            BookWalkerBookFormat::value_of(2),
+            BookWalkerBookFormat::Audiobook
+        );
+        assert_eq!(BookWalkerBookFormat::value_of(0), BookWalkerBookFormat::Ebook);
+        assert_eq!(BookWalkerBookFormat::value_of(3), BookWalkerBookFormat::Ebook);
     }
 
     #[test]
