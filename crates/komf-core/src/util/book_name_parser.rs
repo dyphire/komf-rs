@@ -1,5 +1,6 @@
 //! 书名解析 —— 对应 `BookNameParser.kt`。
 use crate::model::BookRange;
+use crate::util::string_utils::replace_fullwidth_chars;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -33,8 +34,10 @@ pub struct BookNameParser;
 
 impl BookNameParser {
     pub fn get_volumes(name: &str) -> Option<BookRange> {
+        // 统一预处理：全角数字/字母/符号转半角（"第５巻" → "第5巻"、"Vol. ３" → "Vol. 3"）
+        let name = replace_fullwidth_chars(name);
         for regex in VOLUME_REGEXES.iter() {
-            if let Some(captures) = regex.captures(name) {
+            if let Some(captures) = regex.captures(&name) {
                 let start_volume = captures
                     .name("volumeStart")
                     .map(|m| m.as_str().replace(['x', '#'], ".").parse::<f64>().ok())
@@ -69,9 +72,11 @@ impl BookNameParser {
     }
 
     fn get_book_number_from(name: &str, regexes: &[Regex]) -> Option<BookRange> {
+        // 统一预处理：全角数字/字母转半角（"Chapter １０" → "Chapter 10"）
+        let name = replace_fullwidth_chars(name);
         for regex in regexes.iter() {
             // 对应 Kotlin: findAll(name).lastOrNull()
-            let last = regex.captures_iter(name).last();
+            let last = regex.captures_iter(&name).last();
             if let Some(captures) = last {
                 let start = captures
                     .name("start")
@@ -195,6 +200,38 @@ mod tests {
         );
         assert_eq!(
             BookNameParser::get_book_number("Some Series Issue 5"),
+            Some(BookRange::single(5.0))
+        );
+    }
+
+    /// 全角数字统一转半角后提取（卷号/章节号/书号共用预处理）
+    #[test]
+    fn parses_fullwidth_digits() {
+        // 卷号
+        assert_eq!(
+            BookNameParser::get_volumes("僕のヒーローアカデミア 第５巻"),
+            Some(BookRange::single(5.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("My Series Vol. ３"),
+            Some(BookRange::single(3.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("My Series Vol. １-２"),
+            Some(BookRange::new(1.0, 2.0))
+        );
+        // 章节号
+        assert_eq!(
+            BookNameParser::get_chapters("Some Series 第１０話"),
+            Some(BookRange::single(10.0))
+        );
+        assert_eq!(
+            BookNameParser::get_chapters("Some Series Chapter １０-１２"),
+            Some(BookRange::new(10.0, 12.0))
+        );
+        // 书号
+        assert_eq!(
+            BookNameParser::get_book_number("Some Series #５"),
             Some(BookRange::single(5.0))
         );
     }

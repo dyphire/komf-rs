@@ -1576,7 +1576,7 @@ impl MetadataProvider for MangaBakaMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
-        let series_name = match_query.series_name.clone();
+        let series_name = match_query.search_name();
         let results = self
             .data_source
             .search(

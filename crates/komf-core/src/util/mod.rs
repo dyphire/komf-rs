@@ -11,4 +11,4 @@ pub use book_name_parser::BookNameParser;
 pub use chinese::{ChineseConverter, ChineseDirection};
 pub use name_similarity::{similarity_score, NameSimilarityMatcher};
 pub use natural_comparator::{case_insensitive_nat_sort, SimpleNaturalComparator};
-pub use string_utils::{replace_fullwidth_chars, strip_accents};
+pub use string_utils::{normalize_search_text, replace_fullwidth_chars, strip_accents};

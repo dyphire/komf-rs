@@ -1100,9 +1100,9 @@ impl MetadataProvider for BookWalkerMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
-        let series_name = &match_query.series_name;
+        let series_name = match_query.search_name();
         let results = self.repository.search(
-            series_name,
+            &series_name,
             &[self.effective_category(match_query.media_type)],
         )?;
         // Kotlin: `it.title + it.altTitles`（List.toString() → "[a, b]"），单元素候选集合

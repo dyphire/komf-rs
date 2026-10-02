@@ -813,7 +813,7 @@ impl MetadataProvider for AniListMetadataProvider {
         if matches!(self.media_type, MediaType::Comic) || self.series_formats.is_empty() {
             return Ok(None);
         }
-        let name: String = match_query.series_name.chars().take(400).collect();
+        let name: String = match_query.search_name().chars().take(400).collect();
         let media = self
             .client
             .search_series(&name, 10, &self.effective_formats(match_query.media_type))

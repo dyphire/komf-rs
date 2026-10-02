@@ -1107,7 +1107,7 @@ impl MetadataProvider for WebtoonsMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
-        let truncated: String = match_query.series_name.chars().take(400).collect();
+        let truncated: String = match_query.search_name().chars().take(400).collect();
         let results = self.client.search_series(&truncated).await?;
         let search_results = self.metadata_mapper.to_series_search_result(&results);
 

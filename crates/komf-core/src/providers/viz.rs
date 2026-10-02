@@ -881,8 +881,8 @@ impl MetadataProvider for VizMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
-        let series_name = &match_query.series_name;
-        if is_invalid_name(series_name) {
+        let series_name = match_query.search_name();
+        if is_invalid_name(&series_name) {
             return Ok(None);
         }
         let truncated: String = series_name.chars().take(100).collect();

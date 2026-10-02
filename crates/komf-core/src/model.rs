@@ -404,7 +404,7 @@ impl MatchQuery {
         self
     }
 
-    /// 归一后的 query 名（用于匹配比较；含简繁转换）。
+    /// 归一后的 query 名（用于匹配比较；含全角/标点统一预处理与简繁转换）。
     pub fn normalized_series_name(&self) -> String {
         normalize_matching_title(
             &self.series_name,
@@ -413,13 +413,19 @@ impl MatchQuery {
         )
     }
 
+    /// 搜索用归一 query 名：全角/标点统一预处理（不含 symbolNormalizeRegex 与简繁转换）。
+    /// 各 provider 构造搜索请求时应使用本方法而非原始 `series_name`。
+    pub fn search_name(&self) -> String {
+        crate::util::normalize_search_text(&self.series_name)
+    }
+
     /// 设置库配置的 mediaType（None = 不覆盖，使用 provider 配置）。
     pub fn with_media_type(mut self, media_type: Option<MediaType>) -> Self {
         self.media_type = media_type;
         self
     }
 
-    /// 归一单个候选标题（用于匹配比较；含简繁转换）。
+    /// 归一单个候选标题（用于匹配比较；含全角/标点统一预处理与简繁转换）。
     pub fn normalize_title(&self, title: &str) -> String {
         normalize_matching_title(
             title,
@@ -434,19 +440,21 @@ impl MatchQuery {
     }
 }
 
-/// 符号归一：正则匹配部分替换为空格 + trim；正则非法时仅 trim；无正则时原样返回。
-/// 之后应用简繁转换（chinese 非空时）。
+/// 匹配归一：先做全角/标点统一预处理（`normalize_search_text`），再应用
+/// symbolNormalizeRegex（匹配部分替换为空格 + trim；正则非法时仅 trim；无正则时跳过），
+/// 最后应用简繁转换（chinese 非空时）。
 fn normalize_matching_title(
     s: &str,
     pattern: Option<&str>,
     chinese: Option<&crate::util::ChineseConverter>,
 ) -> String {
+    let s = crate::util::normalize_search_text(s);
     let normalized = match pattern {
         Some(pattern) => match regex::Regex::new(pattern) {
-            Ok(re) => re.replace_all(s, " ").trim().to_string(),
+            Ok(re) => re.replace_all(&s, " ").trim().to_string(),
             Err(_) => s.trim().to_string(),
         },
-        None => s.to_string(),
+        None => s,
     };
     match chinese {
         Some(c) => c.convert(&normalized),
@@ -472,13 +480,22 @@ mod tests {
     }
 
     #[test]
-    fn no_regex_keeps_original() {
+    fn no_regex_applies_fullwidth_punctuation_normalize() {
         let q = query("進撃の巨人：完全版", None);
-        assert_eq!(q.normalized_series_name(), "進撃の巨人：完全版");
+        // 无 symbolNormalizeRegex 时仍统一预处理全角/标点（"：" → ":"）
+        assert_eq!(q.normalized_series_name(), "進撃の巨人:完全版");
         assert_eq!(
             q.normalize_title("進撃の巨人：完全版"),
-            "進撃の巨人：完全版"
+            "進撃の巨人:完全版"
         );
+    }
+
+    #[test]
+    fn search_name_unified_preprocess() {
+        let q = query("　進撃の巨人：完全版　", None);
+        assert_eq!(q.search_name(), "進撃の巨人:完全版");
+        let q = query("ＢＥＲＳＥＲＫ（完全版）", None);
+        assert_eq!(q.search_name(), "BERSERK(完全版)");
     }
 
     #[test]

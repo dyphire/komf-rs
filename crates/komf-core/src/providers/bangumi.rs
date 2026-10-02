@@ -2341,7 +2341,14 @@ impl MetadataProvider for BangumiMetadataProvider {
                     }
                 }
                 let titles = self.variant_titles(titles);
-                let score = similarity_score(series_name, &titles);
+                // 与匹配侧一致：评分前对 query 与候选标题做全角/标点统一预处理
+                let score = similarity_score(
+                    &crate::util::normalize_search_text(series_name),
+                    &titles
+                        .iter()
+                        .map(|t| crate::util::normalize_search_text(t))
+                        .collect::<Vec<_>>(),
+                );
                 candidates.push((score, self.metadata_mapper.to_series_search_result(&bs)));
             }
             // 按相似度降序取前 limit 个；候选不再被相似度拦截。
@@ -2393,7 +2400,7 @@ impl MetadataProvider for BangumiMetadataProvider {
             return self.match_from_archive(&store, match_query).await;
         }
         // ② 在线（archive 未启用）
-        let results = self.client.search(&match_query.series_name, 20).await?;
+        let results = self.client.search(&match_query.search_name(), 20).await?;
         // 优先库配置 mediaType（query.media_type），无则用 provider 全局配置
         let platform_filter = match_query
             .media_type
@@ -2597,7 +2604,7 @@ impl BangumiMetadataProvider {
             .and_then(media_type_platform)
             .or_else(|| media_type_platform(self.media_type));
         let mut candidates: Vec<ArchiveSubject> = Vec::new();
-        for v in store.search(&match_query.series_name) {
+        for v in store.search(&match_query.search_name()) {
             let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
             if arch.id == 0 {
                 continue;

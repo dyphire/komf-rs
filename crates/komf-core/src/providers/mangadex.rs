@@ -897,7 +897,7 @@ impl MetadataProvider for MangaDexMetadataProvider {
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
         // Kotlin: searchSeries(seriesName.take(400)) —— 默认 limit=5
-        let name: String = match_query.series_name.chars().take(400).collect();
+        let name: String = match_query.search_name().chars().take(400).collect();
         let results = self.client.search_series(&name, 5).await?;
         let matched = results.into_iter().find(|m| {
             let mut titles: Vec<String> = m.attributes.title.values().cloned().collect();

@@ -928,7 +928,7 @@ impl MetadataProvider for YenPressMetadataProvider {
         &self,
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
-        let series_name = &match_query.series_name;
+        let series_name = match_query.search_name();
         let truncated: String = series_name.chars().take(128).collect();
         let results = self.client.search_series(&truncated).await?;
 

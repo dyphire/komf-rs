@@ -825,7 +825,7 @@ impl MetadataProvider for MangaUpdatesMetadataProvider {
         // Kotlin: searchSeries(name, types) 默认 perPage=5（非 10）
         let page = self
             .client
-            .search_series(&match_query.series_name, &self.series_types, 1, 5)
+            .search_series(&match_query.search_name(), &self.series_types, 1, 5)
             .await?;
         let record = page.results.into_iter().find(|r| {
             let title = r.record.title.trim_end_matches(" (Novel)").to_string();

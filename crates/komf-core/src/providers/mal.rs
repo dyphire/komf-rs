@@ -541,14 +541,15 @@ impl MetadataProvider for MalMetadataProvider {
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
         // Kotlin MalMetadataProvider.matchSeriesMetadata
-        if match_query.series_name.chars().count() < 3 {
+        let search_name = match_query.search_name();
+        if search_name.chars().count() < 3 {
             tracing::warn!(
                 "{} is less than 3 characters. Can't perform a search",
                 match_query.series_name
             );
             return Ok(None);
         }
-        let series_name: String = match_query.series_name.chars().take(64).collect();
+        let series_name: String = search_name.chars().take(64).collect();
         let allowed = self.effective_series_types(match_query.media_type);
         // Kotlin: 先用稀疏搜索结果匹配，再 getSeries(id) 取全量。
         let results = self.client.search(&series_name).await?;
