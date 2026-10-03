@@ -1063,6 +1063,80 @@ const BANGUMI_TAG_WHITELIST_JSON: &str = include_str!("bangumi_tag_whitelist.jso
 /// 旧固定 1000 的多余候选全是浪费的 mmap 随机读 + 整条 JSON 解析。
 const ARCHIVE_MATCH_SEARCH_LIMIT: usize = 25;
 
+/// 单行本影子去重：series=False 的条目，若候选集内存在另一条"平台一致且名称前缀
+/// 一致（前缀 ≥2 字符）"的系列条目（series=None 视为系列），视为该系列的单行本影子，
+/// 予以剔除。名称比对：name（日文原名）为主；name_cn 在双方均非空时同样参与
+/// （单行本 name_cn 常为空，故 name 是可靠主键；各卷原名不统一而中文名统一时
+/// name_cn 兜底）。前缀余量必须是卷号装饰（空 / ( （ [ 【 # ＃ / 数字 / 第+数字）——
+/// 外传·番外·完全版等派生作品的余量是普通词（"番外編集 <原罪>""セブンデイズ"），
+/// 不被误杀。无对应系列条目的非系列主条目保留——不再做 BangumiKomga
+/// resort 式的"非系列即跳过"硬过滤：wiki 常把合法主条目（web 漫整卷收录等）标
+/// series=False，硬过滤会误杀（如 385468《大医凌然》漫画版）；且在线 API 无
+/// series 概念不过滤，离线行为应对齐在线。泛型 T 保留调用方附加数据
+/// （搜索侧为相似度分，匹配侧为单位元）。
+fn filter_shadowed_single_volumes<T>(candidates: &mut Vec<(ArchiveSubject, T)>) {
+    let series_entries: Vec<(String, Option<String>, Option<String>)> = candidates
+        .iter()
+        .filter(|(a, _)| a.series != Some(false))
+        .map(|(a, _)| (a.name.clone(), a.name_cn.clone(), a.platform_str()))
+        .collect();
+    if series_entries.is_empty() {
+        return;
+    }
+    candidates.retain(|(a, _)| {
+        if a.series != Some(false) {
+            return true;
+        }
+        !series_entries.iter().any(|(name, name_cn, plat)| {
+            if plat != &a.platform_str() {
+                return false;
+            }
+            let name_shadow = name.chars().count() >= 2 && is_series_volume_tail(&a.name, name);
+            // name_cn 兜底：双方均非空且前缀 ≥2 字符
+            let cn_shadow = match (name_cn, &a.name_cn) {
+                (Some(base), Some(candidate)) if !base.is_empty() && base.chars().count() >= 2 => {
+                    is_series_volume_tail(candidate, base)
+                }
+                _ => false,
+            };
+            name_shadow || cn_shadow
+        })
+    });
+}
+
+/// 前缀 + 余量白名单判定：candidate 以 base 开头，且余量只能是卷号装饰——
+/// trim 后跳过开括号/井号装饰（( （ [ 【 # ＃），下一个有效字符必须是数字
+/// （含全角）或"第"+数字（第2卷/第3話）；余量为空（只剩装饰符号）也算影子。
+/// 反例均被保留：余量以普通词开头（番外編集/セブンデイズ/完全版…）、括号内非数字
+/// （(外伝)/(改訂版)/[愛蔵版]）——前者是派生作品标题，后者是版本标注而非卷号。
+fn is_series_volume_tail(candidate: &str, base: &str) -> bool {
+    let Some(rest) = candidate.strip_prefix(base) else {
+        return false;
+    };
+    let mut chars = rest.trim_start().chars().peekable();
+    // 跳过开括号/井号/空白装饰：(1) （2） [3] 【4】 #5 ＃6、( 2 )、第 2 巻
+    while matches!(
+        chars.peek(),
+        Some(c) if matches!(c, '(' | '（' | '[' | '【' | '#' | '＃') || c.is_whitespace()
+    ) {
+        chars.next();
+    }
+    match chars.next() {
+        // 余量只剩装饰符号/空白（退化形态）：同平台同名，仍算影子
+        None => true,
+        // 卷号数字（含全角 １２、圈号 ① 等 is_numeric 字符）
+        Some(c) if c.is_numeric() => true,
+        Some('第') => {
+            // "第 2 巻"：第后允许空白，随后须为数字
+            while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                chars.next();
+            }
+            chars.next().map(|c| c.is_numeric()).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 /// 加载标签白名单：tagWhitelistFile 指定路径优先；否则内置资源。解析失败回退空列表。
 fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
     if let Some(path) = file {
@@ -2291,14 +2365,10 @@ impl MetadataProvider for BangumiMetadataProvider {
             };
             let results = store.search(series_name, limit);
             // 召回层：相似度只排序不拦截，候选尽可能宽泛（精排由 match 路径负责）。
-            let mut candidates: Vec<(f32, SeriesSearchResult)> = Vec::new();
+            let mut candidates: Vec<(ArchiveSubject, f32)> = Vec::new();
             for v in results {
                 let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
                 if arch.id == 0 {
-                    continue;
-                }
-                // BangumiKomga resort：非系列跳过（缺省视为系列，避免误伤单本漫画）
-                if arch.series == Some(false) {
                     continue;
                 }
                 if arch.tags.iter().any(|t| t.name == "漫画单行本") {
@@ -2354,12 +2424,20 @@ impl MetadataProvider for BangumiMetadataProvider {
                         .map(|t| crate::util::normalize_search_text(t))
                         .collect::<Vec<_>>(),
                 );
-                candidates.push((score, self.metadata_mapper.to_series_search_result(&bs)));
+                candidates.push((arch, score));
             }
+            // 单行本影子去重（存在同平台同名称前缀的系列条目时剔除单行本）。
+            filter_shadowed_single_volumes(&mut candidates);
             // 按相似度降序取前 limit 个；候选不再被相似度拦截。
-            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let out: Vec<SeriesSearchResult> =
-                candidates.into_iter().take(limit).map(|(_, r)| r).collect();
+            candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let out: Vec<SeriesSearchResult> = candidates
+                .into_iter()
+                .take(limit)
+                .map(|(arch, _)| {
+                    self.metadata_mapper
+                        .to_series_search_result(&arch.to_bangumi_subject())
+                })
+                .collect();
             // archive 无封面数据（上游 dump 不含图）。不再逐结果串行在线补封面——
             // N 次串行 RTT 让离线搜索比在线 API 还慢；封面留空由调用方按需处理。
             // 离线未命中：不回退在线（archive 模式下纯离线）。
@@ -2594,13 +2672,10 @@ impl BangumiMetadataProvider {
             .media_type
             .and_then(media_type_platform)
             .or_else(|| media_type_platform(self.media_type));
-        let mut candidates: Vec<ArchiveSubject> = Vec::new();
+        let mut candidates: Vec<(ArchiveSubject, ())> = Vec::new();
         for v in store.search(&match_query.search_name(), ARCHIVE_MATCH_SEARCH_LIMIT) {
             let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
             if arch.id == 0 {
-                continue;
-            }
-            if arch.series == Some(false) {
                 continue;
             }
             if arch.tags.iter().any(|t| t.name == "漫画单行本") {
@@ -2611,10 +2686,13 @@ impl BangumiMetadataProvider {
                     continue;
                 }
             }
-            candidates.push(arch);
+            candidates.push((arch, ()));
         }
+        // 单行本影子去重（与搜索路径同一规则）。
+        filter_shadowed_single_volumes(&mut candidates);
         let mut matches: Vec<ArchiveSubject> = candidates
             .into_iter()
+            .map(|(a, _)| a)
             .filter(|arch| {
                 let mut titles = vec![arch.name.clone()];
                 if let Some(cn) = &arch.name_cn {
@@ -2888,6 +2966,139 @@ mod tests {
                 "生存"
             ]
         );
+    }
+
+    /// 单行本影子去重：同平台同名称前缀的 series 条目存在时剔除 series=False 影子；
+    /// name 为主、name_cn 双方非空时参与；无对应系列条目的非系列主条目（385468 型
+    /// web 漫）保留；平台不一致/前缀 <2 字符不误杀。
+    #[test]
+    fn archive_series_shadow_dedup() {
+        fn mk(
+            id: u64,
+            name: &str,
+            name_cn: Option<&str>,
+            series: Option<bool>,
+            platform: i64,
+        ) -> ArchiveSubject {
+            let mut a = ArchiveSubject::default();
+            a.id = id;
+            a.name = name.to_string();
+            a.name_cn = name_cn.map(String::from);
+            a.series = series;
+            a.platform = Some(serde_json::json!(platform));
+            a
+        }
+        // 大医凌然真实数据形态：小说系列 + 小说单行本影子 + 漫画非系列主条目
+        let mut cands: Vec<(ArchiveSubject, ())> = vec![
+            (mk(1, "大医凌然", Some("大医凌然"), Some(true), 1002), ()), // 小说系列 → 保留
+            (mk(2, "大医凌然 (1)", None, Some(false), 1002), ()), // 单行本影子（name 前缀）→ 剔除
+            (mk(3, "大医凌然 (2)", None, Some(false), 1002), ()), // 单行本影子（name 前缀）→ 剔除
+            (mk(4, "大医凌然", Some("大医凌然"), Some(false), 1001), ()), // 漫画主条目，无同平台系列 → 保留
+            (mk(5, "Other", None, Some(false), 1001), ()),                // 无前缀关系 → 保留
+            (mk(6, "大医凌然 (1)", None, Some(false), 1001), ()), // 同前缀但平台不一致（系列是小说）→ 保留
+        ];
+        filter_shadowed_single_volumes(&mut cands);
+        let ids: Vec<u64> = cands.into_iter().map(|(a, _)| a.id).collect();
+        assert_eq!(ids, vec![1, 4, 5, 6]);
+        // name_cn 兜底：name 完全不同但 name_cn 前缀一致（双方非空）→ 影子剔除
+        let mut cn: Vec<(ArchiveSubject, ())> = vec![
+            (
+                mk(10, "Mushoku Tensei", Some("无职转生"), Some(true), 1002),
+                (),
+            ),
+            (
+                mk(11, "Vol. 1", Some("无职转生 第1卷"), Some(false), 1002),
+                (),
+            ), // name_cn 前缀 → 剔除
+            (mk(12, "Vol. 2", None, Some(false), 1002), ()), // 无 name_cn，name 无前缀 → 保留
+        ];
+        filter_shadowed_single_volumes(&mut cn);
+        let ids: Vec<u64> = cn.into_iter().map(|(a, _)| a.id).collect();
+        assert_eq!(ids, vec![10, 12]);
+        // 候选集中无系列条目时 series=False 全部保留（不再硬过滤）
+        let mut solo: Vec<(ArchiveSubject, ())> =
+            vec![(mk(20, "孤本漫画", None, Some(false), 1001), ())];
+        filter_shadowed_single_volumes(&mut solo);
+        assert_eq!(solo.len(), 1);
+        // 前缀 <2 字符不误杀
+        let mut short: Vec<(ArchiveSubject, ())> = vec![
+            (mk(30, "本", Some("本"), Some(true), 1001), ()),
+            (mk(31, "本の話", Some("本の話"), Some(false), 1001), ()),
+        ];
+        filter_shadowed_single_volumes(&mut short);
+        assert_eq!(short.len(), 2);
+        // name_cn 仅一方非空/过短不参与比对
+        let mut cn_short: Vec<(ArchiveSubject, ())> = vec![
+            (mk(40, "Series", Some("甲"), Some(true), 1001), ()),
+            (mk(41, "完全別名", Some("甲铁城"), Some(false), 1001), ()),
+            (mk(42, "完全別名2", None, Some(false), 1001), ()),
+        ];
+        filter_shadowed_single_volumes(&mut cn_short);
+        let ids: Vec<u64> = cn_short.into_iter().map(|(a, _)| a.id).collect();
+        assert_eq!(ids, vec![40, 41, 42]);
+        // 七大罪真实数据形态：番外/外传等派生作品（余量为普通词）保留，卷号装饰剔除
+        let mut seven: Vec<(ArchiveSubject, ())> = vec![
+            (
+                mk(64051, "七つの大罪", Some("七大罪"), Some(true), 1001),
+                (),
+            ),
+            (
+                mk(
+                    252663,
+                    "七つの大罪 番外編集 <原罪>",
+                    Some("七大罪 番外篇集 〈原罪〉"),
+                    Some(false),
+                    1001,
+                ),
+                (),
+            ), // 番外集 → 保留
+            (
+                mk(
+                    129962,
+                    "七つの大罪 セブンデイズ",
+                    Some("七大罪 Seven Days"),
+                    Some(false),
+                    1001,
+                ),
+                (),
+            ), // 外传 → 保留
+            (mk(700001, "七つの大罪 (18)", None, Some(false), 1001), ()), // 卷号装饰 → 剔除
+            (
+                mk(700002, "七つの大罪 19 限定版", None, Some(false), 1001),
+                (),
+            ), // 数字开头 → 剔除
+            (mk(700003, "七つの大罪 第2巻", None, Some(false), 1001), ()), // 第+数字 → 剔除
+            (
+                mk(
+                    700004,
+                    "七つの大罪 —外伝— 昔日の王都",
+                    Some("七大罪外传 昔日王都的七个愿望"),
+                    Some(false),
+                    1001,
+                ),
+                (),
+            ), // —外伝— → 保留
+            (mk(700005, "七つの大罪 (外伝)", None, Some(false), 1001), ()), // 括号内非数字 → 保留
+            (
+                mk(700006, "七つの大罪 [完全版]", None, Some(false), 1001),
+                (),
+            ), // 括号内非数字 → 保留
+            (mk(700007, "七つの大罪 ＃10", None, Some(false), 1001), ()), // 井号+全角数字 → 剔除
+        ];
+        filter_shadowed_single_volumes(&mut seven);
+        let ids: Vec<u64> = seven.into_iter().map(|(a, _)| a.id).collect();
+        assert_eq!(ids, vec![64051, 252663, 129962, 700004, 700005, 700006]);
+        // 装饰符号内部空白：卷号仍命中，派生作品仍保留
+        let mut sp: Vec<(ArchiveSubject, ())> = vec![
+            (mk(800000, "Series", None, Some(true), 1001), ()),
+            (mk(800001, "Series ( 2)", None, Some(false), 1001), ()), // 括号+空格+数字 → 剔除
+            (mk(800002, "Series (　2)", None, Some(false), 1001), ()), // 括号+全角空格+数字 → 剔除
+            (mk(800003, "Series 第 3 巻", None, Some(false), 1001), ()), // 第+空格+数字 → 剔除
+            (mk(800004, "Series ( 番外)", None, Some(false), 1001), ()), // 括号+空格+非数字 → 保留
+        ];
+        filter_shadowed_single_volumes(&mut sp);
+        let ids: Vec<u64> = sp.into_iter().map(|(a, _)| a.id).collect();
+        assert_eq!(ids, vec![800000, 800004]);
     }
 
     /// Archive 模板字符串 infobox → 解析为数组 → extract_authors 拆分多作者
