@@ -320,6 +320,7 @@ fn release_date_from(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<Releas
 
 /// SQLite 只读仓储。连接按查询打开（SQLite 打开开销极小），保证 `Sync`；
 /// 行为与 Kotlin 每次 `transaction(database)` 等价。
+#[derive(Clone)]
 pub struct BookWalkerSeriesRepository {
     database_file: PathBuf,
 }
@@ -354,61 +355,101 @@ fn mark_migrated(db_path: &Path) {
     }
 }
 
-/// 从 series 表读出原始标题，经分析链预分词后写入 series_fts（独立事务提交）。
+/// 从 series 表读出原始标题，经分析链预分词后写入 series_fts。
+/// series 全表（含 alt_titles JSON 列，单行较大）一次性 collect 峰值可达数百 MB，
+/// 故按 rowid 分批（keyset 分页；id 为 TEXT PRIMARY KEY 无单调键可用，rowid 为
+/// 隐含自增键，语义等价），每批独立事务提交（对齐 ehentai_archive::build_fts）。
 fn populate_series_fts(conn: &rusqlite::Connection) -> Result<(), ProviderError> {
-    conn.execute_batch("BEGIN")
-        .map_err(|e| ProviderError::message(format!("BookWalker fts begin: {e}")))?;
-    let result = (|| -> Result<(), ProviderError> {
-        let mut stmt = conn
-            .prepare("SELECT id, title, alt_titles, type FROM series")
-            .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
-        let mapped = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
-        let rows: Vec<(String, String, Option<String>, i64)> =
-            mapped.filter_map(|r| r.ok()).collect();
-        drop(stmt);
-        let mut ins = conn
-            .prepare("INSERT INTO series_fts(id, title, alt_titles, type) VALUES (?1,?2,?3,?4)")
-            .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
-        for (id, title, alt_titles, ty) in &rows {
-            let t = crate::util::index_analyze_terms(title).join(" ");
-            // alt_titles 为 JSON 数组：逐条分析、空格拼接（数组边界即 token 分隔符，
-            // 与整串分析结果一致，显式解析避免跨元素粘连）。
-            let alt_t = alt_titles
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                .map(|v: Vec<String>| {
-                    v.iter()
-                        .map(|a| crate::util::index_analyze_terms(a).join(" "))
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .filter(|s| !s.is_empty());
-            ins.execute(rusqlite::params![id, t, alt_t, ty])
-                .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
+    let max_rowid: i64 = conn
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM series", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| ProviderError::message(format!("BookWalker fts count: {e}")))?;
+    const BATCH: i64 = 50_000;
+    let mut last_rowid: i64 = 0;
+    let mut done: i64 = 0;
+    while last_rowid < max_rowid {
+        let batch_result = (|| -> Result<(i64, i64), ProviderError> {
+            conn.execute_batch("BEGIN")
+                .map_err(|e| ProviderError::message(format!("BookWalker fts begin: {e}")))?;
+            let result = (|| -> Result<(i64, i64), ProviderError> {
+                let rows: Vec<(i64, String, String, Option<String>, i64)> = {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT rowid, id, title, alt_titles, type FROM series \
+                             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+                        )
+                        .map_err(|e| {
+                            ProviderError::message(format!("BookWalker fts populate: {e}"))
+                        })?;
+                    let mapped = stmt
+                        .query_map(rusqlite::params![last_rowid, BATCH], |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, Option<String>>(3)?,
+                                r.get::<_, i64>(4)?,
+                            ))
+                        })
+                        .map_err(|e| {
+                            ProviderError::message(format!("BookWalker fts populate: {e}"))
+                        })?;
+                    mapped.filter_map(|r| r.ok()).collect()
+                };
+                let batch_max = rows.iter().map(|r| r.0).max().unwrap_or(last_rowid);
+                let mut ins = conn
+                    .prepare(
+                        "INSERT INTO series_fts(id, title, alt_titles, type) VALUES (?1,?2,?3,?4)",
+                    )
+                    .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
+                for (_, id, title, alt_titles, ty) in &rows {
+                    let t = crate::util::index_analyze_terms(title).join(" ");
+                    // alt_titles 为 JSON 数组：逐条分析、空格拼接（数组边界即 token 分隔符，
+                    // 与整串分析结果一致，显式解析避免跨元素粘连）。
+                    let alt_t = alt_titles
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                        .map(|v: Vec<String>| {
+                            v.iter()
+                                .map(|a| crate::util::index_analyze_terms(a).join(" "))
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .filter(|s| !s.is_empty());
+                    ins.execute(rusqlite::params![id, t, alt_t, ty])
+                        .map_err(|e| {
+                            ProviderError::message(format!("BookWalker fts populate: {e}"))
+                        })?;
+                }
+                Ok((rows.len() as i64, batch_max))
+            })();
+            match result {
+                Ok(r) => {
+                    conn.execute_batch("COMMIT").map_err(|e| {
+                        ProviderError::message(format!("BookWalker fts commit: {e}"))
+                    })?;
+                    Ok(r)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })();
+        let (n, batch_max) = batch_result?;
+        if n == 0 {
+            // 防御：空批（理论不发生）直接退出，防止死循环
+            break;
         }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| ProviderError::message(format!("BookWalker fts commit: {e}")))?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
+        done += n;
+        last_rowid = batch_max;
+        if done % (BATCH * 4) == 0 {
+            tracing::info!("BookWalker fts populate progress {done} rows");
         }
     }
+    Ok(())
 }
 
 impl BookWalkerSeriesRepository {
@@ -1231,9 +1272,16 @@ impl MetadataProvider for BookWalkerMetadataProvider {
         _limit: usize,
         media_type: Option<crate::model::MediaType>,
     ) -> Result<Vec<SeriesSearchResult>, ProviderError> {
-        let results = self
-            .repository
-            .search(series_name, &[self.effective_category(media_type)])?;
+        // 首次搜索可能触发惰性 FTS 重建（DROP/分批全量填充），均为同步重 IO；
+        // 整个查询移入阻塞线程，避免拖住 async 执行线程。
+        let repository = self.repository.clone();
+        let series_name = series_name.to_string();
+        let category = self.effective_category(media_type);
+        let results = crate::util::heavy_pool::spawn_heavy(move || {
+            repository.search(&series_name, &[category])
+        })
+        .await
+        .map_err(|e| ProviderError::message(format!("BookWalker search task: {e}")))??;
         Ok(results
             .iter()
             .map(|s| self.metadata_mapper.to_series_search_result(s))
@@ -1245,10 +1293,13 @@ impl MetadataProvider for BookWalkerMetadataProvider {
         match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
         let series_name = match_query.search_name();
-        let results = self.repository.search(
-            &series_name,
-            &[self.effective_category(match_query.media_type)],
-        )?;
+        let repository = self.repository.clone();
+        let category = self.effective_category(match_query.media_type);
+        let results = crate::util::heavy_pool::spawn_heavy(move || {
+            repository.search(&series_name, &[category])
+        })
+        .await
+        .map_err(|e| ProviderError::message(format!("BookWalker search task: {e}")))??;
         // Kotlin: `it.title + it.altTitles`（List.toString() → "[a, b]"），单元素候选集合
         let matched = results.iter().find(|s| {
             let candidate = format!("{}[{}]", s.title, s.alt_titles.join(", "));
@@ -1476,16 +1527,22 @@ impl BookWalkerDbDownloader {
             let interval = std::time::Duration::from_secs(interval_hours * 3600);
             let retry = std::time::Duration::from_secs(15 * 60);
             loop {
+                // 全局互斥：与 bangumi/ehentai/mangabaka 后台更新串行执行
+                // （下载/解压/建索引均为重 IO，避免多源并发内存峰值叠加）。
+                // 作用域限于本次更新，sleep 等待期间不持有（避免长时间阻塞其他源）。
                 let mut ok = true;
-                if !this.database_file.exists() {
-                    ok = Self::wait_download(&this).await;
-                } else {
-                    match this.db_changed().await {
-                        Ok(true) => ok = Self::wait_download(&this).await,
-                        Ok(false) => {}
-                        Err(e) => {
-                            ok = false;
-                            tracing::warn!("BookWalker db update check failed: {e}");
+                {
+                    let _permit = crate::util::download::offline_update_permit().await;
+                    if !this.database_file.exists() {
+                        ok = Self::wait_download(&this).await;
+                    } else {
+                        match this.db_changed().await {
+                            Ok(true) => ok = Self::wait_download(&this).await,
+                            Ok(false) => {}
+                            Err(e) => {
+                                ok = false;
+                                tracing::warn!("BookWalker db update check failed: {e}");
+                            }
                         }
                     }
                 }
@@ -1607,7 +1664,7 @@ impl BookWalkerDbDownloader {
         .await?
         .last_modified;
 
-        // 2. zstd 解压
+        // 2. zstd 解压（同步重 IO，移入阻塞线程）
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -1616,17 +1673,25 @@ impl BookWalkerDbDownloader {
                 info: Some(format!("extracting {archive:?}")),
             },
         );
-        let input =
-            std::fs::File::open(&archive).map_err(|e| format!("FileSystemException: {e}"))?;
-        let output =
-            std::fs::File::create(&tmp_file).map_err(|e| format!("FileSystemException: {e}"))?;
-        // 压缩包损坏（size 对但 CRC/帧错误）：删包让下次重试重下，避免毒缓存反复失败。
-        zstd::stream::copy_decode(input, output).map_err(|e| {
-            let _ = std::fs::remove_file(&archive);
-            format!("ZstdException: {e}")
-        })?;
+        {
+            let archive_path = archive.clone();
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || -> Result<(), String> {
+                let input = std::fs::File::open(&archive_path)
+                    .map_err(|e| format!("FileSystemException: {e}"))?;
+                let output =
+                    std::fs::File::create(&tmp).map_err(|e| format!("FileSystemException: {e}"))?;
+                // 压缩包损坏（size 对但 CRC/帧错误）：删包让下次重试重下，避免毒缓存反复失败。
+                zstd::stream::copy_decode(input, output).map_err(|e| {
+                    let _ = std::fs::remove_file(&archive_path);
+                    format!("ZstdException: {e}")
+                })
+            })
+            .await
+            .map_err(|e| format!("FileSystemException: extract task failed: {e}"))??;
+        }
 
-        // 3. FTS5 搜索索引
+        // 3. FTS5 搜索索引（全表分批填充为同步重 IO，移入阻塞线程）
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -1635,7 +1700,13 @@ impl BookWalkerDbDownloader {
                 info: Some("creating search index".to_string()),
             },
         );
-        self.create_search_index_on(&tmp_file)?;
+        {
+            let this = self.clone();
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || this.create_search_index_on(&tmp))
+                .await
+                .map_err(|e| format!("SQLiteException: index task failed: {e}"))??;
+        }
 
         // 4. 原子替换 + 写 timestamp/last-modified + 清理压缩包
         std::fs::rename(&tmp_file, &self.database_file)

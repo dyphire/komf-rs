@@ -353,6 +353,22 @@ fn to_book_context(book: &crate::model::MediaServerBook) -> BookContext {
 // KomgaEventHandler —— 对应 `KomgaEventHandler.kt`
 // ---------------------------------------------------------------------------
 
+/// 事件缓冲上限：Komga 大扫描期间 TaskQueueStatus 长时间非 0，缓冲只在队列空时
+/// 清空，无界堆积会导致内存持续增长；超限丢弃并告警（缓冲语义不变，只是有界）。
+const EVENT_BUFFER_LIMIT: usize = 10_000;
+
+/// 有界 push：缓冲满时丢弃新事件并告警一次（保留既有批量分发语义，
+/// 不在扫描中途触发分发）。
+fn push_bounded<T>(buffer: &mut Vec<T>, event: T, event_type: &str) {
+    if buffer.len() >= EVENT_BUFFER_LIMIT {
+        tracing::warn!(
+            "komga {event_type} event buffer full ({EVENT_BUFFER_LIMIT}), dropping event"
+        );
+        return;
+    }
+    buffer.push(event);
+}
+
 pub struct KomgaEventHandler {
     client: Arc<KomgaClient>,
     listeners: Vec<Arc<dyn MediaServerEventListener>>,
@@ -439,31 +455,46 @@ impl KomgaEventHandler {
                 series_id,
                 library_id,
             } => {
-                self.book_added.lock().await.push(BookEvent {
-                    library_id: MediaServerLibraryId(library_id),
-                    series_id: MediaServerSeriesId(series_id),
-                    book_id: MediaServerBookId(book_id),
-                });
+                let mut buffer = self.book_added.lock().await;
+                push_bounded(
+                    &mut buffer,
+                    BookEvent {
+                        library_id: MediaServerLibraryId(library_id),
+                        series_id: MediaServerSeriesId(series_id),
+                        book_id: MediaServerBookId(book_id),
+                    },
+                    "BookAdded",
+                );
             }
             crate::komga::KomgaEvent::BookDeleted {
                 book_id,
                 series_id,
                 library_id,
             } => {
-                self.book_deleted.lock().await.push(BookEvent {
-                    library_id: MediaServerLibraryId(library_id),
-                    series_id: MediaServerSeriesId(series_id),
-                    book_id: MediaServerBookId(book_id),
-                });
+                let mut buffer = self.book_deleted.lock().await;
+                push_bounded(
+                    &mut buffer,
+                    BookEvent {
+                        library_id: MediaServerLibraryId(library_id),
+                        series_id: MediaServerSeriesId(series_id),
+                        book_id: MediaServerBookId(book_id),
+                    },
+                    "BookDeleted",
+                );
             }
             crate::komga::KomgaEvent::SeriesDeleted {
                 series_id,
                 library_id,
             } => {
-                self.series_deleted.lock().await.push(SeriesEvent {
-                    library_id: MediaServerLibraryId(library_id),
-                    series_id: MediaServerSeriesId(series_id),
-                });
+                let mut buffer = self.series_deleted.lock().await;
+                push_bounded(
+                    &mut buffer,
+                    SeriesEvent {
+                        library_id: MediaServerLibraryId(library_id),
+                        series_id: MediaServerSeriesId(series_id),
+                    },
+                    "SeriesDeleted",
+                );
             }
             crate::komga::KomgaEvent::TaskQueueStatus { count } => {
                 if count != 0 {

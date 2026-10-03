@@ -11,7 +11,8 @@
 //!         │     ├── persons: person 实体（id/name/name_cn/type/career）
 //!         │     ├── subject_persons: subject↔person 关联（含 position 角色）
 //!         │     └── archive_update: key/value（last_updated）
-//!         └── memmap2::Mmap（subject.jsonlines 零拷贝读行）
+//!         └── Mutex<Option<memmap2::Mmap>>（subject.jsonlines 零拷贝读行；
+//!               可释放/按需重映射，Windows 下 drop 即回收 working set）
 //! ```
 //!
 //! 数据源：https://github.com/bangumi/Archive（release zip 约 418MB，解压后
@@ -473,7 +474,11 @@ fn map_relation_type(t: Option<String>) -> Option<String> {
 
 pub struct BangumiArchiveStore {
     conn: Mutex<rusqlite::Connection>,
-    mm: Option<memmap2::Mmap>,
+    /// subject.jsonlines 路径：mmap 槽位为空（已释放/映射失败）时按需重映射。
+    subjects_path: PathBuf,
+    /// mmap 槽位：查询时短暂锁定并只拷贝目标行字节；release_hot_pages 可
+    /// 释放槽位（unix=MADV_DONTNEED；Windows=drop unmap 立即回收 working set）。
+    mm: Mutex<Option<memmap2::Mmap>>,
     /// 最近一次 mmap 读取的毫秒时间戳（活动标记，供诊断/统计）。
     last_used: std::sync::atomic::AtomicU64,
     /// 最近一次周期强制释放的毫秒时间戳。
@@ -512,25 +517,36 @@ impl BangumiArchiveStore {
             .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
         Ok(Self {
             conn: Mutex::new(conn),
-            mm,
+            subjects_path: subjects_path.to_path_buf(),
+            mm: Mutex::new(mm),
             last_used: std::sync::atomic::AtomicU64::new(now_ms()),
             last_release: std::sync::atomic::AtomicU64::new(now_ms()),
             idle_release_ms: idle_release_secs.saturating_mul(1000),
         })
     }
 
-    /// 释放 mmap 热页（MADV_DONTNEED，仅 unix；下次访问按需重读）。
+    /// 释放 mmap 热页：unix 下 MADV_DONTNEED（映射保留，页回收）；Windows 下
+    /// drop 槽位中的 Mmap（unmap 立即回收 working set——madvise 在 Windows 上
+    /// 无对应语义，旧实现为空操作，密集查询后 RSS 单调涨到 mmap 全量）。
+    /// 下次查询按需重映射（read_line_at_offset）。
     fn release_hot_pages(&self) {
         #[cfg(unix)]
-        if let Some(mm) = &self.mm {
-            unsafe {
-                libc::madvise(
-                    mm.as_ptr() as *mut libc::c_void,
-                    mm.len(),
-                    libc::MADV_DONTNEED,
-                );
+        {
+            let slot = self.mm.lock().unwrap();
+            if let Some(mm) = slot.as_ref() {
+                unsafe {
+                    libc::madvise(
+                        mm.as_ptr() as *mut libc::c_void,
+                        mm.len(),
+                        libc::MADV_DONTNEED,
+                    );
+                }
+                tracing::debug!("bangumi archive: released mmap hot pages");
             }
-            tracing::debug!("bangumi archive: released mmap hot pages");
+        }
+        #[cfg(not(unix))]
+        if self.mm.lock().unwrap().take().is_some() {
+            tracing::debug!("bangumi archive: dropped mmap (unmap releases working set)");
         }
     }
 
@@ -668,7 +684,9 @@ impl BangumiArchiveStore {
         Ok(())
     }
 
-    /// 全量重建索引（单事务，10000 行/批；先清空再导入 → FTS5 重建）。
+    /// 全量重建索引：导入保持单事务（10000 行/批）；FTS 重建拆出导入大事务，
+    /// 对齐 ehentai build_fts 的分批模式（50_000 行/批、keyset 分页、
+    /// 每批独立事务），避免 40-60 万行一次性 collect（~200-500MB）。
     /// 返回 (subjects, relations, persons, subject_persons) 行数。
     pub fn build(
         &self,
@@ -695,27 +713,22 @@ impl BangumiArchiveStore {
             let rel = Self::import_relations(&c, relations_path)?;
             let persons = Self::import_persons(&c, persons_path)?;
             let sp = Self::import_subject_persons(&c, subject_persons_path)?;
-            // FTS 重建：分析链预分词后写入（替代旧 trigram 直通 INSERT SELECT）
-            let rows = Self::subject_fts_rows(&c)?;
-            Self::insert_fts_rows(&c, &rows)?;
-            c.execute(
-                "INSERT OR REPLACE INTO archive_update VALUES ('fts_version', ?1)",
-                [FTS_SCHEMA_VERSION],
-            )
-            .map_err(|e| ProviderError::message(format!("archive fts version: {e}")))?;
             Ok((subj, rel, persons, sp))
         })();
-        match result {
+        let counts = match result {
             Ok(v) => {
                 tx("COMMIT")?;
                 // DELETE 模式下 rollback journal 随 COMMIT 自动清理，无需 checkpoint
-                Ok(v)
+                v
             }
             Err(e) => {
                 let _ = c.execute_batch("ROLLBACK");
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+        // FTS 重建（分批事务，独立于导入大事务；成功后落 fts_version）
+        Self::rebuild_fts(&c)?;
+        Ok(counts)
     }
 
     fn import_subjects(c: &rusqlite::Connection, path: &Path) -> Result<usize, ProviderError> {
@@ -769,16 +782,22 @@ impl BangumiArchiveStore {
         Ok(())
     }
 
-    /// 读出 subjects_idx 的原始标题并跑分析链，得到 FTS 行
+    /// 读出 subjects_idx 一页的原始标题并跑分析链（keyset 分页：id > after_id
+    /// ORDER BY id LIMIT n），得到 FTS 行
     /// (id, name_tokens, name_cn_tokens, aliases_tokens)。
-    fn subject_fts_rows(
+    fn subject_fts_rows_page(
         c: &rusqlite::Connection,
+        after_id: i64,
+        limit: i64,
     ) -> Result<Vec<(i64, String, Option<String>, Option<String>)>, ProviderError> {
         let mut stmt = c
-            .prepare("SELECT id, name, name_cn, aliases FROM subjects_idx")
+            .prepare(
+                "SELECT id, name, name_cn, aliases FROM subjects_idx \
+                 WHERE id > ?1 ORDER BY id LIMIT ?2",
+            )
             .map_err(|e| ProviderError::message(format!("archive fts rows: {e}")))?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(rusqlite::params![after_id, limit], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -818,37 +837,63 @@ impl BangumiArchiveStore {
         Ok(())
     }
 
-    /// 独立事务内重建 FTS（init_schema 迁移路径；build 在自己的大事务内直调
-    /// subject_fts_rows + insert_fts_rows）。成功后落 fts_version 标记。
+    /// 重建 FTS（init_schema 迁移路径与 build 共用）：
+    /// delete-all 清空 → 清除 fts_version 标记（中途失败下次启动自愈重建）→
+    /// keyset 分页分批事务写入（分析产物仅本批驻留内存）→ 成功后落 fts_version。
     fn rebuild_fts(c: &rusqlite::Connection) -> Result<(), ProviderError> {
-        let run = |c: &rusqlite::Connection| -> Result<(), ProviderError> {
-            // delete-all 特殊命令清空 FTS 索引。不能用 `DELETE FROM subjects_fts`：
-            // FTS5 外部内容表经"drop 后以同名重建"后，普通 DELETE 的全表扫描路径
-            // 会报 database disk image is malformed（SQLite 缺陷，3.45/3.50 均复现），
-            // delete-all 走索引层清空，无此问题。
-            c.execute_batch("INSERT INTO subjects_fts(subjects_fts) VALUES('delete-all')")
-                .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
-            let rows = Self::subject_fts_rows(c)?;
-            Self::insert_fts_rows(c, &rows)
-        };
-        c.execute_batch("BEGIN")
-            .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
-        match run(c) {
-            Ok(()) => {
-                c.execute_batch("COMMIT")
+        // delete-all 特殊命令清空 FTS 索引。不能用 `DELETE FROM subjects_fts`：
+        // FTS5 外部内容表经"drop 后以同名重建"后，普通 DELETE 的全表扫描路径
+        // 会报 database disk image is malformed（SQLite 缺陷，3.45/3.50 均复现），
+        // delete-all 走索引层清空，无此问题。
+        c.execute_batch(
+            "INSERT INTO subjects_fts(subjects_fts) VALUES('delete-all');
+             DELETE FROM archive_update WHERE key='fts_version'",
+        )
+        .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+        // 分批写入：50_000 行/批、每批独立事务（对齐 ehentai build_fts）
+        const BATCH: i64 = 50_000;
+        let mut last_id: i64 = -1;
+        loop {
+            let batch_result = (|| -> Result<i64, ProviderError> {
+                c.execute_batch("BEGIN")
                     .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
-                c.execute(
-                    "INSERT OR REPLACE INTO archive_update VALUES ('fts_version', ?1)",
-                    [FTS_SCHEMA_VERSION],
+                let result = (|| -> Result<i64, ProviderError> {
+                    let rows = Self::subject_fts_rows_page(c, last_id, BATCH)?;
+                    Self::insert_fts_rows(c, &rows)?;
+                    Ok(rows.len() as i64)
+                })();
+                match result {
+                    Ok(n) => {
+                        c.execute_batch("COMMIT").map_err(|e| {
+                            ProviderError::message(format!("archive fts rebuild: {e}"))
+                        })?;
+                        Ok(n)
+                    }
+                    Err(e) => {
+                        let _ = c.execute_batch("ROLLBACK");
+                        Err(e)
+                    }
+                }
+            })();
+            let n = batch_result?;
+            if n == 0 {
+                break;
+            }
+            // keyset 游标：FTS rowid 即 subject id，取本批最大 rowid 续扫
+            last_id = c
+                .query_row(
+                    "SELECT COALESCE(MAX(rowid), -1) FROM subjects_fts",
+                    [],
+                    |r| r.get::<_, i64>(0),
                 )
                 .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = c.execute_batch("ROLLBACK");
-                Err(e)
-            }
         }
+        c.execute(
+            "INSERT OR REPLACE INTO archive_update VALUES ('fts_version', ?1)",
+            [FTS_SCHEMA_VERSION],
+        )
+        .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+        Ok(())
     }
 
     fn import_relations(c: &rusqlite::Connection, path: &Path) -> Result<usize, ProviderError> {
@@ -1042,18 +1087,28 @@ impl BangumiArchiveStore {
     }
 
     fn read_line_at_offset(&self, offset: u64) -> Option<serde_json::Value> {
-        let mm = self.mm.as_ref()?;
-        let start = offset as usize;
-        if start >= mm.len() {
-            return None;
-        }
-        let end = mm[start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map(|i| start + i)
-            .unwrap_or(mm.len());
-        let line = std::str::from_utf8(&mm[start..end]).ok()?;
-        serde_json::from_str(line).ok()
+        // 锁内只定位并拷贝目标行的几 KB 字节，锁外解析（不持有锁跨越解析）；
+        // 槽位为空（release_hot_pages 已释放/映射失败）时按需重映射。
+        let line = {
+            let mut slot = self.mm.lock().unwrap();
+            if slot.is_none() {
+                *slot = std::fs::File::open(&self.subjects_path)
+                    .ok()
+                    .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
+            }
+            let mm = slot.as_ref()?;
+            let start = offset as usize;
+            if start >= mm.len() {
+                return None;
+            }
+            let end = mm[start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|i| start + i)
+                .unwrap_or(mm.len());
+            std::str::from_utf8(&mm[start..end]).ok()?.to_string()
+        };
+        serde_json::from_str(&line).ok()
     }
 
     fn offsets_by_ids(&self, ids: &[u64]) -> Vec<(u64, u64)> {
@@ -1083,7 +1138,7 @@ impl BangumiArchiveStore {
     pub fn search(&self, query: &str, limit: usize) -> Vec<serde_json::Value> {
         self.touch();
         let query = query.trim();
-        if self.mm.is_none() || query.is_empty() {
+        if self.mm.lock().unwrap().is_none() || query.is_empty() {
             return Vec::new();
         }
         let c = self.conn.lock().unwrap();
@@ -1376,7 +1431,9 @@ impl BangumiArchiveService {
                 }
             });
         }
-        tokio::spawn(async move {
+        // 打开 + init_schema（可能触发 FTS 本地重建，同步重 IO）跑在阻塞线程上，
+        // 不占用 tokio worker
+        crate::util::heavy_pool::spawn_heavy(move || {
             let _ = std::fs::create_dir_all(&dir);
             let db_path = dir.join("archive_index.db");
             let subjects_path = dir.join("subject.jsonlines");
@@ -1413,6 +1470,9 @@ impl BangumiArchiveService {
             let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
             let retry_delay = std::time::Duration::from_secs(15 * 60);
             loop {
+                // 离线源更新全局互斥：与其他离线源（ehentai/mangabaka/bookwalker）
+                // 强制串行，避免并发构建叠加内存峰值
+                let _permit = crate::util::download::offline_update_permit().await;
                 let ok = Self::wait_update(&svc).await;
                 tokio::time::sleep(if ok { interval } else { retry_delay }).await;
             }
@@ -1458,8 +1518,10 @@ impl BangumiArchiveService {
                 *guard = Some(sender.clone());
             }
             let this = self.clone();
-            tokio::spawn(async move {
-                let result = this.do_update(&sender).await;
+            // 更新主体是同步重 IO（zip 解压 + 全量建库），整段跑在阻塞线程上
+            //（block_on），不占用 tokio worker
+            crate::util::heavy_pool::spawn_heavy(move || {
+                let result = tokio::runtime::Handle::current().block_on(this.do_update(&sender));
                 // 失败必须发射 ErrorEvent 终态，否则路由层 watch 流等不到 Finished/Error 会一直挂起
                 if let Err(e) = &result {
                     tracing::error!("bangumi archive update failed: {e}");
@@ -1691,16 +1753,17 @@ async fn download_zip_with_retry(
 
 /// 覆盖写归档解压目标文件（短重试）：Windows 下目标被旧 store 的 mmap 占用时
 /// `File::create` 报 ERROR_USER_MAPPED_FILE（os error 1224）；最多 5 次 × 递增 200ms
-/// 等待在途搜索释放 Arc。同步实现：解压循环内不引入 await（`entry` 借用 `archive`，
-/// 跨 await 会导致 future 非 Send）。仅在 create 阶段重试（entry 流未被消费，重试不产生坏数据）。
-fn create_extracted_file(target: &Path, name: &str) -> Result<std::fs::File, ProviderError> {
+/// 等待在途搜索释放 Arc。await 重试安全：do_update 整体跑在 spawn_blocking 线程
+/// （block_on）上，future 无需 Send；`entry` 借用 `archive` 跨 await 仅影响 auto trait，
+/// 不影响正确性。仅在 create 阶段重试（entry 流未被消费，重试不产生坏数据）。
+async fn create_extracted_file(target: &Path, name: &str) -> Result<std::fs::File, ProviderError> {
     let mut last_err = None;
     for attempt in 0..5 {
         match std::fs::File::create(target) {
             Ok(file) => return Ok(file),
             Err(e) => {
                 last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
+                tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
             }
         }
     }
@@ -1716,7 +1779,7 @@ fn create_extracted_file(target: &Path, name: &str) -> Result<std::fs::File, Pro
 /// - meta（last_updated）在 tmp 上写入，随 rename 一起生效；
 /// - Windows：正式 db 可能被在途搜索短暂持有的旧 store 连接占用 → rename 短重试。
 /// 返回 (新 store, 各表行数)。
-fn build_db_then_swap(
+async fn build_db_then_swap(
     db_path: &Path,
     subjects_path: &Path,
     relations_path: &Path,
@@ -1751,7 +1814,7 @@ fn build_db_then_swap(
             renamed = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     if !renamed {
         let _ = std::fs::remove_file(&tmp_path);
@@ -1860,7 +1923,8 @@ async fn download_and_rebuild(
         if let Some(target) = target {
             // Windows：旧 store 仍被在途搜索短暂映射时 File::create 报 os error 1224；
             // 短重试（最多 5 次，累计约 2s）等待 Arc 释放。entry 流不消费，重试安全。
-            let mut out = std::io::BufWriter::new(create_extracted_file(target, name.as_str())?);
+            let mut out =
+                std::io::BufWriter::new(create_extracted_file(target, name.as_str()).await?);
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| ProviderError::message(format!("archive extract {name}: {e}")))?;
             match name.as_str() {
@@ -1894,7 +1958,8 @@ async fn download_and_rebuild(
         subject_persons_path,
         idle_release_secs,
         &meta.updated_at.clone().unwrap_or_default(),
-    )?;
+    )
+    .await?;
     tracing::info!(
         "bangumi archive rebuilt: {subj} subjects, {rel} relations, {persons} persons, {sp} subject-persons"
     );
@@ -2413,9 +2478,23 @@ mod tests {
         );
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
-        let (store, (subj, rel, _, _)) =
-            build_db_then_swap(&db, &subjects, &relations, &persons, &sp, 0, "2026-10-01")
-                .expect("build+swap should replace corrupt db");
+        // build_db_then_swap 为 async（rename 重试走 tokio sleep）：测试内建
+        // current_thread runtime 驱动
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store, (subj, rel, _, _)) = rt
+            .block_on(build_db_then_swap(
+                &db,
+                &subjects,
+                &relations,
+                &persons,
+                &sp,
+                0,
+                "2026-10-01",
+            ))
+            .expect("build+swap should replace corrupt db");
         assert_eq!(subj, 1);
         assert_eq!(rel, 1);
         // .tmp 不残留；正式库已被替换为可用新库（坏文件天然被覆盖）

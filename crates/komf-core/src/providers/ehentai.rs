@@ -529,6 +529,12 @@ impl TagTranslator {
         if tagsdict.is_empty() {
             None
         } else {
+            // 构建完成后显式收缩：反序列化阶段 HashMap 会预留大量冗余容量
+            // （db.text.json 10 万+ tag），shrink_to_fit 后仅保留实际条目。
+            for map in tagsdict.values_mut() {
+                map.shrink_to_fit();
+            }
+            tagsdict.shrink_to_fit();
             Some(Self { tagsdict })
         }
     }

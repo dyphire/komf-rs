@@ -1229,12 +1229,14 @@ fn is_fragment_keep(ch: char) -> bool {
 // Provider —— 对应 `MangaBakaMetadataProvider.kt`
 // ---------------------------------------------------------------------------
 // 简单 TTL 缓存 —— 对应 Kotlin cache4k expireAfterWrite(30.minutes)。
-// Kotlin 未配置 maximumSize（cache4k 默认无条目上限），此处保持一致。
+// Kotlin 未配置 maximumSize；Rust 侧加软上限 capacity（对齐 ehentai.rs 的做法），
+// 避免长时间运行/扫库把缓存无限撑大，超限时淘汰最旧条目（近似 LRU）。
 // ---------------------------------------------------------------------------
 
 pub struct TtlCache<K, V> {
     inner: tokio::sync::Mutex<HashMap<K, (V, Instant)>>,
     ttl: Duration,
+    capacity: usize,
 }
 
 impl<K, V> TtlCache<K, V>
@@ -1246,6 +1248,7 @@ where
         Self {
             inner: tokio::sync::Mutex::new(HashMap::new()),
             ttl,
+            capacity: 10_000,
         }
     }
 
@@ -1265,13 +1268,40 @@ where
         }
         let value = load().await?;
         let mut guard = self.inner.lock().await;
-        guard.insert(key, (value.clone(), Instant::now()));
+        self.insert_limited(&mut guard, key, value.clone());
         Ok(value)
     }
 
     async fn put(&self, key: K, value: V) {
         let mut guard = self.inner.lock().await;
+        self.insert_limited(&mut guard, key, value);
+    }
+
+    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
+    /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按插入时间排序取
+    /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
+    fn insert_limited(&self, guard: &mut HashMap<K, (V, Instant)>, key: K, value: V) {
+        if guard.len() >= self.capacity {
+            let now = Instant::now();
+            guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
+        }
         guard.insert(key, (value, Instant::now()));
+        if guard.len() > self.capacity {
+            let excess = guard.len() - self.capacity;
+            let oldest: Vec<K> = {
+                let mut entries: Vec<(&K, &Instant)> =
+                    guard.iter().map(|(k, (_, c))| (k, c)).collect();
+                entries.sort_by_key(|(_, c)| **c);
+                entries
+                    .into_iter()
+                    .take(excess)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            };
+            for k in oldest {
+                guard.remove(&k);
+            }
+        }
     }
 }
 
@@ -1284,7 +1314,8 @@ pub struct MangaBakaMetadataProvider {
     pub cover_fetch_client: Option<reqwest::Client>,
     pub type_includes: Vec<MangaBakaTypeDto>,
     pub type_excludes: Vec<MangaBakaTypeDto>,
-    /// 对应 Kotlin cache4k expireAfterWrite(30.minutes)（无 maximumSize）
+    /// 对应 Kotlin cache4k expireAfterWrite(30.minutes)；Rust 侧加 10_000 条软上限
+    /// （Kotlin 未配置 maximumSize，此处为内存加固，超限时淘汰最旧）。
     pub cache: TtlCache<i64, MangaBakaSeriesDto>,
     /// 书籍封面下载客户端（`bookMetadata.thumbnail` 开关）。
     pub book_cover_fetch_client: Option<reqwest::Client>,
@@ -1292,7 +1323,7 @@ pub struct MangaBakaMetadataProvider {
     pub cover_languages: Vec<String>,
     /// series_metadata.books 开关（决定是否拉取/组装书籍列表）。
     pub books_enabled: bool,
-    /// 多语言卷封面缓存（30 分钟，与 series cache 同策略）。
+    /// 多语言卷封面缓存（30 分钟，与 series cache 同策略，含 10_000 条容量上限）。
     pub images_cache: TtlCache<i64, Vec<MangaBakaSeriesImageDto>>,
 }
 
@@ -1643,7 +1674,19 @@ impl MangaBakaDataSource {
     ) -> Result<Vec<MangaBakaSeriesDto>, ProviderError> {
         match self {
             MangaBakaDataSource::Api(client) => client.search(title, types, types_not).await,
-            MangaBakaDataSource::Db { repo, .. } => repo.search(title, types, types_not),
+            // 首次搜索可能触发惰性 FTS 重建（DROP/分批全量填充），均为同步重 IO；
+            // 整个 Db 查询移入阻塞线程，避免拖住 async 执行线程。
+            MangaBakaDataSource::Db { repo, .. } => {
+                let repo = repo.clone();
+                let title = title.to_string();
+                let types = types.to_vec();
+                let types_not = types_not.to_vec();
+                crate::util::heavy_pool::spawn_heavy(move || {
+                    repo.search(&title, &types, &types_not)
+                })
+                .await
+                .map_err(|e| ProviderError::message(format!("MangaBaka db search task: {e}")))?
+            }
         }
     }
 
@@ -1675,6 +1718,7 @@ impl MangaBakaDataSource {
 // ---------------------------------------------------------------------------
 
 /// 本地 SQLite 只读仓储。连接按查询打开（保证 `Sync`，行为与 Kotlin 每次 transaction 等价）。
+#[derive(Clone)]
 pub struct MangaBakaDbRepository {
     pub database_file: PathBuf,
 }
@@ -1710,50 +1754,87 @@ fn mark_migrated(db_path: &Path) {
 }
 
 /// 从 series.titles JSON 数组展开标题，经分析链预分词后写入 titles_fts
-/// （每标题一行；独立事务提交，原子且快）。
+/// （每标题一行）。全量展开行数十万~上百万，按 s.rowid 分批（keyset 分页，
+/// series.id 为 INTEGER PRIMARY KEY → rowid=id），每批独立事务提交：
+/// 分析产物仅本批驻留内存（对齐 ehentai_archive::build_fts）。
 fn populate_titles_fts(conn: &rusqlite::Connection) -> Result<(), ProviderError> {
-    conn.execute_batch("BEGIN")
-        .map_err(|e| ProviderError::message(format!("MangaBaka fts begin: {e}")))?;
-    let result = (|| -> Result<(), ProviderError> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT s.id, json_each.value ->> '$.title', s.type
-                 FROM series s, json_each(s.titles)
-                 WHERE s.state = 'active'",
-            )
-            .map_err(|e| ProviderError::message(format!("MangaBaka fts populate: {e}")))?;
-        let mapped = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| ProviderError::message(format!("MangaBaka fts populate: {e}")))?;
-        let rows: Vec<(i64, String, String)> = mapped.filter_map(|r| r.ok()).collect();
-        drop(stmt);
-        let mut ins = conn
-            .prepare("INSERT INTO titles_fts(id, title, type) VALUES (?1,?2,?3)")
-            .map_err(|e| ProviderError::message(format!("MangaBaka fts populate: {e}")))?;
-        for (id, title, ty) in &rows {
-            let t = crate::util::index_analyze_terms(title).join(" ");
-            ins.execute(rusqlite::params![id, t, ty])
-                .map_err(|e| ProviderError::message(format!("MangaBaka fts populate: {e}")))?;
+    let max_rowid: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM series WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| ProviderError::message(format!("MangaBaka fts count: {e}")))?;
+    const BATCH: i64 = 50_000;
+    let mut last_rowid: i64 = 0;
+    let mut done: i64 = 0;
+    while last_rowid < max_rowid {
+        let batch_result = (|| -> Result<(i64, i64), ProviderError> {
+            conn.execute_batch("BEGIN")
+                .map_err(|e| ProviderError::message(format!("MangaBaka fts begin: {e}")))?;
+            let result = (|| -> Result<(i64, i64), ProviderError> {
+                let rows: Vec<(i64, i64, String, String)> = {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT s.rowid, s.id, json_each.value ->> '$.title', s.type
+                             FROM series s, json_each(s.titles)
+                             WHERE s.state = 'active' AND s.rowid > ?1
+                             ORDER BY s.rowid LIMIT ?2",
+                        )
+                        .map_err(|e| {
+                            ProviderError::message(format!("MangaBaka fts populate: {e}"))
+                        })?;
+                    let mapped = stmt
+                        .query_map(rusqlite::params![last_rowid, BATCH], |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,
+                            ))
+                        })
+                        .map_err(|e| {
+                            ProviderError::message(format!("MangaBaka fts populate: {e}"))
+                        })?;
+                    mapped.filter_map(|r| r.ok()).collect()
+                };
+                let batch_max = rows.iter().map(|r| r.0).max().unwrap_or(last_rowid);
+                let mut ins = conn
+                    .prepare("INSERT INTO titles_fts(id, title, type) VALUES (?1,?2,?3)")
+                    .map_err(|e| ProviderError::message(format!("MangaBaka fts populate: {e}")))?;
+                for (_, id, title, ty) in &rows {
+                    let t = crate::util::index_analyze_terms(title).join(" ");
+                    ins.execute(rusqlite::params![id, t, ty]).map_err(|e| {
+                        ProviderError::message(format!("MangaBaka fts populate: {e}"))
+                    })?;
+                }
+                Ok((rows.len() as i64, batch_max))
+            })();
+            match result {
+                Ok(r) => {
+                    conn.execute_batch("COMMIT").map_err(|e| {
+                        ProviderError::message(format!("MangaBaka fts commit: {e}"))
+                    })?;
+                    Ok(r)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })();
+        let (n, batch_max) = batch_result?;
+        if n == 0 {
+            // 防御：空批（理论不发生）直接退出，防止死循环
+            break;
         }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| ProviderError::message(format!("MangaBaka fts commit: {e}")))?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
+        done += n;
+        last_rowid = batch_max;
+        if done % (BATCH * 4) == 0 {
+            tracing::info!("MangaBaka fts populate progress {done} rows");
         }
     }
+    Ok(())
 }
 
 impl MangaBakaDbRepository {
@@ -2590,7 +2671,13 @@ impl MangaBakaDbDownloader {
             let interval = std::time::Duration::from_secs(interval_hours * 3600);
             let retry = std::time::Duration::from_secs(15 * 60);
             loop {
-                let ok = Self::wait_download(&this).await;
+                // 全局互斥：与 bangumi/ehentai/bookwalker 后台更新串行执行
+                // （下载/解压/建索引均为重 IO，避免多源并发内存峰值叠加）。
+                // 作用域限于本次更新，sleep 等待期间不持有（避免长时间阻塞其他源）。
+                let ok = {
+                    let _permit = crate::util::download::offline_update_permit().await;
+                    Self::wait_download(&this).await
+                };
                 tokio::time::sleep(if ok { interval } else { retry }).await;
             }
         });
@@ -2698,6 +2785,7 @@ impl MangaBakaDbDownloader {
         .await?;
 
         // 3. 解压（tar + gzip，取首个条目）——对应 Kotlin `extractDatabaseFile`
+        // （同步重 IO，移入阻塞线程）。
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -2707,31 +2795,39 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let input = std::fs::File::open(&self.database_archive)
-                .map_err(|e| format!("FileSystemException: {e}"))?;
-            let gz = flate2::read::GzDecoder::new(input);
-            let mut archive = tar::Archive::new(gz);
-            let mut entries = archive
-                .entries()
-                .map_err(|e| format!("TarException: {e}"))?;
-            let first = entries
-                .next()
-                .ok_or_else(|| "TarException: empty archive".to_string())?
-                .map_err(|e| format!("TarException: {e}"))?;
-            let output = std::fs::File::create(&tmp_file)
-                .map_err(|e| format!("FileSystemException: {e}"))?;
-            let mut output = std::io::BufWriter::new(output);
-            use std::io::Read;
-            use std::io::Write;
-            std::io::copy(&mut first.take(u64::MAX), &mut output)
-                .map_err(|e| format!("FileSystemException: {e}"))?;
-            output
-                .flush()
-                .map_err(|e| format!("FileSystemException: {e}"))?;
+            let archive = self.database_archive.clone();
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || -> Result<(), String> {
+                let input = std::fs::File::open(&archive)
+                    .map_err(|e| format!("FileSystemException: {e}"))?;
+                let gz = flate2::read::GzDecoder::new(input);
+                let mut archive = tar::Archive::new(gz);
+                let mut entries = archive
+                    .entries()
+                    .map_err(|e| format!("TarException: {e}"))?;
+                let first = entries
+                    .next()
+                    .ok_or_else(|| "TarException: empty archive".to_string())?
+                    .map_err(|e| format!("TarException: {e}"))?;
+                let output =
+                    std::fs::File::create(&tmp).map_err(|e| format!("FileSystemException: {e}"))?;
+                let mut output = std::io::BufWriter::new(output);
+                use std::io::Read;
+                use std::io::Write;
+                std::io::copy(&mut first.take(u64::MAX), &mut output)
+                    .map_err(|e| format!("FileSystemException: {e}"))?;
+                output
+                    .flush()
+                    .map_err(|e| format!("FileSystemException: {e}"))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("FileSystemException: extract task failed: {e}"))??;
         }
 
         // 4. 重建自建表（对应上游 `prepareTables`）：数据表 tags/series_tags 每次重建，
         //    komga_series 关联数据保留；顺带清理旧版 series_fts（GROUP_CONCAT 结构）。
+        //    （DDL + VACUUM 为同步重 IO，移入阻塞线程。）
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -2741,47 +2837,53 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let conn = rusqlite::Connection::open(&tmp_file)
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || -> Result<(), String> {
+                let conn = rusqlite::Connection::open(&tmp)
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                conn.execute_batch(
+                    "DROP TABLE IF EXISTS titles_fts;
+                     DROP TABLE IF EXISTS series_fts;
+                     DROP TABLE IF EXISTS tags;
+                     DROP TABLE IF EXISTS series_tags;",
+                )
                 .map_err(|e| format!("SQLiteException: {e}"))?;
-            conn.execute_batch(
-                "DROP TABLE IF EXISTS titles_fts;
-                 DROP TABLE IF EXISTS series_fts;
-                 DROP TABLE IF EXISTS tags;
-                 DROP TABLE IF EXISTS series_tags;",
-            )
-            .map_err(|e| format!("SQLiteException: {e}"))?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS tags (
-                    id INTEGER PRIMARY KEY,
-                    parent_id INTEGER,
-                    merged_with INTEGER,
-                    name TEXT NOT NULL,
-                    name_path TEXT NOT NULL DEFAULT '',
-                    description TEXT,
-                    is_spoiler INTEGER NOT NULL DEFAULT 0,
-                    is_genre INTEGER NOT NULL DEFAULT 0,
-                    content_rating TEXT NOT NULL,
-                    series_count INTEGER NOT NULL DEFAULT 0,
-                    level INTEGER NOT NULL DEFAULT 0
-                 );
-                 CREATE TABLE IF NOT EXISTS series_tags (
-                    series_id INTEGER NOT NULL,
-                    tag_id INTEGER NOT NULL,
-                    is_spoiler INTEGER NOT NULL DEFAULT 0,
-                    is_explicit INTEGER NOT NULL DEFAULT 0,
-                    implied_by_tag_ids TEXT NOT NULL DEFAULT '[]',
-                    weight TEXT NOT NULL DEFAULT 'unweighted',
-                    PRIMARY KEY (tag_id, series_id)
-                 );
-                 CREATE TABLE IF NOT EXISTS komga_series (
-                    komga_id TEXT NOT NULL,
-                    mangabaka_id INTEGER NOT NULL,
-                    PRIMARY KEY (komga_id, mangabaka_id)
-                 );",
-            )
-            .map_err(|e| format!("SQLiteException: {e}"))?;
-            conn.execute_batch("VACUUM;")
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS tags (
+                        id INTEGER PRIMARY KEY,
+                        parent_id INTEGER,
+                        merged_with INTEGER,
+                        name TEXT NOT NULL,
+                        name_path TEXT NOT NULL DEFAULT '',
+                        description TEXT,
+                        is_spoiler INTEGER NOT NULL DEFAULT 0,
+                        is_genre INTEGER NOT NULL DEFAULT 0,
+                        content_rating TEXT NOT NULL,
+                        series_count INTEGER NOT NULL DEFAULT 0,
+                        level INTEGER NOT NULL DEFAULT 0
+                     );
+                     CREATE TABLE IF NOT EXISTS series_tags (
+                        series_id INTEGER NOT NULL,
+                        tag_id INTEGER NOT NULL,
+                        is_spoiler INTEGER NOT NULL DEFAULT 0,
+                        is_explicit INTEGER NOT NULL DEFAULT 0,
+                        implied_by_tag_ids TEXT NOT NULL DEFAULT '[]',
+                        weight TEXT NOT NULL DEFAULT 'unweighted',
+                        PRIMARY KEY (tag_id, series_id)
+                     );
+                     CREATE TABLE IF NOT EXISTS komga_series (
+                        komga_id TEXT NOT NULL,
+                        mangabaka_id INTEGER NOT NULL,
+                        PRIMARY KEY (komga_id, mangabaka_id)
+                     );",
+                )
                 .map_err(|e| format!("SQLiteException: {e}"))?;
+                conn.execute_batch("VACUUM;")
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("SQLiteException: prepare task failed: {e}"))??;
         }
 
         // 5. 导入标签目录（对应上游 `importTags`：GET /v1/tags 全量拉取）。
@@ -2804,31 +2906,38 @@ impl MangaBakaDbDownloader {
             .await?;
             let response: MangaBakaTagsResponse =
                 serde_json::from_str(&text).map_err(|e| format!("SerializationException: {e}"))?;
-            let conn = rusqlite::Connection::open(&tmp_file)
-                .map_err(|e| format!("SQLiteException: {e}"))?;
-            for tag in response.data {
-                conn.execute(
-                    "INSERT OR REPLACE INTO tags
-                     (id, parent_id, merged_with, name, name_path, description, is_spoiler, is_genre, content_rating, series_count, level)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    rusqlite::params![
-                        tag.id,
-                        tag.parent_id,
-                        tag.merged_with,
-                        tag.name,
-                        tag.name_path,
-                        tag.description,
-                        tag.is_spoiler.map(|v| if v { 1 } else { 0 }),
-                        if tag.is_genre { 1 } else { 0 },
-                        tag.content_rating
-                            .map(|v| v.as_db_str())
-                            .unwrap_or("safe"),
-                        tag.series_count,
-                        tag.level,
-                    ],
-                )
-                .map_err(|e| format!("SQLiteException: {e}"))?;
-            }
+            // 标签入库为同步写（条目数千，逐条 INSERT），移入阻塞线程。
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || -> Result<(), String> {
+                let conn = rusqlite::Connection::open(&tmp)
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                for tag in response.data {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO tags
+                         (id, parent_id, merged_with, name, name_path, description, is_spoiler, is_genre, content_rating, series_count, level)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        rusqlite::params![
+                            tag.id,
+                            tag.parent_id,
+                            tag.merged_with,
+                            tag.name,
+                            tag.name_path,
+                            tag.description,
+                            tag.is_spoiler.map(|v| if v { 1 } else { 0 }),
+                            if tag.is_genre { 1 } else { 0 },
+                            tag.content_rating
+                                .map(|v| v.as_db_str())
+                                .unwrap_or("safe"),
+                            tag.series_count,
+                            tag.level,
+                        ],
+                    )
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("SQLiteException: import tags task failed: {e}"))??;
         }
 
         // 6. 导入系列-标签关联（对应上游 `importData` 的 series_tags INSERT）。
@@ -2841,25 +2950,32 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            // 同上：必须写 tmp_file，否则 rename 后关联丢失。
-            let conn = rusqlite::Connection::open(&tmp_file)
+            // 同上：必须写 tmp_file，否则 rename 后关联丢失。（全表 INSERT 为同步重 IO）
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || -> Result<(), String> {
+                let conn = rusqlite::Connection::open(&tmp)
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                conn.execute_batch(
+                    "INSERT INTO series_tags
+                     SELECT s.id,
+                            json_each.value ->> '$.id',
+                            json_each.value ->> '$.is_spoiler',
+                            json_each.value ->> '$.is_explicit',
+                            json_each.value ->> '$.implied_by_tag_ids',
+                            UPPER(json_each.value ->> '$.weight')
+                     FROM series s, json_each(s.tags_v2)
+                     WHERE s.state = 'active';",
+                )
                 .map_err(|e| format!("SQLiteException: {e}"))?;
-            conn.execute_batch(
-                "INSERT INTO series_tags
-                 SELECT s.id,
-                        json_each.value ->> '$.id',
-                        json_each.value ->> '$.is_spoiler',
-                        json_each.value ->> '$.is_explicit',
-                        json_each.value ->> '$.implied_by_tag_ids',
-                        UPPER(json_each.value ->> '$.weight')
-                 FROM series s, json_each(s.tags_v2)
-                 WHERE s.state = 'active';",
-            )
-            .map_err(|e| format!("SQLiteException: {e}"))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("SQLiteException: import series tags task failed: {e}"))??;
         }
 
         // 7. FTS5 索引（对应上游 `createSearchIndex`：titles_fts 每标题一行，标题级 rank）。
         // unicode61 + 分析链预分词（t2s/全半角/小写/折叠 + CJK bigram/unigram）。
+        // （分批全量填充为同步重 IO，移入阻塞线程。）
         emit(
             sender,
             DownloadProgress::ProgressEvent {
@@ -2869,16 +2985,22 @@ impl MangaBakaDbDownloader {
             },
         );
         {
-            let conn = rusqlite::Connection::open(&tmp_file)
+            let tmp = tmp_file.clone();
+            crate::util::heavy_pool::spawn_heavy(move || -> Result<(), String> {
+                let conn = rusqlite::Connection::open(&tmp)
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                conn.execute_batch(
+                    "CREATE VIRTUAL TABLE titles_fts USING fts5
+                     (id, title, type, tokenize = 'unicode61');",
+                )
                 .map_err(|e| format!("SQLiteException: {e}"))?;
-            conn.execute_batch(
-                "CREATE VIRTUAL TABLE titles_fts USING fts5
-                 (id, title, type, tokenize = 'unicode61');",
-            )
-            .map_err(|e| format!("SQLiteException: {e}"))?;
-            populate_titles_fts(&conn).map_err(|e| format!("SQLiteException: {e}"))?;
-            conn.pragma_update(None, "user_version", FTS_SCHEMA_VERSION)
-                .map_err(|e| format!("SQLiteException: {e}"))?;
+                populate_titles_fts(&conn).map_err(|e| format!("SQLiteException: {e}"))?;
+                conn.pragma_update(None, "user_version", FTS_SCHEMA_VERSION)
+                    .map_err(|e| format!("SQLiteException: {e}"))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("SQLiteException: fts task failed: {e}"))??;
         }
 
         // 5. 原子替换 + 写元数据 + 清理压缩包

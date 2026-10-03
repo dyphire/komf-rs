@@ -4,6 +4,7 @@ pub mod analyzer;
 pub mod book_name_parser;
 pub mod chinese;
 pub mod download;
+pub mod heavy_pool;
 pub mod name_similarity;
 pub mod natural_comparator;
 pub mod string_utils;
