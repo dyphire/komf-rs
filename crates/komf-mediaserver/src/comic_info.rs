@@ -553,9 +553,13 @@ pub enum ComicInfoError {
     Zip(#[from] zip::result::ZipError),
 }
 
+/// ComicInfo 写入器。
 ///
-/// 实现方式：读取原 ZIP 全部条目，重建一个包含所有条目 + 新 ComicInfo.xml
-/// （或剔除 ComicInfo.xml）的新文件，再原子替换原文件。
+/// 实现方式：单遍流式重写 ZIP——同时打开源归档（ZipArchive）与目标临时文件
+/// （ZipWriter），条目逐一从 zip 读端直接 copy 到写端（零中间缓冲，O(1) 内存），
+/// 再原子替换原文件。mimetype 条目（EPUB）以 Stored 方式排最前：先按名定位并
+/// 第一个写出，再按索引顺序写出其余条目。
+#[derive(Clone)]
 pub struct ComicInfoWriter {
     /// 对应 Kotlin `overrideComicInfo`：true 时用新数据整体替换；
     /// false（append）时若已有 ComicInfo.xml，则与旧值合并后写回。
@@ -583,27 +587,32 @@ impl ComicInfoWriter {
 
     /// 读取 zip 中是否存在 ComicInfo.xml（且非空）。
     pub fn has_comic_info(&self, book_url: &str) -> bool {
-        read_zip_entries(Path::new(book_url))
-            .map(|entries| {
-                entries
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("ComicInfo.xml"))
-            })
-            .unwrap_or(false)
+        let Ok(file) = std::fs::File::open(book_url) else {
+            return false;
+        };
+        let Ok(mut archive) = zip::ZipArchive::new(file) else {
+            return false;
+        };
+        (0..archive.len()).any(|i| {
+            archive
+                .by_index(i)
+                .map(|entry| entry.name().eq_ignore_ascii_case("ComicInfo.xml"))
+                .unwrap_or(false)
+        })
     }
 
     fn write_comic_info(&self, path: &Path, comic_info: &ComicInfo) -> Result<(), ComicInfoError> {
-        let entries = read_zip_entries(path)?;
         let entry_name = "ComicInfo.xml";
 
         // 对应 Kotlin `writeMetadata`：
         // - overrideComicInfo=true：直接写入新数据；
         // - false（append）：若已有 ComicInfo.xml，解析旧值并合并（新值优先，旧值补缺）；
         //   合并结果与旧值相同时跳过写盘。
+        // 仅读取 ComicInfo.xml 单个条目（不缓冲整本归档）。
         let effective = if !self.override_existing {
-            match entries.iter().find(|(name, _)| name == entry_name) {
-                Some((_, old_bytes)) => {
-                    let old_xml = String::from_utf8_lossy(old_bytes);
+            match read_zip_entry(path, entry_name)? {
+                Some(old_bytes) => {
+                    let old_xml = String::from_utf8_lossy(&old_bytes);
                     let old_info = parse_comic_info(&old_xml);
                     let merged = merge_comic_info(&old_info, comic_info);
                     if old_info == merged {
@@ -617,80 +626,80 @@ impl ComicInfoWriter {
             comic_info.to_xml()
         };
 
-        let new_entries: Vec<(String, Vec<u8>)> = entries
-            .into_iter()
-            .filter(|(name, _)| name != entry_name)
-            .chain(std::iter::once((
-                entry_name.to_string(),
-                effective.into_bytes(),
-            )))
-            .collect();
-
-        write_zip_entries(path, &new_entries)
+        rewrite_zip(path, Some((entry_name, effective.into_bytes())), None)
     }
 
     fn remove_entry(&self, path: &Path, entry_name: &str) -> Result<(), ComicInfoError> {
-        let entries = read_zip_entries(path)?;
-        let new_entries: Vec<(String, Vec<u8>)> = entries
-            .into_iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case(entry_name))
-            .collect();
-        write_zip_entries(path, &new_entries)
+        rewrite_zip(path, None, Some(entry_name))
     }
 }
 
-/// 读取 ZIP 全部条目（名称 + 原始字节）。
-fn read_zip_entries(path: &Path) -> Result<Vec<(String, Vec<u8>)>, ComicInfoError> {
+/// 读取 zip 中指定单个条目的字节（不存在返回 None）。
+fn read_zip_entry(path: &Path, entry_name: &str) -> Result<Option<Vec<u8>>, ComicInfoError> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut entries = Vec::with_capacity(archive.len());
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
-        let mut data = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut data)?;
-        entries.push((name, data));
-    }
-    Ok(entries)
+    let Ok(mut entry) = archive.by_name(entry_name) else {
+        return Ok(None);
+    };
+    let mut data = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut data)?;
+    Ok(Some(data))
 }
 
-/// 重建 ZIP 文件（mimetype 条目以 Stored 方式排在最前以兼容 EPUB）。
-fn write_zip_entries(path: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), ComicInfoError> {
+/// 单遍流式重写 ZIP（mimetype 条目以 Stored 方式排在最前以兼容 EPUB）：
+/// 源归档条目经 `std::io::copy` 直接从读端流到写端，无整本内存缓冲。
+/// `replacement`：在末尾写入的新条目（ComicInfo.xml 写入场景）；
+/// `remove_name`：按名跳过的条目（大小写不敏感，移除场景）。
+fn rewrite_zip(
+    path: &Path,
+    replacement: Option<(&str, Vec<u8>)>,
+    remove_name: Option<&str>,
+) -> Result<(), ComicInfoError> {
+    let source = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(source)?;
     let temp_path = path.with_extension("tmp");
-    let file = std::fs::File::create(&temp_path)?;
-    let mut writer = zip::ZipWriter::new(file);
+    let target = std::fs::File::create(&temp_path)?;
+    let mut writer = zip::ZipWriter::new(target);
 
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
 
-    // mimetype 必须无压缩且是第一个条目（EPUB 规范）
-    let mut ordered: Vec<&(String, Vec<u8>)> = Vec::new();
-    if let Some((idx, _)) = entries
-        .iter()
-        .enumerate()
-        .find(|(_, (name, _))| name == "mimetype")
-    {
-        ordered.push(&entries[idx]);
-        for (i, entry) in entries.iter().enumerate() {
-            if i != idx {
-                ordered.push(entry);
-            }
-        }
-    } else {
-        ordered.extend(entries.iter());
+    // mimetype 必须无压缩且是第一个条目（EPUB 规范）：先按名定位并第一个写出
+    if let Some(index) = archive.index_for_name("mimetype") {
+        let mut entry = archive.by_index(index)?;
+        writer.start_file(
+            "mimetype",
+            options.compression_method(zip::CompressionMethod::Stored),
+        )?;
+        std::io::copy(&mut entry, &mut writer)?;
     }
 
-    for (idx, (name, data)) in ordered.into_iter().enumerate() {
-        let entry_options = if name == "mimetype" && idx == 0 {
-            zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored)
-                .unix_permissions(0o644)
-        } else {
-            options
-        };
-        writer.start_file(name, entry_options)?;
-        let mut cursor = Cursor::new(data);
+    // 按原索引顺序流式复制其余条目；跳过 mimetype（已写出）与目标条目
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name().to_string();
+        if name == "mimetype" {
+            continue;
+        }
+        if let Some(remove) = remove_name {
+            if name.eq_ignore_ascii_case(remove) {
+                continue;
+            }
+        }
+        if let Some((replace, _)) = &replacement {
+            if name == *replace {
+                continue;
+            }
+        }
+        writer.start_file(name, options)?;
+        std::io::copy(&mut entry, &mut writer)?;
+    }
+
+    // replace 场景：新 ComicInfo.xml 追加在最末（与全量重建的条目顺序一致）
+    if let Some((name, bytes)) = replacement {
+        writer.start_file(name, options)?;
+        let mut cursor = Cursor::new(&bytes);
         std::io::copy(&mut cursor, &mut writer)?;
     }
     writer.finish()?;
@@ -768,5 +777,102 @@ mod tests {
         assert_eq!(parsed.notes, info.notes);
         assert_eq!(parsed.imprint, info.imprint);
         assert_eq!(parsed.pages, info.pages);
+    }
+
+    /// 构造临时 zip（mimetype + pages，模拟 EPUB/CBZ），返回路径。
+    /// 条目顺序：mimetype 最先，其余按给定顺序。
+    fn make_temp_zip(entries: &[(&str, &[u8])]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "komf-comic-info-test-{}-{}.zip",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        for (i, (name, bytes)) in entries.iter().enumerate() {
+            let options = if *name == "mimetype" && i == 0 {
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored)
+            } else {
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated)
+            };
+            writer.start_file(*name, options).unwrap();
+            std::io::copy(&mut Cursor::new(bytes), &mut writer).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    fn read_entry(path: &Path, name: &str) -> Option<Vec<u8>> {
+        let file = std::fs::File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name(name).ok()?;
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        Some(data)
+    }
+
+    #[test]
+    fn write_comic_info_streaming_roundtrip() {
+        let path = make_temp_zip(&[
+            ("mimetype", b"application/epub+zip"),
+            ("page1.jpg", b"page1-bytes"),
+            ("page2.jpg", b"page2-bytes"),
+        ]);
+        let writer = ComicInfoWriter::new(true);
+        let info = ComicInfo {
+            title: Some("T".to_string()),
+            ..Default::default()
+        };
+        writer
+            .write_metadata(path.to_str().unwrap(), &info)
+            .unwrap();
+
+        // 条目全部保留：mimetype 仍首位且 Stored，ComicInfo.xml 追加在末尾
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 4);
+        {
+            let first = archive.by_index(0).unwrap();
+            assert_eq!(first.name(), "mimetype");
+            assert_eq!(first.compression(), zip::CompressionMethod::Stored);
+        }
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["mimetype", "page1.jpg", "page2.jpg", "ComicInfo.xml"]
+        );
+
+        // 已有 ComicInfo.xml 时被替换而非重复追加
+        writer
+            .write_metadata(path.to_str().unwrap(), &info)
+            .unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 4);
+
+        let xml = read_entry(&path, "ComicInfo.xml").unwrap();
+        assert!(String::from_utf8_lossy(&xml).contains("<Title>T</Title>"));
+        assert_eq!(
+            read_entry(&path, "page2.jpg").as_deref(),
+            Some(b"page2-bytes".as_slice())
+        );
+
+        // remove_comic_info 仅剔除目标条目，mimetype 仍首位 Stored
+        writer.remove_comic_info(path.to_str().unwrap()).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(archive.len(), 3);
+        {
+            let first = archive.by_index(0).unwrap();
+            assert_eq!(first.name(), "mimetype");
+            assert_eq!(first.compression(), zip::CompressionMethod::Stored);
+        }
+        assert!(read_entry(&path, "ComicInfo.xml").is_none());
+
+        std::fs::remove_file(&path).ok();
     }
 }

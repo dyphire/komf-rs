@@ -166,26 +166,24 @@ async fn get_cover(State(state): State<SharedState>, Path(series_id): Path<Strin
         Err(error) => return internal(error),
     };
     let status = response.status();
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => return internal(error),
-    };
     if !status.is_success() {
         return StatusCode::from_u16(status.as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
     }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+    // 流式转发 body，避免上游异常返回超大 body 时全量缓冲进内存。
+    let stream = response.bytes_stream();
     let mut builder = Response::builder().status(StatusCode::OK);
     if let Some(content_type) = content_type {
         builder = builder.header(header::CONTENT_TYPE, content_type);
     }
     builder
-        .body(axum::body::Body::from(bytes))
+        .body(axum::body::Body::from_stream(stream))
         .map_err(|e| internal(e))
         .unwrap_or_else(|r| r)
 }
@@ -254,16 +252,14 @@ async fn get_fav_icon(
             }
         }
     }
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => return internal(error),
-    };
+    // 流式转发 body，避免上游异常返回超大 body 时全量缓冲进内存。
+    let stream = response.bytes_stream();
     let mut builder = Response::builder().status(StatusCode::OK);
     for (name, value) in passthrough {
         builder = builder.header(name, value);
     }
     builder
-        .body(axum::body::Body::from(bytes))
+        .body(axum::body::Body::from_stream(stream))
         .map_err(|e| internal(e))
         .unwrap_or_else(|r| r)
 }

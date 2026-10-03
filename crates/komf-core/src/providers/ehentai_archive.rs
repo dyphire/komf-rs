@@ -882,7 +882,10 @@ impl EHentaiArchiveService {
                     *store.write().unwrap() = Some(Arc::new(s));
                     ready.store(true, Ordering::SeqCst);
                     tracing::info!("ehentai archive ready (existing db)");
-                    ensure_fts(&store, &fts, &db_path, &meta);
+                    // opened 由 ensure_fts 置位：推迟到 FTS 判定/构建完成后，
+                    // 防构建期 ATTACH 主库与 auto-update 的 rename 撞车
+                    ensure_fts(&store, &fts, &db_path, &meta, &opened);
+                    return;
                 }
             }
             opened.store(true, Ordering::SeqCst);
@@ -1015,8 +1018,10 @@ impl EHentaiArchiveService {
                 *guard = Some(sender.clone());
             }
             let this = self.clone();
-            tokio::spawn(async move {
-                let result = this.do_update(&sender).await;
+            // do_update 含重 IO（commit rename + FTS 构建），整段跑在阻塞线程上
+            //（block_on），不占用 tokio worker
+            crate::util::heavy_pool::spawn_heavy(move || {
+                let result = tokio::runtime::Handle::current().block_on(this.do_update(&sender));
                 // 失败必须发射 ErrorEvent 终态，否则路由层 watch 流等不到 Finished/Error 会一直挂起
                 if let Err(e) = &result {
                     tracing::error!("ehentai archive update failed: {e}");
@@ -1137,24 +1142,36 @@ impl EHentaiArchiveService {
         }
         meta_write(&self.meta, Some(&remote), None, None);
         tracing::info!("ehentai archive updated");
-        ensure_fts(&self.store, &self.fts, &self.db_path, &self.meta);
+        ensure_fts(
+            &self.store,
+            &self.fts,
+            &self.db_path,
+            &self.meta,
+            &self.opened,
+        );
         emit(sender, DownloadProgress::FinishedEvent);
         Ok(())
     }
 }
 
 /// 检查 FTS 索引是否与主库匹配（meta 记录 len+mtime），不匹配则后台重建。
+/// `opened` 置位由本函数负责：推迟到「判定无需构建」或「后台构建完成（成败均可，
+/// 未启用 FTS 时服务仍可用，搜索降级 LIKE）」之后——避免启动构建期（ATTACH 主库
+/// 只读 ~150s）auto-update 立即 do_update → commit_archive rename 覆盖被 ATTACH
+/// 打开的主库（Windows 下 rename 必失败 → 报错重试循环撞车）。
 fn ensure_fts(
     store: &Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>>,
     fts: &Arc<RwLock<Option<Arc<EHentaiFtsStore>>>>,
     db_path: &Path,
     meta: &Path,
+    opened: &Arc<AtomicBool>,
 ) {
     let fts_path = db_path
         .parent()
         .map(|d| d.join(FTS_DB_FILE))
         .unwrap_or_else(|| PathBuf::from(FTS_DB_FILE));
     let Some(stamp) = file_stamp(db_path) else {
+        opened.store(true, Ordering::SeqCst);
         return;
     };
     let m = meta_read(meta);
@@ -1167,19 +1184,26 @@ fn ensure_fts(
         if let Ok(f) = EHentaiFtsStore::open(&fts_path) {
             *fts.write().unwrap() = Some(Arc::new(f));
             tracing::info!("ehentai fts ready (existing index)");
+            opened.store(true, Ordering::SeqCst);
             return;
         }
     }
-    // 需要（重新）构建：后台任务，构建中搜索降级 LIKE
+    // 需要（重新）构建：后台任务，构建中搜索降级 LIKE；
+    // build_fts 为同步重 IO（372 万行 ~150s），跑在 spawn_blocking 上不占用 worker
     let fts_path2 = fts_path.clone();
     let db_path2 = db_path.to_path_buf();
     let meta2 = meta.to_path_buf();
     let store2 = store.clone();
     let fts2 = fts.clone();
+    let opened2 = opened.clone();
     tokio::spawn(async move {
         let _ = std::fs::create_dir_all(db_path2.parent().unwrap_or(Path::new(".")));
-        match build_fts(&db_path2, &fts_path2) {
-            Ok(()) => match EHentaiFtsStore::open(&fts_path2) {
+        let fts_path3 = fts_path2.clone();
+        let db_path3 = db_path2.clone();
+        let built =
+            crate::util::heavy_pool::spawn_heavy(move || build_fts(&db_path3, &fts_path3)).await;
+        match built {
+            Ok(Ok(())) => match EHentaiFtsStore::open(&fts_path2) {
                 Ok(f) if f.validate() => {
                     *fts2.write().unwrap() = Some(Arc::new(f));
                     let stamp = file_stamp(&db_path2);
@@ -1192,12 +1216,17 @@ fn ensure_fts(
                     let _ = std::fs::remove_file(&fts_path2);
                 }
             },
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("ehentai fts build failed: {e}; search falls back to LIKE/online");
                 let _ = std::fs::remove_file(fts_path2.with_extension("tmp"));
                 let _ = std::fs::remove_file(&fts_path2);
             }
+            Err(e) => {
+                tracing::warn!("ehentai fts build task panicked/join failed: {e}");
+            }
         }
+        // 构建结束（成败均可；失败时搜索降级 LIKE/在线，服务仍可用）→ 放行 auto-update
+        opened2.store(true, Ordering::SeqCst);
         let _ = store2; // store 保持可用（LIKE 降级）
     });
 }

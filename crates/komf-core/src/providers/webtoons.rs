@@ -681,9 +681,12 @@ fn detect_mime(url: &str) -> Option<String> {
 // 简单 TTL 缓存 —— 对应 Kotlin cache4k（expireAfterWrite）
 // ---------------------------------------------------------------------------
 
+/// 容量上限（Rust 自定的软上限，cache4k 默认无条目上限），
+/// 超限时先清过期项，仍超限则淘汰最旧条目（近似 LRU）。与 ehentai 缓存一致。
 struct TtlCache<K, V> {
     inner: tokio::sync::Mutex<HashMap<K, (V, Instant)>>,
     ttl: Duration,
+    capacity: usize,
 }
 
 impl<K, V> TtlCache<K, V>
@@ -695,6 +698,7 @@ where
         Self {
             inner: tokio::sync::Mutex::new(HashMap::new()),
             ttl,
+            capacity: 10_000,
         }
     }
 
@@ -714,8 +718,35 @@ where
         }
         let value = load().await?;
         let mut guard = self.inner.lock().await;
-        guard.insert(key, (value.clone(), Instant::now()));
+        self.insert_limited(&mut guard, key, value.clone());
         Ok(value)
+    }
+
+    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
+    /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按遍历顺序取
+    /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
+    fn insert_limited(&self, guard: &mut HashMap<K, (V, Instant)>, key: K, value: V) {
+        if guard.len() >= self.capacity {
+            let now = Instant::now();
+            guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
+        }
+        guard.insert(key, (value, Instant::now()));
+        if guard.len() > self.capacity {
+            let excess = guard.len() - self.capacity;
+            let oldest: Vec<K> = {
+                let mut entries: Vec<(&K, &Instant)> =
+                    guard.iter().map(|(k, (_, c))| (k, c)).collect();
+                entries.sort_by_key(|(_, c)| **c);
+                entries
+                    .into_iter()
+                    .take(excess)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            };
+            for k in oldest {
+                guard.remove(&k);
+            }
+        }
     }
 }
 

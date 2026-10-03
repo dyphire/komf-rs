@@ -39,6 +39,45 @@ const RESIZE_SAFETY_FACTOR: f64 = 0.9;
 /// 防止极端情况下 target/current 非常小，导致一次缩放直接变成 1×1。
 const MIN_RESIZE_RATIO: f64 = 0.05;
 
+/// 解码像素上限：单边最大 8192 px。
+///
+/// 防止超大扫描图（如 8000×12000）解码为全尺寸 RGBA（约 384MB）把内存打爆。
+/// 超过上限的图片按「无法解码」处理（返回 None），与现有失败语义一致。
+const MAX_DECODE_DIMENSION: u32 = 8192;
+
+/// 带尺寸上限的图片解码：先预检头部尺寸，超限时直接返回 None（视为无法解码）。
+///
+/// `reader.limits()` 作为兜底：即使预检通过，解码器侧再校验一次，
+/// 超限时 decode 返回 LimitError，统一按 None 处理。
+fn decode_limited(bytes: &[u8]) -> Option<image::DynamicImage> {
+    // 预检头部尺寸（into_dimensions 只读格式头，不解码像素），
+    // 超大图直接放弃（返回 None），避免全尺寸解码占内存。
+    let (width, height) = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+
+    if width > MAX_DECODE_DIMENSION || height > MAX_DECODE_DIMENSION {
+        tracing::warn!(
+            width,
+            height,
+            "图片超过解码尺寸上限 {MAX_DECODE_DIMENSION}px，跳过缩放降级"
+        );
+        return None;
+    }
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_DECODE_DIMENSION);
+
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
 /// 按目标字节数比例缩放并重编码为 JPEG。
 ///
 /// 像素面积与目标文件大小近似成正比，因此：
@@ -69,12 +108,30 @@ pub fn resize_towards(image: &Image, target_bytes: u64) -> Option<Image> {
         return None;
     }
 
-    let reader = image::ImageReader::new(Cursor::new(&image.bytes))
-        .with_guessed_format()
-        .ok()?;
+    let decoded = decode_limited(&image.bytes)?;
 
-    let decoded = reader.decode().ok()?;
+    let output = encode_resized_towards(&decoded, current_bytes, target_bytes)?;
 
+    // 极端情况下，即使尺寸发生变化，编码结果也可能没有变小。
+    // 调用方会进一步处理这种情况，但这里直接拒绝明显无效的结果。
+    if output.len() >= image.bytes.len() {
+        return None;
+    }
+
+    Some(Image::new(output, Some("image/jpeg".to_string())))
+}
+
+/// 按目标字节数比例缩放已解码位图并重编码为 JPEG（像素级）。
+///
+/// 供 `resize_towards()` / `ensure_within_limit()` 复用，调用方持有
+/// `DynamicImage` 时可以逐轮缩放而不重复解码原始字节。
+///
+/// 返回 None 表示无法进一步缩小或 JPEG 重编码失败。
+fn encode_resized_towards(
+    decoded: &image::DynamicImage,
+    current_bytes: u64,
+    target_bytes: u64,
+) -> Option<Vec<u8>> {
     let (width, height) = (decoded.width(), decoded.height());
 
     // 根据文件大小比例估算像素缩放比例。
@@ -105,13 +162,7 @@ pub fn resize_towards(image: &Image, target_bytes: u64) -> Option<Image> {
         .write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
         .ok()?;
 
-    // 极端情况下，即使尺寸发生变化，编码结果也可能没有变小。
-    // 调用方会进一步处理这种情况，但这里直接拒绝明显无效的结果。
-    if output.len() >= image.bytes.len() {
-        return None;
-    }
-
-    Some(Image::new(output, Some("image/jpeg".to_string())))
+    Some(output)
 }
 
 /// 把图片最长边减半并重编码为 JPEG。
@@ -121,11 +172,7 @@ pub fn resize_towards(image: &Image, target_bytes: u64) -> Option<Image> {
 ///
 /// 返回 `None` 表示无法解码、无法编码或图片已经无法继续缩小。
 pub fn downscale_image(image: &Image) -> Option<Image> {
-    let reader = image::ImageReader::new(Cursor::new(&image.bytes))
-        .with_guessed_format()
-        .ok()?;
-
-    let decoded = reader.decode().ok()?;
+    let decoded = decode_limited(&image.bytes)?;
 
     let (width, height) = (decoded.width(), decoded.height());
 
@@ -170,20 +217,26 @@ pub fn ensure_within_limit(image: &Image, limit: u64) -> Image {
         return image.clone();
     }
 
+    // 首轮 decode 后复用 DynamicImage 逐轮 resize 缩小，
+    // 不再每轮重新解码原始字节。
+    let Some(decoded) = decode_limited(&image.bytes) else {
+        return image.clone();
+    };
+
     let mut current = image.clone();
 
     for _ in 0..MAX_DOWNSCALE_ROUNDS {
-        let next = match resize_towards(&current, limit) {
+        let next = match encode_resized_towards(&decoded, current.bytes.len() as u64, limit) {
             Some(next) => next,
             None => break,
         };
 
         // 防止异常编码器/输入导致结果没有变小。
-        if next.bytes.len() >= current.bytes.len() {
+        if next.len() >= current.bytes.len() {
             break;
         }
 
-        current = next;
+        current = Image::new(next, Some("image/jpeg".to_string()));
 
         if current.bytes.len() as u64 <= limit {
             break;

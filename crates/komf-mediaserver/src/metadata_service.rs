@@ -291,7 +291,7 @@ impl MetadataService {
                     let metadata = self.apply_chinese_conversion(metadata);
                     let _ = tx.send(MetadataJobEvent::PostProcessingStart);
                     self.metadata_update_service
-                        .update_metadata(&series, &metadata, Some(provider))
+                        .update_metadata(&series, metadata, Some(provider))
                         .await
                         .map_err(|e| (Some(provider), e.to_string()))?;
                     let _ = self
@@ -479,9 +479,8 @@ impl MetadataService {
             // 聚合前先按主 provider 翻译其标签（非 bangumi/ehentai 时），
             // 保证合并结果中主 provider 的英文标签仍被翻译；其余 provider 的
             // 标签在 aggregate_metadata_from_providers 内 merge 前逐 provider 处理。
-            let mut primary =
-                SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata.clone())
-                    .with_oneshots(&books);
+            let mut primary = SeriesAndBookMetadata::new(provider_metadata.metadata, book_metadata)
+                .with_oneshots(&books);
             primary.excluded_alt_titles = excluded;
             let primary = self
                 .metadata_update_service
@@ -509,7 +508,7 @@ impl MetadataService {
         let metadata = self.apply_chinese_conversion(metadata);
         let _ = tx.send(MetadataJobEvent::PostProcessingStart);
         self.metadata_update_service
-            .update_metadata(&series, &metadata, Some(provider_name))
+            .update_metadata(&series, metadata, Some(provider_name))
             .await
             .map_err(|e| (None, e.to_string()))?;
 
@@ -933,13 +932,14 @@ impl MetadataService {
                 .filter(|p| Some(p.provider_name()) != matched_provider)
                 .collect();
             // 聚合除首个成功 provider 外的其余 provider
-            // （matched 已携带主 provider 的备选排除名单，聚合内各 provider 名单随 merge 并集）
+            // （matched 已携带主 provider 的备选排除名单，聚合内各 provider 名单随 merge 并集）。
+            // matched 此处按值移入聚合（原实现逐字段 clone，大系列下封面合计内存翻倍）。
             self.aggregate_metadata_from_providers(
                 &series,
                 &books,
-                matched.series_metadata.clone(),
-                matched.book_metadata.clone(),
-                matched.excluded_alt_titles.clone(),
+                matched.series_metadata,
+                matched.book_metadata,
+                matched.excluded_alt_titles,
                 providers,
                 None,
                 &tx,
@@ -953,7 +953,7 @@ impl MetadataService {
         let metadata = self.apply_chinese_conversion(metadata);
         let _ = tx.send(MetadataJobEvent::PostProcessingStart);
         self.metadata_update_service
-            .update_metadata(&series, &metadata, matched_provider)
+            .update_metadata(&series, metadata, matched_provider)
             .await
             .map_err(|e| (None, e.to_string()))?;
         tracing::info!(
@@ -1130,7 +1130,7 @@ impl MetadataService {
                 });
                 progress += 1;
                 // 逐本 .ok()：单本失败只影响该书；失败留痕（warn 日志）便于排障。
-                let metadata = match provider
+                let mut metadata = match provider
                     .get_book_metadata(&series_meta.id, &series_book.id)
                     .await
                 {
@@ -1145,6 +1145,13 @@ impl MetadataService {
                         None
                     }
                 };
+                // 配置不上传书籍封面时封面 bytes 直接丢弃（provider 已随元数据一并拉取），
+                // 不进入系列级缓存/聚合合并——封面只在上传场景才需要驻留（内存优化）。
+                if !self.metadata_update_service.upload_book_covers() {
+                    if let Some(m) = metadata.as_mut() {
+                        m.thumbnail = None;
+                    }
+                }
                 result.insert(book.id.clone(), metadata);
             } else {
                 result.insert(book.id.clone(), None);

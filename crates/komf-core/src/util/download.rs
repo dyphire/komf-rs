@@ -13,6 +13,23 @@ use std::path::Path;
 /// 指数退避延迟（秒）：首次尝试失败后按序睡眠再重试。
 pub const RETRY_DELAYS: [u64; 3] = [5, 30, 120];
 
+/// 离线源自动更新全局互斥锁（许可数 1）：Bangumi Archive / E-Hentai Archive /
+/// MangaBaka / BookWalker 四个后台更新循环共享，强制串行执行下载/解压/建索引。
+/// 背景：各循环启动后第一迭代立即执行且彼此无协调，全新安装/数据缺失重启时
+/// 四个源并发构建索引，各源内存峰值（FTS 全量构建等）直接叠加，可达 1GB+。
+static OFFLINE_UPDATE_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> =
+    std::sync::OnceLock::new();
+
+/// 获取离线源更新全局许可；同一时刻只允许一个离线源执行更新/建索引。
+/// 在更新循环的每次迭代开头 `acquire().await` 持有至迭代结束（drop 即释放）。
+pub async fn offline_update_permit() -> tokio::sync::SemaphorePermit<'static> {
+    OFFLINE_UPDATE_SEMAPHORE
+        .get_or_init(|| tokio::sync::Semaphore::new(1))
+        .acquire()
+        .await
+        .expect("offline update semaphore closed")
+}
+
 /// 是否值得重试的状态码：`429` / `5xx`（对齐 Kotlin `HttpRequestRetry` 口径）。
 pub fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()

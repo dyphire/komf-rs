@@ -9,6 +9,7 @@ use crate::mylar::{mylar_series_json_from_metadata, write_series_json};
 use crate::tag_translator::TagTranslator;
 use komf_core::model::{BookMetadata, Image, SeriesMetadata, UpdateMode};
 use komf_core::providers::CoreProviders;
+use komf_core::util::heavy_pool::spawn_heavy;
 use komf_core::util::{case_insensitive_nat_sort, BookNameParser};
 use std::sync::Arc;
 
@@ -76,6 +77,11 @@ impl MetadataUpdater {
         }
     }
 
+    /// 是否上传书籍封面（metadata_service 拉取阶段据此决定是否让封面 bytes 驻留）。
+    pub fn upload_book_covers(&self) -> bool {
+        self.upload_book_covers
+    }
+
     /// 对应 `updateMetadata`。
     /// `provider`：本次元数据来源的 provider；bangumi/ehentai 不翻译标签
     /// （bangumi 自身产出中文标签、ehentai 标签体系不适用），None（无 provider）
@@ -83,14 +89,19 @@ impl MetadataUpdater {
     pub async fn update_metadata(
         &self,
         series: &MediaServerSeries,
-        metadata: &SeriesAndBookMetadata,
+        metadata: SeriesAndBookMetadata,
         provider: Option<CoreProviders>,
     ) -> Result<(), MediaServerError> {
-        let translated = self.translate_metadata(metadata, provider);
+        // 所有权转移：翻译完成后原始书籍元数据（含全部封面 bytes）即可释放，
+        // 避免系列全程驻留（大系列封面合计可达数百 MB）。
+        let translated = self.translate_metadata(&metadata, provider);
+        drop(metadata);
         let processed = self.post_processor.process(&translated);
         self.update_series_metadata(series, &processed.series_metadata)
             .await?;
-        self.update_book_metadata(series, &translated, &processed)
+        // 回传消费后的 processed（book_metadata 已逐本取空），供后续 mylar 导出复用系列元数据。
+        let processed = self
+            .update_book_metadata(series, translated, processed)
             .await?;
 
         if self.update_modes.contains(&UpdateMode::MylarSeriesJson) {
@@ -167,8 +178,14 @@ impl MetadataUpdater {
         for (index, book) in books.iter().enumerate() {
             if remove_comic_info {
                 // 对齐 Kotlin：removeComicInfo 内部 rethrow → job FAILED（HTTP 层 422）。
-                self.comic_info_writer
-                    .remove_comic_info(&book.url)
+                // 同步文件 IO 移入阻塞线程池，避免占用 async executor。
+                let writer = self.comic_info_writer.clone();
+                let url = book.url.clone();
+                spawn_heavy(move || writer.remove_comic_info(&url))
+                    .await
+                    .map_err(|e| {
+                        MediaServerError::ComicInfo(format!("comic info task failed: {e}"))
+                    })?
                     .map_err(|e| MediaServerError::ComicInfo(e.to_string()))?;
             }
             self.reset_book_metadata(book, Some(index as i32 + 1))
@@ -305,19 +322,28 @@ impl MetadataUpdater {
         Ok(())
     }
 
+    /// 逐本更新书籍元数据/封面。`unprocessed`（翻译副本）仅在入口判定写系列元数据
+    /// 的目标书，随后释放；`processed` 的书籍 map 被逐本 remove 消费——每本书
+    /// 处理完成（含封面上传）后其 bytes 立即释放。返回消费后的 `processed`
+    /// （book_metadata 已空，保留 series_metadata 供 mylar 导出等后续使用）。
     async fn update_book_metadata(
         &self,
         series: &MediaServerSeries,
-        unprocessed: &SeriesAndBookMetadata,
-        processed: &SeriesAndBookMetadata,
-    ) -> Result<(), MediaServerError> {
+        unprocessed: SeriesAndBookMetadata,
+        mut processed: SeriesAndBookMetadata,
+    ) -> Result<SeriesAndBookMetadata, MediaServerError> {
         // 重新拉取书籍列表以获取最新书名（对应 Kotlin 中按书名排序）
         let books = self.media_server_client.get_books(&series.id).await?;
         let write_series_id =
             self.book_to_write_series_metadata(&unprocessed.book_metadata, &books);
+        // 翻译副本仅用于上面写系列元数据的判定，其封面等大字段在此释放
+        drop(unprocessed);
 
+        // 逐本 remove 取出：每本书处理完成（含封面上传）后其元数据 bytes 立即释放，
+        // 不再全程驻留整系列书籍元数据。
+        let mut book_metadata = std::mem::take(&mut processed.book_metadata);
         for book in books.iter() {
-            let raw_metadata = processed.book_metadata.get(&book.id).cloned().flatten();
+            let raw_metadata = book_metadata.remove(&book.id).flatten();
             // 对齐 Kotlin `postProcessBooks`：orderBooks 开启时所有书都经 orderBook
             // （metadata null 的书用空 BookMetadata 解析书名卷/章号，结果非 null）。
             let metadata = if self.post_processor.order_books_enabled() {
@@ -382,8 +408,16 @@ impl MetadataUpdater {
                         if let Some(comic_info) = comic_info {
                             // 对齐 Kotlin：writeMetadata 内部 runCatching 后 rethrow → job FAILED
                             // （HTTP reset 场景 422；job 场景进错误事件流）。
-                            self.comic_info_writer
-                                .write_metadata(&book.url, &comic_info)
+                            // 同步文件 IO 移入阻塞线程池，避免占用 async executor。
+                            let writer = self.comic_info_writer.clone();
+                            let url = book.url.clone();
+                            spawn_heavy(move || writer.write_metadata(&url, &comic_info))
+                                .await
+                                .map_err(|e| {
+                                    MediaServerError::ComicInfo(format!(
+                                        "comic info task failed: {e}"
+                                    ))
+                                })?
                                 .map_err(|e| MediaServerError::ComicInfo(e.to_string()))?;
                         }
                     }
@@ -416,7 +450,7 @@ impl MetadataUpdater {
                 }
             }
         }
-        Ok(())
+        Ok(processed)
     }
 
     async fn replace_book_thumbnail(

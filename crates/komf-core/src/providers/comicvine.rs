@@ -429,9 +429,16 @@ fn compare_images(image1: &[u8], image2: &[u8]) -> bool {
 }
 
 /// 对齐 Kotlin：box 滤波缩放 32×32 → luma（0.299/0.587/0.114）→ 平均亮度 → 1024 bit。
+///
+/// aHash 只需要 32×32 小图，先整体缩到目标尺寸再转 RGB，
+/// 避免持有全尺寸 RGB 位图副本（大图可省上百 MB）。
 fn average_hash(img: &image::DynamicImage) -> Vec<u8> {
     const SIZE: u32 = 32;
-    let rgb = img.to_rgb8();
+    // 预处理步骤顺序不变（缩放 → RGB → box 均值的近似），
+    // 只是缩放提前到 to_rgb8() 之前；此时 resize_box 实际为同尺寸拷贝。
+    let rgb = img
+        .resize(SIZE, SIZE, image::imageops::FilterType::Triangle)
+        .to_rgb8();
     let resized = resize_box(&rgb, SIZE, SIZE);
     let mut luma = Vec::with_capacity((SIZE * SIZE) as usize);
     for pixel in resized.pixels() {
@@ -979,11 +986,20 @@ fn render_element(node: &HtmlNode, out: &mut String) {
 // ===================== Provider（对应 ComicVineMetadataProvider.kt） =====================
 
 /// storyArcCache（cache4k expireAfterWrite(30.minutes)）。
+///
+/// capacity 为 Rust 自定的软上限（cache4k 默认无条目上限），避免缓存无限增长；
+/// 超限时先清过期项，仍超限则淘汰最旧条目（近似 LRU）。
 struct StoryArcCache {
     inner: Mutex<HashMap<i32, (Instant, ComicVineStoryArc)>>,
 }
 
 impl StoryArcCache {
+    /// 容量上限（与 ehentai/webtoons 缓存一致，10_000 条级别）。
+    const CAPACITY: usize = 10_000;
+
+    /// TTL：cache4k expireAfterWrite(30.minutes)。
+    const TTL: Duration = Duration::from_secs(30 * 60);
+
     fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
@@ -1002,17 +1018,41 @@ impl StoryArcCache {
         {
             let inner = self.inner.lock().await;
             if let Some((written_at, arc)) = inner.get(&id) {
-                if written_at.elapsed() < Duration::from_secs(30 * 60) {
+                if written_at.elapsed() < Self::TTL {
                     return Ok(arc.clone());
                 }
             }
         }
         let arc = fetch().await?;
-        self.inner
-            .lock()
-            .await
-            .insert(id, (Instant::now(), arc.clone()));
+        let mut inner = self.inner.lock().await;
+        self.insert_limited(&mut inner, id, arc.clone());
         Ok(arc)
+    }
+
+    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU）。
+    fn insert_limited(
+        &self,
+        inner: &mut HashMap<i32, (Instant, ComicVineStoryArc)>,
+        id: i32,
+        arc: ComicVineStoryArc,
+    ) {
+        if inner.len() >= Self::CAPACITY {
+            let now = Instant::now();
+            inner.retain(|_, (written_at, _)| now.duration_since(*written_at) < Self::TTL);
+        }
+        inner.insert(id, (Instant::now(), arc));
+        if inner.len() > Self::CAPACITY {
+            let excess = inner.len() - Self::CAPACITY;
+            let oldest: Vec<i32> = {
+                let mut entries: Vec<(&i32, &Instant)> =
+                    inner.iter().map(|(k, (c, _))| (k, c)).collect();
+                entries.sort_by_key(|(_, c)| **c);
+                entries.into_iter().take(excess).map(|(k, _)| *k).collect()
+            };
+            for k in oldest {
+                inner.remove(&k);
+            }
+        }
     }
 }
 
