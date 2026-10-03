@@ -46,6 +46,52 @@ pub fn normalize_search_text(input: &str) -> String {
     out.trim_end().to_string()
 }
 
+/// 括号段噪声剔除（Rust 扩展）：同人志式命名中括号段多为噪声
+/// （作者/汉化组/版本/画廊号），提取实际搜索词。
+///
+/// 供除 ehentai 外的 provider 的搜索/匹配/tracker 入口使用
+/// （ehentai 在 provider 内部已有更完整的 parse_title/get_search_queries 处理）。
+///
+/// 规则（仅当搜索词含多个 `[]` 段时生效）：
+/// 1. 去除全部 `()` / `[]` 段后仍有文本 → 该文本即实际搜索词
+///    （如 `(画集)[chin] 女騎士が転生したら ニートの召使いだった件 全編 [中国翻訳] [DL版] [3542432]`
+///    → `女騎士が転生したら ニートの召使いだった件 全編`）；
+/// 2. 整名只由多个 `[]` 段组成 → 第一个 `[]` 内容不含 authorSeparator（正则）时取其内容，
+///    含 authorSeparator（作者列表段）时取第二个 `[]` 内容。
+///
+/// 不满足条件（无 `[]` 或仅一个 `[]`）返回 None，调用方沿用原搜索词。
+pub fn bracket_search_term(name: &str, author_separator: Option<&str>) -> Option<String> {
+    let groups: Vec<&str> = regex::Regex::new(r"\[([^\]]*)\]")
+        .ok()?
+        .captures_iter(name)
+        .filter_map(|c| c.get(1).map(|m| m.as_str()))
+        .collect();
+    if groups.len() < 2 {
+        return None;
+    }
+    // 1. 段外文本：`()` 与 `[]` 段全部去除后折叠空白
+    let without_brackets = regex::Regex::new(r"\([^)]*\)|\[[^\]]*\]")
+        .ok()?
+        .replace_all(name, " ");
+    let outside = without_brackets
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !outside.is_empty() {
+        return Some(outside);
+    }
+    // 2. 整名只由 [] 段组成：第一个 [] 是否 authorSeparator（正则）命中
+    let first_is_author_list = author_separator
+        .and_then(|p| regex::Regex::new(p).ok())
+        .map(|re| re.is_match(groups[0]))
+        .unwrap_or(false);
+    if first_is_author_list {
+        Some(groups[1].to_string())
+    } else {
+        Some(groups[0].to_string())
+    }
+}
+
 /// 去除拉丁字母的重音符号（对应 Kotlin `stripAccents`，基于 java.text.Normalizer NFD）。
 pub fn strip_accents(input: &str) -> String {
     use std::fmt::Write as _;
@@ -116,14 +162,20 @@ mod tests {
         );
         assert_eq!(replace_fullwidth_chars("（Ｗｅｂ）"), "(Web)");
         // 全角 ASCII 区（U+FF01..=U+FF5E）全量映射
-        assert_eq!(replace_fullwidth_chars("！＃％＆＊＋－．／＜＝＞？＠［＼］＾＿｀｛｜｝"), "!#%&*+-./<=>?@[\\]^_`{|}");
+        assert_eq!(
+            replace_fullwidth_chars("！＃％＆＊＋－．／＜＝＞？＠［＼］＾＿｀｛｜｝"),
+            "!#%&*+-./<=>?@[\\]^_`{|}"
+        );
         assert_eq!(replace_fullwidth_chars("　"), " ");
     }
 
     #[test]
     fn search_text_normalized() {
         // 全角 + 全角冒号 → 半角
-        assert_eq!(normalize_search_text("進撃の巨人：完全版"), "進撃の巨人:完全版");
+        assert_eq!(
+            normalize_search_text("進撃の巨人：完全版"),
+            "進撃の巨人:完全版"
+        );
         // CJK 标点统一
         assert_eq!(normalize_search_text("【标题】《书名》"), "[标题]<书名>");
         assert_eq!(normalize_search_text("「quote」‘x’"), "\"quote\"'x'");
@@ -131,6 +183,64 @@ mod tests {
         // 空白折叠 + trim
         assert_eq!(normalize_search_text("  a　 b  "), "a b");
         assert_eq!(normalize_search_text("　"), "");
+    }
+
+    #[test]
+    fn bracket_search_term_prefers_outside_text() {
+        // 形如 `(画集)[chin] 标题 [中国翻訳] [DL版] [3542432]` → 段外文本
+        assert_eq!(
+            bracket_search_term(
+                "(画集)[chin] 女騎士が転生したら ニートの召使いだった件 全編 [中国翻訳] [DL版] [3542432]",
+                Some("×")
+            ),
+            Some("女騎士が転生したら ニートの召使いだった件 全編".to_string())
+        );
+    }
+
+    #[test]
+    fn bracket_search_term_only_brackets() {
+        // 整名只由 [] 段组成：第一个 [] 不含 authorSeparator → 取第一个 [] 内容（标题段）
+        assert_eq!(
+            bracket_search_term(
+                "[默示录的四骑士][鈴木央][Vol.01-Vol.23][东立][电子版]",
+                Some("×")
+            ),
+            Some("默示录的四骑士".to_string())
+        );
+        // 第一个 [] 含 authorSeparator（作者列表段）→ 取第二个 [] 内容
+        assert_eq!(
+            bracket_search_term(
+                "[逢沢大介×東西×坂野杏梨][想要成为影之实力者！][未完][角川][电子版]",
+                Some("×")
+            ),
+            Some("想要成为影之实力者！".to_string())
+        );
+        // 未配置 authorSeparator：第一个 [] 不含分隔符 → 取第一个 [] 内容
+        assert_eq!(
+            bracket_search_term(
+                "[默示录的四骑士][鈴木央][Vol.01-Vol.23][东立][电子版]",
+                None
+            ),
+            Some("默示录的四骑士".to_string())
+        );
+    }
+
+    #[test]
+    fn bracket_search_term_noop_cases() {
+        // 无 [] 或仅一个 [] → 不处理
+        assert_eq!(
+            bracket_search_term("女騎士が転生したら 全編", Some("×")),
+            None
+        );
+        assert_eq!(
+            bracket_search_term("[女騎士が転生したら 全編]", Some("×")),
+            None
+        );
+        // authorSeparator 非法正则不 panic：视为不含作者分隔符
+        assert_eq!(
+            bracket_search_term("[Title] [Author]", Some("([")),
+            Some("Title".to_string())
+        );
     }
 
     #[test]

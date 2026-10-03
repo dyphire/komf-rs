@@ -144,7 +144,19 @@ impl MetadataService {
             series_name.to_string()
         };
         for provider in providers {
+            let provider_name = provider.provider_name();
             let name = name.clone();
+            // Rust 扩展：括号段噪声剔除（仅含多个 [] 时生效；ehentai provider
+            // 内部已有 parse_title/get_search_queries 处理，故排除）。
+            let name = if provider_name != CoreProviders::EHentai {
+                komf_core::util::bracket_search_term(
+                    &name,
+                    self.search_title_extraction.author_separator.as_deref(),
+                )
+                .unwrap_or(name)
+            } else {
+                name
+            };
             let provider_ref: Arc<dyn MetadataProvider> = provider;
             tasks.push(tokio::spawn(async move {
                 // Rust 扩展：输入为 provider 网页链接时直接按 id 获取（跳过站点搜索）。
@@ -1002,6 +1014,18 @@ impl MetadataService {
         tx: &JobEventSender,
     ) -> Option<SeriesAndBookMetadata> {
         for search_title in search_titles {
+            // Rust 扩展：括号段噪声剔除（仅含多个 [] 时生效；ehentai provider
+            // 内部已有 parse_title/get_search_queries 处理，故排除）。
+            let bracket_term;
+            let search_title = if provider.provider_name() != CoreProviders::EHentai {
+                bracket_term = komf_core::util::bracket_search_term(
+                    search_title,
+                    self.search_title_extraction.author_separator.as_deref(),
+                );
+                bracket_term.as_deref().unwrap_or(search_title)
+            } else {
+                search_title
+            };
             tracing::info!(
                 "searching \"{search_title}\" using {}",
                 provider.provider_name()
@@ -1407,6 +1431,9 @@ impl MetadataService {
             sorted.len() == 1 && first_book.oneshot,
             (!first_book.file_name.is_empty()).then(|| first_book.file_name.clone()),
         )
+        // Rust 扩展：括号段噪声剔除（匹配比较时 query 与候选标题双侧应用）；
+        // authorSeparator 复用 searchTitleExtraction 配置
+        .with_author_separator(self.search_title_extraction.author_separator.clone())
     }
 }
 
