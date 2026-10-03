@@ -92,6 +92,29 @@ const SAMPLE_CTX = {
   mediaServer: 'komga',
 };
 
+// provider 封面 <img>：直连 CDN + no-referrer（MangaDex 等封面 CDN 按 Referer
+// 白名单拦截，无 Referer 才放行真实封面）；旧浏览器忽略 referrerpolicy 导致
+// 加载失败时，回退走 komf /api/cover/redirect 中转（302 + Referrer-Policy）。
+function CoverImg(props: { url: string; className?: string }) {
+  return (
+    <img
+      src={props.url}
+      referrerPolicy="no-referrer"
+      className={props.className}
+      alt=""
+      onError={(e) => {
+        const img = e.target as HTMLImageElement;
+        if (!img.dataset.fallback) {
+          img.dataset.fallback = '1';
+          img.src = `/api/cover/redirect?url=${encodeURIComponent(props.url)}`;
+        } else {
+          img.style.display = 'none';
+        }
+      }}
+    />
+  );
+}
+
 function clone<T>(v: T): T {
   return v === undefined ? v : JSON.parse(JSON.stringify(v));
 }
@@ -916,13 +939,7 @@ function TrackerPage() {
             <Fragment key={i}>
               <div className="search-hit" style={{ cursor: 'pointer' }} onClick={() => openLink(l)}>
                 {l.coverUrl ? (
-                  <img
-                    key={`${l.provider}-${l.trackId}-${l.coverUrl}`}
-                    src={`/api/cover/redirect?url=${encodeURIComponent(l.coverUrl)}`}
-                    className="hit-cover"
-                    alt=""
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                  />
+                  <CoverImg key={`${l.provider}-${l.trackId}-${l.coverUrl}`} url={l.coverUrl} className="hit-cover" />
                 ) : (
                   <div className="hit-cover empty" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>
                     {TRACKER_PROVIDER_LABEL[l.provider] ?? l.provider}
@@ -952,13 +969,7 @@ function TrackerPage() {
             <Fragment key={i}>
               <div className="search-hit">
                 {r.coverUrl ? (
-                  <img
-                    key={`${r.id}-${r.coverUrl}`}
-                    src={`/api/cover/redirect?url=${encodeURIComponent(r.coverUrl)}`}
-                    className="hit-cover"
-                    alt=""
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                  />
+                  <CoverImg key={`${r.id}-${r.coverUrl}`} url={r.coverUrl} className="hit-cover" />
                 ) : <div className="hit-cover empty" />}
                 <div className="hit-body">
                   <b>{r.title}</b>
@@ -1381,12 +1392,7 @@ export default function App() {
                   {searchResult.map((r, i) => (
                     <div className="search-hit" key={i}>
                       {r.image_url || r.imageUrl ? (
-                        <img
-                          src={`/api/cover/redirect?url=${encodeURIComponent(r.image_url || r.imageUrl)}`}
-                          className="hit-cover"
-                          alt=""
-                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                        />
+                        <CoverImg url={r.image_url || r.imageUrl} className="hit-cover" />
                       ) : <div className="hit-cover empty" />}
                       <div className="hit-body">
                         <b>{r.title}</b>
