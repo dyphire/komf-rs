@@ -2306,6 +2306,22 @@ impl MetadataProvider for EHentaiMetadataProvider {
                         }
                         None => processed,
                     };
+                // 相似度精排（对齐 bangumi 离线搜索）：FTS/LIKE 候选是"最新优先"顺序，
+                // 按标题相似度降序，避免更精确的匹配（如 "本3.0" vs "本2.0"）被埋在后面。
+                // 稳定排序保持语言偏好/强制语言的分组序。
+                let query_norm = crate::util::normalize_search_text(series_name);
+                let mut scored: Vec<(f32, EHentaiBook)> = processed
+                    .into_iter()
+                    .map(|b| {
+                        let titles = std::iter::once(b.title.clone())
+                            .chain(b.title_jpn.clone())
+                            .map(|t| crate::util::normalize_search_text(&t))
+                            .collect::<Vec<_>>();
+                        (crate::util::similarity_score(&query_norm, &titles), b)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                let processed: Vec<EHentaiBook> = scored.into_iter().map(|(_, b)| b).collect();
                 let mut out = Vec::new();
                 for book in processed {
                     let result = self

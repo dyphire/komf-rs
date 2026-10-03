@@ -328,6 +328,89 @@ const SERIES_COLUMNS: &str = "s.id, s.type, s.title, s.alt_titles, s.subtitle, s
      s.display_title_short, s.description, s.description_short, s.listed_at, s.image_id, \
      i.name AS i_name, i.mime AS i_mime, i.width AS i_width, i.height AS i_height";
 
+/// BookWalker 搜索库 FTS 结构版本（PRAGMA user_version）：分词器/写入方式变化时递增。
+/// 旧下载库（user_version=0，trigram 时代）在 search 打开时本地重建为预分词索引。
+/// 注意：同名重建后的 FTS 表不能用普通 DELETE 清空（SQLite 缺陷，见
+/// bangumi_archive::rebuild_fts 注释），本模块重建路径只 INSERT 不 DELETE。
+const FTS_SCHEMA_VERSION: i64 = 3;
+
+/// 已完成 FTS 迁移的库路径（进程内去重）。
+/// search 每次打开新连接，若无此标记则每次搜索都会重复 DROP/全量重建：
+/// 并发搜索在 DROP/CREATE 上撞锁（database is locked），互相掀桌，
+/// user_version 永远写不上 → 无限重试。失败不标记，下次搜索重试。
+static MIGRATED_DBS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+fn migrated(db_path: &Path) -> bool {
+    MIGRATED_DBS
+        .lock()
+        .map(|s| s.contains(db_path))
+        .unwrap_or(false)
+}
+
+fn mark_migrated(db_path: &Path) {
+    if let Ok(mut s) = MIGRATED_DBS.lock() {
+        s.insert(db_path.to_path_buf());
+    }
+}
+
+/// 从 series 表读出原始标题，经分析链预分词后写入 series_fts（独立事务提交）。
+fn populate_series_fts(conn: &rusqlite::Connection) -> Result<(), ProviderError> {
+    conn.execute_batch("BEGIN")
+        .map_err(|e| ProviderError::message(format!("BookWalker fts begin: {e}")))?;
+    let result = (|| -> Result<(), ProviderError> {
+        let mut stmt = conn
+            .prepare("SELECT id, title, alt_titles, type FROM series")
+            .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
+        let mapped = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
+        let rows: Vec<(String, String, Option<String>, i64)> =
+            mapped.filter_map(|r| r.ok()).collect();
+        drop(stmt);
+        let mut ins = conn
+            .prepare("INSERT INTO series_fts(id, title, alt_titles, type) VALUES (?1,?2,?3,?4)")
+            .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
+        for (id, title, alt_titles, ty) in &rows {
+            let t = crate::util::index_analyze_terms(title).join(" ");
+            // alt_titles 为 JSON 数组：逐条分析、空格拼接（数组边界即 token 分隔符，
+            // 与整串分析结果一致，显式解析避免跨元素粘连）。
+            let alt_t = alt_titles
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .map(|v: Vec<String>| {
+                    v.iter()
+                        .map(|a| crate::util::index_analyze_terms(a).join(" "))
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .filter(|s| !s.is_empty());
+            ins.execute(rusqlite::params![id, t, alt_t, ty])
+                .map_err(|e| ProviderError::message(format!("BookWalker fts populate: {e}")))?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| ProviderError::message(format!("BookWalker fts commit: {e}")))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 impl BookWalkerSeriesRepository {
     pub fn new(database_file: impl Into<PathBuf>) -> Self {
         Self {
@@ -401,20 +484,30 @@ impl BookWalkerSeriesRepository {
         Ok(out)
     }
 
-    /// 对应 `search`：FTS5 MATCH（`"$title"` 精确短语）+ type IN + `ORDER BY rank LIMIT 10`。
+    /// 对应 `search`：FTS5 分析链 token 渐进前缀 AND + type IN + `ORDER BY rank LIMIT 10`。
+    /// 旧 trigram 库在首次搜索时本地迁移重建（migrate_fts_if_needed）。
     pub fn search(
         &self,
         title: &str,
         content_types: &[BookWalkerContentType],
     ) -> Result<Vec<BookWalkerSeries>, ProviderError> {
         let conn = self.open()?;
-        let quoted = format!("\"{title}\"");
+        // 旧库迁移（进程内只跑一次；失败不阻断搜索——降级旧索引，
+        // 成功才标记，下次搜索重试）。
+        if !migrated(&self.database_file) {
+            match Self::migrate_fts_if_needed(&conn) {
+                Ok(true) => mark_migrated(&self.database_file),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("BookWalker fts migration deferred: {e}"),
+            }
+        }
+        let tokens = crate::util::search_analyze(title);
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tokens = &tokens[..tokens.len().min(60)];
         let mut sql =
             String::from("SELECT id FROM series_fts WHERE (title MATCH ? OR alt_titles MATCH ?)");
-        let params: Vec<rusqlite::types::Value> = vec![
-            rusqlite::types::Value::Text(quoted.clone()),
-            rusqlite::types::Value::Text(quoted),
-        ];
         if !content_types.is_empty() {
             let types = content_types
                 .iter()
@@ -428,17 +521,68 @@ impl BookWalkerSeriesRepository {
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| ProviderError::message(format!("BookWalker search prepare: {e}")))?;
-        let ids: Vec<String> = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))
-            .map_err(|e| ProviderError::message(format!("BookWalker search: {e}")))?
-            .collect::<Result<_, _>>()
-            .map_err(|e| ProviderError::message(format!("BookWalker search rows: {e}")))?;
-        drop(stmt);
-
-        if ids.is_empty() {
-            return Ok(Vec::new());
+        // 渐进前缀 AND：全量 token 未命中时逐层丢尾部 token（系列名常带
+        // 归档标题没有的后缀：卷数/系列/话数），不低于 droppable_floor（拉丁整词
+        // 子句永不放宽、前缀至少两 token）
+        let floor = if tokens.len() <= 1 {
+            1
+        } else {
+            crate::util::droppable_floor(tokens)
+        };
+        for n in (floor..=tokens.len()).rev() {
+            let expr = tokens[..n]
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let ids: Vec<String> = stmt
+                .query_map(rusqlite::params![expr.clone(), expr], |row| row.get(0))
+                .map_err(|e| ProviderError::message(format!("BookWalker search: {e}")))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| ProviderError::message(format!("BookWalker search rows: {e}")))?;
+            if !ids.is_empty() {
+                drop(stmt);
+                return self.fetch_series_by_ids(&conn, &ids);
+            }
         }
-        self.fetch_series_by_ids(&conn, &ids)
+        Ok(Vec::new())
+    }
+
+    /// 旧库迁移：user_version < FTS_SCHEMA_VERSION（trigram 时代下载的库）→
+    /// drop 重建为 unicode61 + 分析链，并从 series 表重新填充（本地重建，无需重新下载）。
+    /// 返回是否实际执行了重建（已是新版 → false）。
+    fn migrate_fts_if_needed(conn: &rusqlite::Connection) -> Result<bool, ProviderError> {
+        let ver: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap_or(0);
+        if ver >= FTS_SCHEMA_VERSION {
+            return Ok(false);
+        }
+        tracing::info!(
+            "BookWalker fts migrating to v{FTS_SCHEMA_VERSION} (unicode61 + analyzer)..."
+        );
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='series_fts'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        if exists {
+            conn.execute_batch("DROP TABLE series_fts;")
+                .map_err(|e| ProviderError::message(format!("BookWalker fts migrate: {e}")))?;
+        }
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE series_fts USING fts5 \
+             (id, title, alt_titles, type, tokenize = 'unicode61');",
+        )
+        .map_err(|e| ProviderError::message(format!("BookWalker fts migrate: {e}")))?;
+        populate_series_fts(conn)?;
+        conn.pragma_update(None, "user_version", FTS_SCHEMA_VERSION)
+            .map_err(|e| ProviderError::message(format!("BookWalker fts migrate: {e}")))?;
+        tracing::info!("BookWalker fts migration done");
+        Ok(true)
     }
 
     fn fetch_series_by_ids(
@@ -1514,15 +1658,14 @@ impl BookWalkerDbDownloader {
             rusqlite::Connection::open(db_file).map_err(|e| format!("SQLiteException: {e}"))?;
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS series_fts USING fts5 \
-             (id, title, alt_titles, type, tokenize = 'trigram');",
+             (id, title, alt_titles, type, tokenize = 'unicode61');",
         )
         .map_err(|e| format!("SQLiteException: {e}"))?;
-        conn.execute_batch(
-            "INSERT INTO series_fts \
-             SELECT s.id, s.title, GROUP_CONCAT(json_each.value, ', '), s.type \
-             FROM series s, json_each(alt_titles) GROUP BY s.id;",
-        )
-        .map_err(|e| format!("SQLiteException: {e}"))?;
+        // 分析链预分词写入（t2s/全半角/小写/折叠 + CJK bigram/unigram）；
+        // alt_titles 为 JSON 数组，逐条分析（populate_series_fts）。
+        populate_series_fts(&conn).map_err(|e| format!("SQLiteException: {e}"))?;
+        conn.pragma_update(None, "user_version", FTS_SCHEMA_VERSION)
+            .map_err(|e| format!("SQLiteException: {e}"))?;
         Ok(())
     }
 }
@@ -1705,13 +1848,22 @@ mod tests {
     #[test]
     fn book_format_value_of_matches_real_db_1_based_values() {
         // 真实库 products.product_type：1=EBOOK 2=AUDIOBOOK。
-        assert_eq!(BookWalkerBookFormat::value_of(1), BookWalkerBookFormat::Ebook);
+        assert_eq!(
+            BookWalkerBookFormat::value_of(1),
+            BookWalkerBookFormat::Ebook
+        );
         assert_eq!(
             BookWalkerBookFormat::value_of(2),
             BookWalkerBookFormat::Audiobook
         );
-        assert_eq!(BookWalkerBookFormat::value_of(0), BookWalkerBookFormat::Ebook);
-        assert_eq!(BookWalkerBookFormat::value_of(3), BookWalkerBookFormat::Ebook);
+        assert_eq!(
+            BookWalkerBookFormat::value_of(0),
+            BookWalkerBookFormat::Ebook
+        );
+        assert_eq!(
+            BookWalkerBookFormat::value_of(3),
+            BookWalkerBookFormat::Ebook
+        );
     }
 
     #[test]
@@ -1972,7 +2124,8 @@ mod tests {
             [],
         )
         .unwrap();
-        // FTS5 索引（与下载器 createSearchIndex 相同）
+        // 旧下载工件：trigram FTS + 直通原始标题（user_version 缺省 0）；
+        // search 首次调用应本地迁移重建为 unicode61 + 分析链。
         conn.execute_batch(
             "CREATE VIRTUAL TABLE series_fts USING fts5 (id, title, alt_titles, type, tokenize = 'trigram'); \
              INSERT INTO series_fts SELECT s.id, s.title, GROUP_CONCAT(json_each.value, ', '), s.type \
@@ -1983,7 +2136,7 @@ mod tests {
 
         let repo = BookWalkerSeriesRepository::new(&db_path);
 
-        // search：精确短语匹配（Kotlin `"$title"` 带引号）
+        // search：分析链 token AND（首次调用触发 v2 迁移）
         let results = match repo.search("One Punch Man", &[BookWalkerContentType::Manga]) {
             Ok(v) => v,
             Err(e) => panic!("search error: {e:?}"),
@@ -2000,6 +2153,26 @@ mod tests {
             image.url600(),
             "https://img.sos-dan.net/600/IMG/_/0/00001.webp"
         );
+
+        // 迁移已生效（user_version 落盘），重复搜索不再重建
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let ver: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, FTS_SCHEMA_VERSION);
+        drop(conn);
+
+        // 装饰后缀：渐进前缀 AND 兜底（标题无此后缀）；日文别名亦可命中
+        let hits = repo
+            .search("One Punch Man 第2卷", &[BookWalkerContentType::Manga])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "CNT_1001");
+        let hits = repo
+            .search("ワンパンマン", &[BookWalkerContentType::Manga])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "CNT_1001");
 
         // type 过滤：NOVEL 分类不命中（真实库 manga 的 type 列存 1，Novel.number()=2）
         let no_hits = repo
