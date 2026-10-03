@@ -360,6 +360,9 @@ pub struct MatchQuery {
     pub oneshot: bool,
     /// Rust 扩展：第一本书文件名——eHentai 匹配时作为 gid 提取候选。
     pub book_file_name: Option<String>,
+    /// Rust 扩展：括号段噪声剔除的 authorSeparator（**正则**；仅含多个 `[]` 段时生效，
+    /// 匹配比较时 query 与候选标题**双侧**应用）。None = 不处理。
+    pub author_separator: Option<String>,
 }
 
 impl MatchQuery {
@@ -379,6 +382,7 @@ impl MatchQuery {
             chinese: None,
             oneshot: false,
             book_file_name: None,
+            author_separator: None,
         }
     }
 
@@ -404,12 +408,20 @@ impl MatchQuery {
         self
     }
 
-    /// 归一后的 query 名（用于匹配比较；含全角/标点统一预处理与简繁转换）。
+    /// 设置括号段噪声剔除的 authorSeparator（None = 不处理）。
+    pub fn with_author_separator(mut self, author_separator: Option<String>) -> Self {
+        self.author_separator = author_separator;
+        self
+    }
+
+    /// 归一后的 query 名（用于匹配比较；含全角/标点统一预处理、括号段噪声剔除
+    /// 与简繁转换）。
     pub fn normalized_series_name(&self) -> String {
         normalize_matching_title(
             &self.series_name,
             self.normalization_regex.as_deref(),
             self.chinese.as_ref().map(|c| c.as_ref()),
+            self.author_separator.as_deref(),
         )
     }
 
@@ -425,12 +437,14 @@ impl MatchQuery {
         self
     }
 
-    /// 归一单个候选标题（用于匹配比较；含全角/标点统一预处理与简繁转换）。
+    /// 归一单个候选标题（用于匹配比较；含全角/标点统一预处理、括号段噪声剔除
+    /// 与简繁转换）。
     pub fn normalize_title(&self, title: &str) -> String {
         normalize_matching_title(
             title,
             self.normalization_regex.as_deref(),
             self.chinese.as_ref().map(|c| c.as_ref()),
+            self.author_separator.as_deref(),
         )
     }
 
@@ -440,15 +454,19 @@ impl MatchQuery {
     }
 }
 
-/// 匹配归一：先做全角/标点统一预处理（`normalize_search_text`），再应用
+/// 匹配归一：先做全角/标点统一预处理（`normalize_search_text`），再做括号段噪声剔除
+/// （仅含多个 `[]` 段时生效；query 与候选标题双侧应用），然后应用
 /// symbolNormalizeRegex（匹配部分替换为空格 + trim；正则非法时仅 trim；无正则时跳过），
 /// 最后应用简繁转换（chinese 非空时）。
 fn normalize_matching_title(
     s: &str,
     pattern: Option<&str>,
     chinese: Option<&crate::util::ChineseConverter>,
+    author_separator: Option<&str>,
 ) -> String {
     let s = crate::util::normalize_search_text(s);
+    // 全角【】/［］已在上一步映射为半角 []，括号剔除对全角变体同样生效。
+    let s = crate::util::bracket_search_term(&s, author_separator).unwrap_or(s);
     let normalized = match pattern {
         Some(pattern) => match regex::Regex::new(pattern) {
             Ok(re) => re.replace_all(&s, " ").trim().to_string(),
@@ -484,10 +502,36 @@ mod tests {
         let q = query("進撃の巨人：完全版", None);
         // 无 symbolNormalizeRegex 时仍统一预处理全角/标点（"：" → ":"）
         assert_eq!(q.normalized_series_name(), "進撃の巨人:完全版");
+        assert_eq!(q.normalize_title("進撃の巨人：完全版"), "進撃の巨人:完全版");
+    }
+
+    #[test]
+    fn bracket_noise_stripped_from_both_sides() {
+        // 候选侧：含 EH 式噪声括号的候选标题 → 段外文本
+        let q = query("女騎士が転生したら ニートの召使いだった件 全編", None);
         assert_eq!(
-            q.normalize_title("進撃の巨人：完全版"),
-            "進撃の巨人:完全版"
+            q.normalize_title("(画集)[chin] 女騎士が転生したら ニートの召使いだった件 全編 [中国翻訳] [DL版] [3542432]"),
+            "女騎士が転生したら ニートの召使いだった件 全編"
         );
+        // 纯 [] 候选：第一个 [] 命中 authorSeparator → 取第二个 [] 内容（全角 ！ 归一为半角 !）
+        let q = MatchQuery::new("想要成为影之实力者!".to_string(), None, None, None)
+            .with_author_separator(Some("×".to_string()));
+        assert_eq!(
+            q.normalize_title("[逢沢大介×東西×坂野杏梨][想要成为影之实力者！][未完][角川][电子版]"),
+            "想要成为影之实力者!"
+        );
+        // query 侧同样二次剔除（上游已处理时幂等；全角括号变体在此被覆盖）
+        let q = MatchQuery::new(
+            "(画集)［chin］ 标题 ［中国翻訳］ ［DL版］".to_string(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(q.normalized_series_name(), "标题");
+        // 无括号 / 单括号候选不受影响
+        let q = query("進撃の巨人", None);
+        assert_eq!(q.normalize_title("進撃の巨人"), "進撃の巨人");
+        assert_eq!(q.normalize_title("[進撃の巨人]"), "[進撃の巨人]");
     }
 
     #[test]

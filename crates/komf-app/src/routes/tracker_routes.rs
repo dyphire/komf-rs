@@ -96,10 +96,21 @@ async fn search(
             "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
         ));
     }
-    match tracker
-        .search(&query.name, query.nsfw.unwrap_or(true))
-        .await
-    {
+    // Rust 扩展：括号段噪声剔除（仅含多个 [] 时生效；与 metadata 搜索同一规则，
+    // authorSeparator 取 komga 默认库配置；平台链接输入无括号 → 原样通过）。
+    let author_separator = state
+        .read()
+        .unwrap()
+        .config
+        .komga
+        .metadata_update
+        .default
+        .search_title_extraction
+        .author_separator
+        .clone();
+    let name = komf_core::util::bracket_search_term(&query.name, author_separator.as_deref())
+        .unwrap_or_else(|| query.name.clone());
+    match tracker.search(&name, query.nsfw.unwrap_or(true)).await {
         Ok(results) => Json(results).into_response(),
         Err(error) => tracker_error(&provider, error),
     }

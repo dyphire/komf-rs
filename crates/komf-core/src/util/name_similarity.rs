@@ -86,7 +86,10 @@ fn score_single(name: &str, title: &str) -> f32 {
 
 fn trigrams(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
-    chars.windows(3).map(|w| w.iter().collect::<String>()).collect()
+    chars
+        .windows(3)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
 }
 
 fn trigram_dice(lhs: &str, rhs: &str) -> f32 {
