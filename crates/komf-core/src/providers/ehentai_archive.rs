@@ -9,9 +9,11 @@
 //!
 //! 查询能力：
 //! - gid 精准（PRIMARY KEY，O(1)）+ 标签联查 → GalleryRow；
-//! - 标题搜索：附属 FTS5 trigram 索引库 `e-hentai-fts.db`
-//!   （372 万行构建 ~150s、1.4GB；查询毫秒级，中文/日文子串匹配），
-//!   构建/重建由 meta 记录主库 len+mtime 自动触发；未就绪时降级主库 LIKE 扫描。
+//! - 标题搜索：附属 FTS5 预分词索引库 `e-hentai-fts.db`
+//!   （unicode61 + Lucene 分析链：t2s/全半角/小写/折叠 + CJK bigram/unigram；
+//!   372 万行构建 ~150s、1.4GB；查询毫秒级，简繁交叉命中 + 装饰后缀渐进回退），
+//!   构建/重建由 meta 记录主库 len+mtime + fts_version 自动触发；未就绪/纯符号查询
+//!   时降级主库 LIKE 扫描。短查询（<3 字符）走 FTS 前缀匹配，不再触发 LIKE
 //!
 //! 未就绪 / 构建中 / 未命中 → 调用方回退在线 gdata（与 bangumi archive 模式一致）。
 
@@ -33,7 +35,7 @@ pub(crate) const DEFAULT_EHENTAI_ARCHIVE_URL: &str =
 const FTS_DB_FILE: &str = "e-hentai-fts.db";
 
 /// FTS 索引格式版本：DDL/存储格式变更时递增（如 detail=none / contentless），meta 版本不符自动重建。
-const FTS_VERSION: u32 = 3;
+const FTS_VERSION: u32 = 5;
 
 /// 单条 gallery 的完整行（含标签联查结果）。
 #[derive(Debug, Clone)]
@@ -204,7 +206,7 @@ impl EHentaiArchiveStore {
         out
     }
 
-    /// 主库 LIKE 降级搜索（FTS 未就绪或短词 <3 字符时）。返回 gid 列表（最新优先）。
+    /// 主库 LIKE 降级搜索（FTS 未就绪或查询无有效 token 时）。返回 gid 列表（最新优先）。
     fn like_search_gids(
         &self,
         query: &str,
@@ -286,10 +288,10 @@ impl EHentaiArchiveStore {
 }
 
 // ---------------------------------------------------------------------------
-// FTS5 trigram 索引
+// FTS5 预分词索引（unicode61 + Lucene 分析链）
 // ---------------------------------------------------------------------------
 
-/// 只读 FTS5 trigram 索引句柄（标题子串匹配，毫秒级）。
+/// 只读 FTS5 索引句柄（标题 token 匹配，毫秒级）。
 pub(crate) struct EHentaiFtsStore {
     conn: Mutex<rusqlite::Connection>,
 }
@@ -320,56 +322,88 @@ impl EHentaiFtsStore {
             .is_ok()
     }
 
-    /// trigram 子串匹配。索引为 detail=none（无位置信息）+ contentless（不存原文），
-    /// 不能直接用 `"完整词"` phrase 查询（FTS5 无位置无法验证子串连续性，返回空）——
-    /// 因此把查询词手动切成 3-gram 单 token，构造 `"tg1" AND "tg2" AND ...`
-    /// （detail=none 下单 token 查询正常），语义等价子串匹配
-    /// （乱序假阳性极低，后续相似度匹配兜底）。
-    /// 查询串需 ≥3 字符，否则返回 None（调用方降级 LIKE）。
+    /// 查询侧分析链 token 渐进前缀 AND：先全量 AND，未命中逐层丢尾部 token 重试
+    /// （komga 系列名常带归档标题没有的后缀：卷数/系列/话数）。
+    /// 短查询（<3 字符）自动改走 FTS 前缀匹配（"tok" *）：召回更宽，且不再降级
+    /// 主库 LIKE 全表扫（372 万行 × 2 列，单次秒级）。
+    /// 索引为 detail=none（无位置）+ contentless（不存原文），单 token AND 查询正常。
+    /// token 为空（纯符号查询）返回 None，调用方降级 LIKE（FTS 未就绪场景）。
     pub fn search_gids(&self, query: &str, limit: usize) -> Option<Vec<i32>> {
-        let chars: Vec<char> = query.chars().collect();
-        if chars.len() < 3 {
+        let tokens = crate::util::search_analyze(query);
+        if tokens.is_empty() {
             return None;
         }
-        let mut trigrams: Vec<String> = chars
-            .windows(3)
-            .map(|w| w.iter().collect::<String>())
-            .collect();
-        // 防御：长查询截断（50 个 trigram 足够精确，避免 MATCH 表达式过长）
-        trigrams.truncate(50);
-        let match_expr = trigrams
-            .iter()
-            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        let tokens = &tokens[..tokens.len().min(50)];
+        // 短查询（1~2 字符）：精确 token AND 召回过窄，改前缀匹配扩大召回
+        // （"愛" → 命中 愛/愛さ/愛される... 开头的所有词项）。
+        let prefix = query.chars().count() < 3;
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT rowid FROM gallery_fts WHERE gallery_fts MATCH ?1 LIMIT ?2")
             .ok()?;
-        let mut rows = stmt
-            .query_map(rusqlite::params![match_expr, limit as i64], |r| {
-                r.get::<_, i32>(0)
-            })
-            .ok()?;
-        let mut out = Vec::new();
-        while let Some(Ok(g)) = rows.next() {
-            out.push(g);
+        // 渐进前缀 AND：全量未命中逐层丢尾部 token 重试，不低于 droppable_floor
+        //（拉丁整词子句永不放宽、前缀至少两 token，避免单词查询冲爆候选）
+        let floor = if tokens.len() <= 1 {
+            1
+        } else {
+            crate::util::droppable_floor(tokens)
+        };
+        for n in (floor..=tokens.len()).rev() {
+            let match_expr = fts_fragments_and_expr(&tokens[..n], prefix);
+            let gids: Vec<i32> = stmt
+                .query_map(rusqlite::params![match_expr, limit as i64], |r| {
+                    r.get::<_, i32>(0)
+                })
+                .ok()?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !gids.is_empty() {
+                return Some(gids);
+            }
         }
-        Some(out)
+        Some(Vec::new())
     }
 }
 
-/// 从主库构建 FTS5 trigram 索引（写 .tmp 后 rename；分批按 gid 范围插入）。
+/// FTS5 AND 表达式（ehentai 专用）：索引为 detail=none，FTS5 禁止多 token
+/// phrase——分析链产出的 token 若含 unicode61 分隔符（"3.0"、"re:zero" 中的
+/// `.`/`:`）会被引号短语语法整体报错。因此按 unicode61 的 token 字符集
+/// （L*/N*，is_alphanumeric 近似）把每个 token 切成单 token 片段再 AND。
+/// `prefix=true`（短查询）时每个片段改用 FTS5 前缀匹配（"frag" *），扩大召回。
+fn fts_fragments_and_expr(tokens: &[String], prefix: bool) -> String {
+    tokens
+        .iter()
+        .flat_map(|t| {
+            t.split(|c: char| !c.is_alphanumeric())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .map(|t| {
+            let t = t.replace('"', "\"\"");
+            if prefix {
+                format!("\"{t}\" *")
+            } else {
+                format!("\"{t}\"")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// 从主库构建 FTS5 索引（写 .tmp 后 rename；分批按 gid 范围插入）。
+/// unicode61 + 预分词：写入前经 Lucene 链分析（t2s/全半角/小写/折叠，
+/// 索引侧 unigram+bigram+ngram），查询侧同链 token AND（见 search_gids）。
 fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
     let tmp = fts_path.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp);
     let conn = rusqlite::Connection::open(&tmp)
         .map_err(|e| ProviderError::message(format!("ehentai fts create failed: {e}")))?;
     conn.execute_batch(
-        // detail=none：子串匹配不需要位置信息，去掉位置数据显著缩小倒排。
+        // detail=none：AND 查询不需要位置信息，去掉位置数据显著缩小倒排。
         // content=''：不存 title/title_jpn 原文（gid 放 rowid），只存倒排——
         // 原文在主库已有，FTS 只负责命中 gid，体积进一步减半。
-        "CREATE VIRTUAL TABLE gallery_fts USING fts5(title, title_jpn, tokenize='trigram', detail=none, content='');",
+        "CREATE VIRTUAL TABLE gallery_fts USING fts5(title, title_jpn, tokenize='unicode61', detail=none, content='');",
     )
     .map_err(|e| ProviderError::message(format!("ehentai fts create table failed: {e}")))?;
     // 只读 URI 打开主库（避免 ATTACH 以读写模式打开产生 WAL/-shm 残留）
@@ -391,22 +425,67 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
     }
     tracing::info!("ehentai fts building index for {total} rows...");
     // gid 为 INTEGER PRIMARY KEY → rowid=gid，按 gid 分批
-    const BATCH: i64 = 500_000;
+    // （分批事务 + 分析后插入；分析产物仅本批驻留内存）
+    const BATCH: i64 = 50_000;
     let mut last_gid: i64 = -1;
     let mut done: i64 = 0;
     while done < total {
-        let n = conn
-            .execute(
-                "INSERT INTO gallery_fts(rowid, title, title_jpn) \
-                 SELECT gid, title, title_jpn FROM src.gallery \
-                 WHERE gid > ?1 ORDER BY gid LIMIT ?2",
-                rusqlite::params![last_gid, BATCH],
-            )
-            .map_err(|e| ProviderError::message(format!("ehentai fts insert failed: {e}")))?;
+        let batch_result = (|| -> Result<i64, ProviderError> {
+            conn.execute_batch("BEGIN")
+                .map_err(|e| ProviderError::message(format!("ehentai fts begin failed: {e}")))?;
+            let result = (|| -> Result<i64, ProviderError> {
+                let rows: Vec<(i64, String, Option<String>)> = {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT gid, title, title_jpn FROM src.gallery \
+                             WHERE gid > ?1 ORDER BY gid LIMIT ?2",
+                        )
+                        .map_err(|e| {
+                            ProviderError::message(format!("ehentai fts select failed: {e}"))
+                        })?;
+                    let mapped = stmt
+                        .query_map(rusqlite::params![last_gid, BATCH], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        })
+                        .map_err(|e| {
+                            ProviderError::message(format!("ehentai fts select failed: {e}"))
+                        })?;
+                    mapped.filter_map(|r| r.ok()).collect()
+                };
+                let mut ins = conn
+                    .prepare("INSERT INTO gallery_fts(rowid, title, title_jpn) VALUES (?1,?2,?3)")
+                    .map_err(|e| {
+                        ProviderError::message(format!("ehentai fts insert failed: {e}"))
+                    })?;
+                for (gid, title, title_jpn) in &rows {
+                    let t = crate::util::index_analyze_terms(title).join(" ");
+                    let tj = title_jpn
+                        .as_deref()
+                        .map(|s| crate::util::index_analyze_terms(s).join(" "));
+                    ins.execute(rusqlite::params![gid, t, tj]).map_err(|e| {
+                        ProviderError::message(format!("ehentai fts insert failed: {e}"))
+                    })?;
+                }
+                Ok(rows.len() as i64)
+            })();
+            match result {
+                Ok(n) => {
+                    conn.execute_batch("COMMIT").map_err(|e| {
+                        ProviderError::message(format!("ehentai fts commit failed: {e}"))
+                    })?;
+                    Ok(n)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })();
+        let n = batch_result?;
         if n == 0 {
             break;
         }
-        done += n as i64;
+        done += n;
         last_gid = conn
             .query_row(
                 "SELECT COALESCE(MAX(rowid), -1) FROM gallery_fts",
@@ -414,7 +493,7 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
                 |r| r.get::<_, i64>(0),
             )
             .map_err(|e| ProviderError::message(format!("ehentai fts progress failed: {e}")))?;
-        if done % (BATCH * 2) == 0 || done >= total {
+        if done % (BATCH * 4) == 0 || done >= total {
             tracing::info!("ehentai fts index progress {done}/{total}");
         }
     }
@@ -844,7 +923,8 @@ impl EHentaiArchiveService {
         self.store.read().unwrap().clone()
     }
 
-    /// 离线标题搜索（阶段 B）：FTS5 trigram 优先，未就绪/短词降级 LIKE。
+    /// 离线标题搜索：FTS5 分析链索引优先（短查询自动前缀匹配），
+    /// 未就绪/无有效 token 降级 LIKE。
     /// 返回 GalleryRow（最新优先，过滤 expunged/removed + category/uploader 白名单）。
     pub(crate) fn search_titles(
         &self,
@@ -856,8 +936,8 @@ impl EHentaiArchiveService {
         let Some(store) = self.get() else {
             return Vec::new();
         };
-        // ① FTS 路径（≥3 字符且索引就绪）
-        let gids: Vec<i32> = if query.chars().count() >= 3 {
+        // ① FTS 路径（索引就绪；短查询在 search_gids 内自动改前缀匹配，不再走 LIKE）
+        let gids: Vec<i32> = {
             let fts_hit: Option<Vec<i32>> = {
                 let guard = self.fts.read().unwrap();
                 guard
@@ -866,6 +946,7 @@ impl EHentaiArchiveService {
             };
             match fts_hit {
                 Some(gids) => gids,
+                // FTS 未就绪/纯符号查询（无有效 token）→ 降级主库 LIKE 全表扫
                 None => store.like_search_gids(
                     query,
                     limit.saturating_mul(4).max(50),
@@ -873,13 +954,6 @@ impl EHentaiArchiveService {
                     uploader_filter,
                 ),
             }
-        } else {
-            store.like_search_gids(
-                query,
-                limit.saturating_mul(4).max(50),
-                category_filter,
-                uploader_filter,
-            )
         };
         if gids.is_empty() {
             return Vec::new();
@@ -1120,6 +1194,7 @@ fn ensure_fts(
             },
             Err(e) => {
                 tracing::warn!("ehentai fts build failed: {e}; search falls back to LIKE/online");
+                let _ = std::fs::remove_file(fts_path2.with_extension("tmp"));
                 let _ = std::fs::remove_file(&fts_path2);
             }
         }
@@ -1180,6 +1255,16 @@ mod tests {
                 torrentcount, bytorrent)
              VALUES (111, 'aabbccddee', 'gone', '', 'Manga', '', '', 0, 1, 1,
                 1, 0, 0, '1.00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        // 含 "本3.0" 的条目（detail=none 下 punctuation token 不得触发 phrase 报错）
+        conn.execute(
+            "INSERT INTO gallery (gid, token, title, title_jpn, category, thumb, uploader,
+                posted, filecount, filesize, expunged, removed, replaced, rating,
+                torrentcount, bytorrent)
+             VALUES (333, 'ccdd112233', 'Wakaraserareru Hon 3.0', 'わからせられる本3.0',
+                'Doujinshi', '', '', 1700000000, 10, 100, 0, 0, 0, '4.00', 0, 0)",
             [],
         )
         .unwrap();
@@ -1287,7 +1372,7 @@ mod tests {
         build_fts(&db, &fts).expect("build fts");
         let store = EHentaiFtsStore::open(&fts).expect("open fts");
         assert!(store.validate());
-        // trigram 子串匹配（中/日文）
+        // 分析链 token AND 匹配（中/日文）
         let gids = store.search_gids("愛される資", 50).expect("hit");
         assert_eq!(gids, vec![222]);
         let gids = store.search_gids("タイトル", 50).expect("hit");
@@ -1295,13 +1380,52 @@ mod tests {
         // 英文
         let gids = store.search_gids("Aisareru", 50).expect("hit");
         assert_eq!(gids, vec![222]);
-        // 短词 → None（降级 LIKE）
-        assert!(store.search_gids("愛", 50).is_none());
+        // 单字也可命中（索引侧 unigram；<3 字符自动走前缀匹配）
+        let gids = store.search_gids("愛", 50).expect("hit");
+        assert_eq!(gids, vec![222]);
+        // 短查询前缀匹配：拉丁/日文片段前缀均可命中（不再降级 LIKE）
+        let gids = store.search_gids("Ai", 50).expect("hit");
+        assert_eq!(gids, vec![222]);
+        let gids = store.search_gids("タ", 50).expect("hit");
+        assert_eq!(gids, vec![4190146]);
+        // 双字符 CJK：前缀模式（"愛さ" * 命中 愛される資格）
+        let gids = store.search_gids("愛さ", 50).expect("hit");
+        assert_eq!(gids, vec![222]);
+        // 装饰后缀：渐进前缀 AND 兜底（标题 "愛される資格" 无此后缀）
+        let gids = store.search_gids("愛される資格 第1話", 50).expect("hit");
+        assert_eq!(gids, vec![222]);
+        // 繁体查询命中简体索引（t2s 归一；标题日文 愛→爱）
+        let gids = store.search_gids("愛される資格", 50).expect("hit");
+        assert_eq!(gids, vec![222]);
         // 不存在
         let gids = store.search_gids("不存在的东西", 50).expect("ok");
         assert!(gids.is_empty());
+        // 回归：含 unicode61 分隔符的 token（"3.0"）在 detail=none 下不得触发
+        // phrase 报错——切成片段 AND 后应命中标题 "…本3.0" 的条目
+        let gids = store.search_gids("本3.0", 50).expect("hit");
+        assert_eq!(gids, vec![333]);
         let _ = std::fs::remove_file(&db);
         let _ = std::fs::remove_file(&fts);
+    }
+
+    #[test]
+    fn fts_fragments_expr_splits_punctuation() {
+        let tokens = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            fts_fragments_and_expr(&tokens(&["本", "3.0"]), false),
+            "\"本\" AND \"3\" AND \"0\""
+        );
+        assert_eq!(
+            fts_fragments_and_expr(&tokens(&["re:zero", "生活"]), false),
+            "\"re\" AND \"zero\" AND \"生活\""
+        );
+        assert_eq!(fts_fragments_and_expr(&[], false), "");
+        // 短查询前缀模式：每个片段改为 FTS5 前缀匹配
+        assert_eq!(fts_fragments_and_expr(&tokens(&["愛"]), true), "\"愛\" *");
+        assert_eq!(
+            fts_fragments_and_expr(&tokens(&["ai", "本"]), true),
+            "\"ai\" * AND \"本\" *"
+        );
     }
 
     #[test]

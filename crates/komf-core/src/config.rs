@@ -191,7 +191,7 @@ impl Default for BangumiConfig {
 }
 
 /// bangumi/Archive 离线数据源配置（BangumiKomga bangumi_archive 移植）：
-/// enabled 时后台下载 Archive（约 418MB zip）→ 构建 SQLite 索引（FTS5 trigram）
+/// enabled 时后台下载 Archive（约 418MB zip）→ 构建 SQLite 索引（FTS5 预分词分析链）
 /// + mmap 数据源；搜索/元数据优先离线，未就绪或未命中回退在线 API。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

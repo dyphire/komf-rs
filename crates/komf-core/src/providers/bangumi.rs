@@ -1058,6 +1058,11 @@ const BANGUMI_STATUS_TAGS: [&str; 9] = [
 /// 修复了历史 "旅行，异世界" 中文逗号问题）。可通过 tagWhitelistFile 配置覆盖。
 const BANGUMI_TAG_WHITELIST_JSON: &str = include_str!("bangumi_tag_whitelist.json");
 
+/// archive match 召回候选的 limit 换算基准：match 无调用方 limit，取与搜索一致的
+/// 典型值（25 → 最多 600 候选）。match 只需 name_matcher 命中的少量候选，
+/// 旧固定 1000 的多余候选全是浪费的 mmap 随机读 + 整条 JSON 解析。
+const ARCHIVE_MATCH_SEARCH_LIMIT: usize = 25;
+
 /// 加载标签白名单：tagWhitelistFile 指定路径优先；否则内置资源。解析失败回退空列表。
 fn load_bangumi_tag_whitelist(file: Option<&str>) -> Vec<String> {
     if let Some(path) = file {
@@ -2284,7 +2289,7 @@ impl MetadataProvider for BangumiMetadataProvider {
             let Some(store) = archive.get() else {
                 return Ok(Vec::new());
             };
-            let results = store.search(series_name);
+            let results = store.search(series_name, limit);
             // 召回层：相似度只排序不拦截，候选尽可能宽泛（精排由 match 路径负责）。
             let mut candidates: Vec<(f32, SeriesSearchResult)> = Vec::new();
             for v in results {
@@ -2353,26 +2358,12 @@ impl MetadataProvider for BangumiMetadataProvider {
             }
             // 按相似度降序取前 limit 个；候选不再被相似度拦截。
             candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let mut out: Vec<SeriesSearchResult> =
+            let out: Vec<SeriesSearchResult> =
                 candidates.into_iter().take(limit).map(|(_, r)| r).collect();
-            if !out.is_empty() {
-                // 元数据离线 + 封面在线：离线命中后对每个结果在线补封面 URL；
-                // 在线失败保持 None（不影响搜索结果）。
-                for r in out.iter_mut() {
-                    if r.image_url.is_some() {
-                        continue;
-                    }
-                    let Ok(id) = r.result_id.parse::<u64>() else {
-                        continue;
-                    };
-                    if let Ok(subject) = self.client.get(id).await {
-                        r.image_url = BangumiClient::cover_url(&subject);
-                    }
-                }
-                return Ok(out);
-            }
+            // archive 无封面数据（上游 dump 不含图）。不再逐结果串行在线补封面——
+            // N 次串行 RTT 让离线搜索比在线 API 还慢；封面留空由调用方按需处理。
             // 离线未命中：不回退在线（archive 模式下纯离线）。
-            return Ok(Vec::new());
+            return Ok(out);
         }
         // ② 在线（archive 未启用）
         let results = self.client.search(series_name, limit as u32).await?;
@@ -2604,7 +2595,7 @@ impl BangumiMetadataProvider {
             .and_then(media_type_platform)
             .or_else(|| media_type_platform(self.media_type));
         let mut candidates: Vec<ArchiveSubject> = Vec::new();
-        for v in store.search(&match_query.search_name()) {
+        for v in store.search(&match_query.search_name(), ARCHIVE_MATCH_SEARCH_LIMIT) {
             let arch: ArchiveSubject = serde_json::from_value(v).unwrap_or_default();
             if arch.id == 0 {
                 continue;

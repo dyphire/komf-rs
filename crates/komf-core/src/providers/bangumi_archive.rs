@@ -6,7 +6,7 @@
 //!   └── Arc<RwLock<Option<Arc<BangumiArchiveStore>>>>（原子替换共享槽）
 //!         ├── Mutex<rusqlite::Connection>
 //!         │     ├── subjects_idx:  id/type/name/name_cn/row_offset
-//!         │     ├── subjects_fts:  FTS5 trigram（content 指向 subjects_idx）
+//!         │     ├── subjects_fts:  FTS5 unicode61 + 分析链预分词（content 指向 subjects_idx）
 //!         │     ├── relations_idx: (subject_id, relation_type, related_subject_id)
 //!         │     ├── persons: person 实体（id/name/name_cn/type/career）
 //!         │     ├── subject_persons: subject↔person 关联（含 position 角色）
@@ -415,7 +415,7 @@ const DDL_FTS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS subjects_fts USING fts
     aliases,
     content='subjects_idx',
     content_rowid='id',
-    tokenize='trigram'
+    tokenize='unicode61'
 )";
 const DDL_RELATIONS: &str = "CREATE TABLE IF NOT EXISTS relations_idx (
     subject_id         INTEGER NOT NULL,
@@ -443,7 +443,21 @@ const DDL_SUBJECT_PERSONS: &str = "CREATE TABLE IF NOT EXISTS subject_persons (
 const DDL_SP_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_subject_persons_subject ON subject_persons(subject_id)";
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 7;
+
+/// FTS 召回候选上限 = limit*25（clamp 25..=1000）：每个候选都要 mmap 随机读 +
+/// 整条 subject JSON 解析，旧固定值 1000 对 limit=10~25 的搜索是纯浪费
+/// （对齐 bookwalker/mangabaka 的"小候选集 + 精排"模式）。
+fn fts_max_candidates(limit: usize) -> i64 {
+    limit.saturating_mul(25).clamp(25, 1000) as i64
+}
+/// 查询 token 数上限：防御超长查询构造巨型 MATCH 表达式。
+const FTS_MAX_QUERY_TERMS: usize = 60;
+/// FTS 结构版本（写入 archive_update.fts_version）：分词器/写入方式变化时随
+/// SCHEMA_VERSION 递增。init_schema 据此本地重建 FTS。
+/// 注意：不能用 COUNT(*) 判 FTS 是否为空——外部内容表的无 MATCH 查询直通
+/// content 表（FTS5 文档 4.4.4），COUNT 恒等于 subjects_idx 行数。
+const FTS_SCHEMA_VERSION: &str = "7";
 
 /// Archive relation_type（数字）→ 中文名（对齐 BangumiKomga SubjectRelation；
 /// 其余类型原样返回，Rust 侧只消费"单行本"）。
@@ -557,6 +571,23 @@ impl BangumiArchiveStore {
 
     pub fn init_schema(&self) -> Result<(), ProviderError> {
         let c = self.conn.lock().unwrap();
+        // v5 → v6：FTS 分词器 trigram → unicode61 + 预分词分析链（kmrs Lucene 语义）。
+        // 必须本地重建而非等下载更新——do_update 在远程数据未更新时会跳过重建，
+        // 仅重建 FTS 即可：subjects_idx 保留原始标题，重新分析填充。
+        let fts_is_trigram = c
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='subjects_fts'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .map(|sql| sql.contains("trigram"))
+            .unwrap_or(false);
+        if fts_is_trigram {
+            c.execute_batch("DROP TABLE IF EXISTS subjects_fts;")
+                .map_err(|e| ProviderError::message(format!("archive fts migrate v6: {e}")))?;
+        }
         // 旧库缺 aliases 列（v3）→ 重建索引表（build 会全量重插）
         let has_alias = match c.prepare("PRAGMA table_info(subjects_idx)") {
             Ok(mut st) => st
@@ -616,6 +647,24 @@ impl BangumiArchiveStore {
         }
         c.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| ProviderError::message(format!("archive version failed: {e}")))?;
+        // FTS 版本迁移：fts_version 落后且索引有数据 → 本地分析重建
+        // （v6 场景：trigram → 预分词 unicode61；subjects_idx 保留原始标题，
+        // 重新分析即可，无需重新下载——do_update 在远程未更新时会跳过重建）。
+        let fts_ver: String = c
+            .query_row(
+                "SELECT value FROM archive_update WHERE key='fts_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let idx_rows = c
+            .query_row("SELECT COUNT(*) FROM subjects_idx", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0);
+        if idx_rows > 0 && fts_ver != FTS_SCHEMA_VERSION {
+            Self::rebuild_fts(&c)?;
+        }
         Ok(())
     }
 
@@ -636,7 +685,9 @@ impl BangumiArchiveStore {
         tx("BEGIN")?;
         let result = (|| -> Result<(usize, usize, usize, usize), ProviderError> {
             tx("DELETE FROM subjects_idx")?;
-            tx("DELETE FROM subjects_fts")?;
+            // delete-all 特殊命令清空 FTS（原因见 rebuild_fts；普通 DELETE 在此场景
+            // 会触发 SQLite 的 malformed 缺陷）
+            tx("INSERT INTO subjects_fts(subjects_fts) VALUES('delete-all')")?;
             tx("DELETE FROM relations_idx")?;
             tx("DELETE FROM persons")?;
             tx("DELETE FROM subject_persons")?;
@@ -644,12 +695,14 @@ impl BangumiArchiveStore {
             let rel = Self::import_relations(&c, relations_path)?;
             let persons = Self::import_persons(&c, persons_path)?;
             let sp = Self::import_subject_persons(&c, subject_persons_path)?;
+            // FTS 重建：分析链预分词后写入（替代旧 trigram 直通 INSERT SELECT）
+            let rows = Self::subject_fts_rows(&c)?;
+            Self::insert_fts_rows(&c, &rows)?;
             c.execute(
-                "INSERT INTO subjects_fts(rowid, name, name_cn, aliases)
-                 SELECT id, name, name_cn, aliases FROM subjects_idx",
-                [],
+                "INSERT OR REPLACE INTO archive_update VALUES ('fts_version', ?1)",
+                [FTS_SCHEMA_VERSION],
             )
-            .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+            .map_err(|e| ProviderError::message(format!("archive fts version: {e}")))?;
             Ok((subj, rel, persons, sp))
         })();
         match result {
@@ -714,6 +767,88 @@ impl BangumiArchiveStore {
             .map_err(|e| ProviderError::message(format!("archive insert: {e}")))?;
         }
         Ok(())
+    }
+
+    /// 读出 subjects_idx 的原始标题并跑分析链，得到 FTS 行
+    /// (id, name_tokens, name_cn_tokens, aliases_tokens)。
+    fn subject_fts_rows(
+        c: &rusqlite::Connection,
+    ) -> Result<Vec<(i64, String, Option<String>, Option<String>)>, ProviderError> {
+        let mut stmt = c
+            .prepare("SELECT id, name, name_cn, aliases FROM subjects_idx")
+            .map_err(|e| ProviderError::message(format!("archive fts rows: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|e| ProviderError::message(format!("archive fts rows: {e}")))?
+            .filter_map(|r| r.ok())
+            .map(|(id, name, name_cn, aliases)| {
+                // aliases 为空格分隔的别名串（archive_aliases_str）：空格即
+                // standard_tokenize 的分隔符，整条分析与逐条分析结果相同。
+                let analyze = |s: &str| crate::util::index_analyze_terms(s).join(" ");
+                (
+                    id,
+                    analyze(&name),
+                    name_cn.as_deref().map(analyze),
+                    aliases.as_deref().map(analyze),
+                )
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    /// 事务内写入 FTS（调用方需已在事务中，或单次写入场景）。
+    fn insert_fts_rows(
+        c: &rusqlite::Connection,
+        rows: &[(i64, String, Option<String>, Option<String>)],
+    ) -> Result<(), ProviderError> {
+        let mut stmt = c
+            .prepare("INSERT INTO subjects_fts(rowid, name, name_cn, aliases) VALUES (?1,?2,?3,?4)")
+            .map_err(|e| ProviderError::message(format!("archive fts insert: {e}")))?;
+        for (id, name, name_cn, aliases) in rows {
+            stmt.execute(rusqlite::params![id, name, name_cn, aliases])
+                .map_err(|e| ProviderError::message(format!("archive fts insert: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// 独立事务内重建 FTS（init_schema 迁移路径；build 在自己的大事务内直调
+    /// subject_fts_rows + insert_fts_rows）。成功后落 fts_version 标记。
+    fn rebuild_fts(c: &rusqlite::Connection) -> Result<(), ProviderError> {
+        let run = |c: &rusqlite::Connection| -> Result<(), ProviderError> {
+            // delete-all 特殊命令清空 FTS 索引。不能用 `DELETE FROM subjects_fts`：
+            // FTS5 外部内容表经"drop 后以同名重建"后，普通 DELETE 的全表扫描路径
+            // 会报 database disk image is malformed（SQLite 缺陷，3.45/3.50 均复现），
+            // delete-all 走索引层清空，无此问题。
+            c.execute_batch("INSERT INTO subjects_fts(subjects_fts) VALUES('delete-all')")
+                .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+            let rows = Self::subject_fts_rows(c)?;
+            Self::insert_fts_rows(c, &rows)
+        };
+        c.execute_batch("BEGIN")
+            .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+        match run(c) {
+            Ok(()) => {
+                c.execute_batch("COMMIT")
+                    .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+                c.execute(
+                    "INSERT OR REPLACE INTO archive_update VALUES ('fts_version', ?1)",
+                    [FTS_SCHEMA_VERSION],
+                )
+                .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = c.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     fn import_relations(c: &rusqlite::Connection, path: &Path) -> Result<usize, ProviderError> {
@@ -941,41 +1076,18 @@ impl BangumiArchiveStore {
         .unwrap_or_default()
     }
 
-    /// 搜索（FTS5 → LIKE 回退；仅书籍 type=1；FTS 相关性顺序）。
-    pub fn search(&self, query: &str) -> Vec<serde_json::Value> {
+    /// 搜索（FTS5 渐进前缀 AND；仅书籍 type=1）。
+    /// FTS 未命中即返回空：v6 分析链索引（索引/查询同一归一化链）已覆盖
+    /// LIKE 曾兜底的场景，不再保留三列 LIKE 全表扫回退（且该回退无 LIMIT，
+    /// 命中后还会全量 mmap 读出）。
+    pub fn search(&self, query: &str, limit: usize) -> Vec<serde_json::Value> {
         self.touch();
-        if self.mm.is_none() || query.trim().is_empty() {
+        let query = query.trim();
+        if self.mm.is_none() || query.is_empty() {
             return Vec::new();
         }
         let c = self.conn.lock().unwrap();
-        let ids: Vec<u64> = c
-            .prepare(
-                "SELECT f.rowid FROM subjects_fts f JOIN subjects_idx i ON i.id = f.rowid
-                 WHERE subjects_fts MATCH ?1 AND i.type = 1",
-            )
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map([fts_query(query)], |r| r.get::<_, i64>(0))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).map(|v| v as u64).collect())
-            })
-            .unwrap_or_default();
-        let ids = if ids.is_empty() {
-            // FTS 无结果 → LIKE 回退（仅 type=1）
-            let like = format!("%{query}%");
-            c.prepare(
-                "SELECT id FROM subjects_idx WHERE type=1 AND (name LIKE ?1 OR name_cn LIKE ?1 OR aliases LIKE ?1)",
-            )
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map([&like], |r| r.get::<_, i64>(0))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).map(|v| v as u64).collect())
-            })
-            .unwrap_or_default()
-        } else {
-            ids
-        };
+        let ids = fts_search_ids(&c, query, limit);
         drop(c);
         let offsets: std::collections::HashMap<u64, u64> =
             self.offsets_by_ids(&ids).into_iter().collect();
@@ -1148,18 +1260,61 @@ fn archive_aliases_str(item: &ArchiveSubject) -> String {
     out.join(" ")
 }
 
-/// FTS5 查询构造（trigram；term 前缀匹配 + OR）。
-fn fts_query(user_input: &str) -> String {
-    let q = user_input.trim().replace('"', "\"\"");
-    if q.is_empty() {
-        return "\"\"".to_string();
+/// FTS5 渐进前缀 AND 查询。
+///
+/// 查询侧分析链 token 先全量 AND；未命中时逐层丢尾部 token 重试
+/// （komga 系列名常带归档标题没有的装饰后缀：系列/卷数/话数，如
+/// "葬送的芙莉莲系列" → 尾部 token 命中不了时，前缀 token 集仍可命中
+/// "葬送的芙莉莲"）。索引侧 unigram+bigram 保证查询前缀 token 集必有解析。
+fn fts_search_ids(c: &rusqlite::Connection, query: &str, limit: usize) -> Vec<u64> {
+    let tokens = crate::util::search_analyze(query);
+    if tokens.is_empty() {
+        return Vec::new();
     }
-    let terms: Vec<String> = q.split_whitespace().map(|t| format!("\"{t}\"*")).collect();
-    if terms.is_empty() {
-        "\"\"".to_string()
+    let tokens = &tokens[..tokens.len().min(FTS_MAX_QUERY_TERMS)];
+    let mut stmt = match c.prepare(
+        "SELECT f.rowid FROM subjects_fts f JOIN subjects_idx i ON i.id = f.rowid
+         WHERE subjects_fts MATCH ?1 AND i.type = 1
+         ORDER BY rank LIMIT ?2",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    // 单 token 查询（纯拉丁词等）直接查询；多 token 未命中时逐层丢尾部 token
+    // 重试，但不低于 droppable_floor（拉丁整词子句永不放宽、前缀至少两 token，
+    // 避免退化为单词查询冲爆候选上限——对齐 kmrs cjk_droppable_floor 的变体）。
+    let floor = if tokens.len() <= 1 {
+        1
     } else {
-        terms.join(" OR ")
+        crate::util::droppable_floor(tokens)
+    };
+    for n in (floor..=tokens.len()).rev() {
+        let expr = fts_and_expr(&tokens[..n]);
+        let rows = stmt
+            .query_map(rusqlite::params![expr, fts_max_candidates(limit)], |r| {
+                r.get::<_, i64>(0)
+            })
+            .ok()
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .map(|v| v as u64)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !rows.is_empty() {
+            return rows;
+        }
     }
+    Vec::new()
+}
+
+/// tokens 构造 FTS5 AND 表达式（逐 token 引号包裹，`"` 双写转义）。
+fn fts_and_expr(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1884,11 +2039,11 @@ mod tests {
         assert!(bs.image.is_none());
 
         // search：FTS 命中
-        let hits = store.search("Test Manga");
+        let hits = store.search("Test Manga", 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["id"], 1);
         // 仅 type=1；type=2 不进结果
-        assert!(store.search("Anime").is_empty());
+        assert!(store.search("Anime", 10).is_empty());
 
         // get_related
         let rels = store.get_related(1);
@@ -1900,9 +2055,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 回归：LIKE 回退已删除——FTS 未命中即返回空，不再三列全表扫 + 全量 mmap 读出。
     #[test]
-    fn archive_search_like_fallback() {
-        let dir = tmp_dir("like");
+    fn archive_search_miss_returns_empty() {
+        let dir = tmp_dir("miss");
         let subjects = dir.join("subject.jsonlines");
         let relations = dir.join("subject-relations.jsonlines");
         write_subjects(
@@ -1919,10 +2075,8 @@ mod tests {
         let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
         store.init_schema().unwrap();
         store.build(&subjects, &relations, &persons, &sp).unwrap();
-        // FTS 无结果 → LIKE 回退
-        let hits = store.search("魔法少女小圆");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0]["id"], 42);
+        // FTS 未命中 → 空（旧行为会 LIKE 全表扫回退）
+        assert!(store.search("完全不存在的查询xyz", 10).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1997,19 +2151,19 @@ mod tests {
         assert_eq!(rels.len(), 1);
         assert_eq!(rels[0].relation.as_deref(), Some("单行本"));
         // 搜索（name_cn 命中）
-        let hits = store.search("×××HOLiC");
+        let hits = store.search("×××HOLiC", 10);
         assert!(!hits.is_empty());
         // 别名作为搜索词可命中（FTS aliases 列）
-        let alias_hits = store.search("次元魔女");
+        let alias_hits = store.search("次元魔女", 10);
         assert!(alias_hits.iter().any(|v| v["id"] == 495));
-        // LIKE 回退查别名：name/name_cn 均不含 XXXHOLIC（name_cn 是 ×××HOLiC），仅别名命中
-        let alias_like = store.search("XXXHOLIC");
+        // 纯拉丁别名命中（aliases 列经分析链小写入库；unicode61 默认大小写不敏感）
+        let alias_like = store.search("XXXHOLIC", 10);
         assert!(alias_like.iter().any(|v| v["id"] == 495));
         // 嵌套别名（版本:* 条目内 k==别名）也进入 aliases 列并可检索
-        let nested_alias = store.search("xxxHOLiC 笼");
+        let nested_alias = store.search("xxxHOLiC 笼", 10);
         assert!(nested_alias.iter().any(|v| v["id"] == 495));
         // 版本名（版本:* 条目内 k==版本名）也进入 aliases 列并可检索
-        let version_name = store.search("xxxHOLiC 東立");
+        let version_name = store.search("xxxHOLiC 東立", 10);
         assert!(version_name.iter().any(|v| v["id"] == 495));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2066,14 +2220,177 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 回归：v5 trigram 旧库 → init_schema 迁移（drop + 分析重建）后 FTS 可用。
     #[test]
-    fn archive_fts_query_builds() {
-        assert_eq!(fts_query("魔法少女"), "\"魔法少女\"*");
-        assert_eq!(
-            fts_query("attack on titan"),
-            "\"attack\"* OR \"on\"* OR \"titan\"*"
+    fn archive_fts_v6_migration_from_trigram() {
+        let dir = tmp_dir("v6migrate");
+        let subjects = dir.join("subject.jsonlines");
+        let relations = dir.join("subject-relations.jsonlines");
+        write_subjects(
+            &subjects,
+            &[
+                r#"{"id":305429,"type":1,"name":"葬送のフリーレン","name_cn":"葬送的芙莉莲","series":true}"#,
+            ],
         );
-        assert_eq!(fts_query(""), "\"\"");
+        std::fs::write(&relations, "").unwrap();
+        let persons = dir.join("person.jsonlines");
+        let sp = dir.join("subject-persons.jsonlines");
+        std::fs::write(&persons, "").unwrap();
+        std::fs::write(&sp, "").unwrap();
+        let db = dir.join("archive_index.db");
+        // 第一步：按 v5 旧 schema 建库（trigram FTS + 直通原始标题）
+        {
+            let store = BangumiArchiveStore::open(&db, &subjects, 0).unwrap();
+            store.init_schema().unwrap();
+            store.build(&subjects, &relations, &persons, &sp).unwrap();
+            let c = store.conn.lock().unwrap();
+            c.execute_batch(
+                "DROP TABLE subjects_fts;
+                 CREATE VIRTUAL TABLE subjects_fts USING fts5(
+                     name, name_cn, aliases,
+                     content='subjects_idx', content_rowid='id', tokenize='trigram');
+                 INSERT INTO subjects_fts(rowid, name, name_cn, aliases)
+                 SELECT id, name, name_cn, aliases FROM subjects_idx;
+                 DELETE FROM archive_update WHERE key='fts_version';",
+            )
+            .unwrap();
+        }
+        // 第二步：重开（等价升级后的启动），init_schema 应迁移并本地重建 FTS
+        {
+            let store = BangumiArchiveStore::open(&db, &subjects, 0).unwrap();
+            store.init_schema().unwrap();
+            let c = store.conn.lock().unwrap();
+            let ddl: String = c
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='subjects_fts'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(ddl.contains("unicode61"), "migrated to unicode61: {ddl}");
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM subjects_fts WHERE subjects_fts MATCH '\"葬送\"'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(-1);
+            assert_eq!(n, 1, "rebuilt FTS index must contain bigram term 葬送");
+            drop(c);
+            let hits = store.search("葬送的芙莉莲系列", 10);
+            assert!(
+                hits.iter().any(|v| v["id"] == 305429),
+                "decorated query must hit after migration"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 门控：拉丁整词子句永不放宽（对齐 kmrs cjk_droppable_floor 语义）——
+    /// "Berserk 系列" 不得退化为裸 "berserk" 查询；单 token 拉丁查询仍命中。
+    #[test]
+    fn archive_search_latin_clause_not_relaxed() {
+        let dir = tmp_dir("latinfloor");
+        let subjects = dir.join("subject.jsonlines");
+        let relations = dir.join("subject-relations.jsonlines");
+        write_subjects(
+            &subjects,
+            &[r#"{"id":11,"type":1,"name":"Berserk","name_cn":"剑风传奇","series":true}"#],
+        );
+        std::fs::write(&relations, "").unwrap();
+        let persons = dir.join("person.jsonlines");
+        let sp = dir.join("subject-persons.jsonlines");
+        std::fs::write(&persons, "").unwrap();
+        std::fs::write(&sp, "").unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        store.init_schema().unwrap();
+        store.build(&subjects, &relations, &persons, &sp).unwrap();
+
+        // 单 token 拉丁查询：正常命中
+        let hits = store.search("Berserk", 10);
+        assert!(hits.iter().any(|v| v["id"] == 11), "bare latin term hits");
+        // 拉丁 + 无命中 CJK 后缀：保持 Lucene parity，不回退成裸拉丁词
+        assert!(
+            store.search("Berserk 系列", 10).is_empty(),
+            "latin clause must not be relaxed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn archive_fts_and_expr_builds() {
+        assert_eq!(fts_and_expr(&["魔法少女".to_string()]), "\"魔法少女\"");
+        assert_eq!(
+            fts_and_expr(&["attack".to_string(), "on".to_string(), "titan".to_string()]),
+            "\"attack\" AND \"on\" AND \"titan\""
+        );
+        assert_eq!(fts_and_expr(&[]), "");
+        // 引号转义
+        assert_eq!(fts_and_expr(&["a\"b".to_string()]), "\"a\"\"b\"");
+    }
+
+    /// 回归：komga 系列名带装饰后缀/卷号/繁体变体时，离线查询仍可命中归档标题。
+    #[test]
+    fn archive_search_decorated_and_traditional_queries() {
+        let dir = tmp_dir("decorated");
+        let subjects = dir.join("subject.jsonlines");
+        let relations = dir.join("subject-relations.jsonlines");
+        write_subjects(
+            &subjects,
+            &[
+                r#"{"id":305429,"type":1,"name":"葬送のフリーレン","name_cn":"葬送的芙莉莲","series":true}"#,
+            ],
+        );
+        std::fs::write(&relations, "").unwrap();
+        let persons = dir.join("person.jsonlines");
+        let sp = dir.join("subject-persons.jsonlines");
+        std::fs::write(&persons, "").unwrap();
+        std::fs::write(&sp, "").unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        store.init_schema().unwrap();
+        store.build(&subjects, &relations, &persons, &sp).unwrap();
+
+        // 直接验证 FTS 索引内容（LIKE 无法伪造）：bigram 词项必须可 MATCH
+        {
+            let c = store.conn.lock().unwrap();
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM subjects_fts WHERE subjects_fts MATCH '\"葬送\"'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(-1);
+            assert_eq!(n, 1, "FTS index must contain bigram term 葬送");
+        }
+
+        // 精确命中
+        let hits = store.search("葬送的芙莉莲", 10);
+        assert!(hits.iter().any(|v| v["id"] == 305429), "exact");
+        // 系列名带 "系列" 后缀（归档标题没有）→ 渐进前缀 AND 兜底
+        let hits = store.search("葬送的芙莉莲系列", 10);
+        assert!(
+            hits.iter().any(|v| v["id"] == 305429),
+            "系列-suffixed query must hit"
+        );
+        // 卷/话装饰（空格分隔 + 数字）
+        let hits = store.search("葬送的芙莉莲 第01话", 10);
+        assert!(
+            hits.iter().any(|v| v["id"] == 305429),
+            "chapter-decorated query must hit"
+        );
+        // 繁体查询命中简体标题（t2s 归一）
+        let hits = store.search("葬送的芙莉蓮", 10);
+        assert!(
+            hits.iter().any(|v| v["id"] == 305429),
+            "traditional query must hit"
+        );
+        // 日文原名亦可命中
+        let hits = store.search("葬送のフリーレン", 10);
+        assert!(
+            hits.iter().any(|v| v["id"] == 305429),
+            "japanese name must hit"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
