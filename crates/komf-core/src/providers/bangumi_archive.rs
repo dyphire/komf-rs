@@ -1086,6 +1086,19 @@ impl BangumiArchiveStore {
         );
     }
 
+    /// mmap 槽位为空（周期释放/映射失败）时按需重映射；返回是否可用。
+    /// Windows 下 release_hot_pages 每 idle 秒 unmap 整个文件，之后首个查询
+    /// 经此重映射即可恢复——不能因槽位为空就直接放弃查询。
+    fn ensure_mapped(&self) -> bool {
+        let mut slot = self.mm.lock().unwrap();
+        if slot.is_none() {
+            *slot = std::fs::File::open(&self.subjects_path)
+                .ok()
+                .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
+        }
+        slot.is_some()
+    }
+
     fn read_line_at_offset(&self, offset: u64) -> Option<serde_json::Value> {
         // 锁内只定位并拷贝目标行的几 KB 字节，锁外解析（不持有锁跨越解析）；
         // 槽位为空（release_hot_pages 已释放/映射失败）时按需重映射。
@@ -1138,7 +1151,9 @@ impl BangumiArchiveStore {
     pub fn search(&self, query: &str, limit: usize) -> Vec<serde_json::Value> {
         self.touch();
         let query = query.trim();
-        if self.mm.lock().unwrap().is_none() || query.is_empty() {
+        // mmap 槽位为空时按需重映射（Windows 周期释放后首个查询在此恢复），
+        // 只有映射真正失败（数据文件缺失等）才返回空。
+        if query.is_empty() || !self.ensure_mapped() {
             return Vec::new();
         }
         let c = self.conn.lock().unwrap();
@@ -1570,6 +1585,25 @@ impl BangumiArchiveService {
         let relations_path = self.data_dir.join("subject-relations.jsonlines");
         let persons_path = self.data_dir.join("person.jsonlines");
         let subject_persons_path = self.data_dir.join("subject-persons.jsonlines");
+
+        // 0. 打开任务未完成（启动/热重载后数秒内）：跳过本次检查。
+        //    此时本地索引已在打开流程中，全量重建既无必要，也会与打开任务竞争
+        //    同一批文件（Windows 下覆盖 mmap 中的 subject.jsonlines 报 os error 1224）。
+        //    打开失败/空库（opened 后仍未就绪）不在此列——继续走全量下载重建以自愈。
+        if self.get().is_none() && !self.opened.load(Ordering::SeqCst) {
+            emit(
+                sender,
+                DownloadProgress::ProgressEvent {
+                    total: 0,
+                    completed: 0,
+                    info: Some(
+                        "bangumi archive index is still opening; skipping update check".to_string(),
+                    ),
+                },
+            );
+            emit(sender, DownloadProgress::FinishedEvent);
+            return Ok(());
+        }
 
         // 1. 远程 meta（latest.json：下载地址 / 更新时间 / 大小）
         emit(
