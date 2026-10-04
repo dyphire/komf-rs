@@ -16,6 +16,7 @@
 //! - Stump 单一缩略图模型：`delete_*_thumbnail` 为 no-op（上传即整体替换）。
 
 use crate::client::{MediaServerClient, MediaServerError};
+use crate::http_util::ensure_success;
 use crate::model::*;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -558,11 +559,8 @@ impl StumpTokenProvider {
             .json(&json!({ "username": self.username, "password": self.password }))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         let login: StumpLoginResponse = response.json().await?;
         Ok(login.token.access_token)
     }
@@ -646,10 +644,8 @@ impl StumpClient {
                 retried = true;
                 continue;
             }
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(MediaServerError::Status(status, body));
-            }
+            // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+            let response = ensure_success(response).await?;
             let envelope: StumpGraphQLResponse = response.json().await?;
             if let Some(errors) = envelope.errors {
                 if !errors.is_empty() {
@@ -785,17 +781,9 @@ impl StumpClient {
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let bytes = response.bytes().await?;
-        Ok(Some(Image::new(bytes.to_vec(), content_type)))
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
+        Ok(Some(crate::http_util::image_from_response(response).await?))
     }
 
     // -- 写入 ----------------------------------------------------------------

@@ -146,11 +146,7 @@ impl MangaDexClient {
             ])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Mangadex, status, body));
-        }
+        let response = super::ensure_success(CoreProviders::Mangadex, response).await?;
         let body: MangaDexResponse<Vec<MangaDexManga>> = response.json().await?;
         Ok(body.data)
     }
@@ -167,11 +163,7 @@ impl MangaDexClient {
             ])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Mangadex, status, body));
-        }
+        let response = super::ensure_success(CoreProviders::Mangadex, response).await?;
         let body: MangaDexResponse<MangaDexManga> = response.json().await?;
         Ok(body.data)
     }
@@ -192,11 +184,7 @@ impl MangaDexClient {
             ])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Mangadex, status, body));
-        }
+        let response = super::ensure_success(CoreProviders::Mangadex, response).await?;
         let body: MangaDexResponse<Vec<MangaDexChapter>> = response.json().await?;
         Ok(body.data)
     }
@@ -233,11 +221,7 @@ impl MangaDexClient {
             ])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Mangadex, status, body));
-        }
+        let response = super::ensure_success(CoreProviders::Mangadex, response).await?;
         Ok(response.json().await?)
     }
 
@@ -799,9 +783,8 @@ pub fn create_provider(
 #[async_trait::async_trait]
 impl MetadataProvider for MangaDexMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"mangadex\.org/title/([0-9a-fA-F-]{8,})").ok()?;
-        re.captures(query)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+        // Kotlin：链接解析取第一个捕获组（正则 OnceLock 缓存）
+        super::capture_link_id(query, r"mangadex\.org/title/([0-9a-fA-F-]{8,})")
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Mangadex

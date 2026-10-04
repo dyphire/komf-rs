@@ -36,6 +36,57 @@ pub(crate) fn client_with_default_headers(headers: reqwest::header::HeaderMap) -
         .expect("failed to build http client")
 }
 
+/// 检查 HTTP 响应状态：2xx 原样返回，非 2xx 读取 body 构造 `ProviderError::Status`。
+/// 合并自各 provider client 中逐字相同的 4 行状态检查样板。
+pub(crate) async fn ensure_success(
+    provider: CoreProviders,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, ProviderError> {
+    let status = response.status();
+    if status.is_success() {
+        Ok(response)
+    } else {
+        Err(ProviderError::Status(
+            provider,
+            status,
+            response.text().await.unwrap_or_default(),
+        ))
+    }
+}
+
+/// 按 URL 扩展名推断图片 MIME —— 对应 Kotlin `getThumbnail` 各 client 的扩展名推断
+/// （png/webp/gif，其余兜底 jpeg）。恒返回 Some，Option 为对齐 Kotlin `String?` 的包装。
+pub(crate) fn detect_image_mime(url: &str) -> Option<String> {
+    let lower = url.to_lowercase();
+    if lower.ends_with(".png") {
+        Some("image/png".into())
+    } else if lower.ends_with(".webp") {
+        Some("image/webp".into())
+    } else if lower.ends_with(".gif") {
+        Some("image/gif".into())
+    } else {
+        Some("image/jpeg".into())
+    }
+}
+
+/// 从链接文本按模式提取第一个命中的捕获组（正则按模式串 OnceLock 缓存，
+/// 避免 resolve_link_id 热路径重复编译正则）。模式非法时返回 None。
+pub(crate) fn capture_link_id(query: &str, pattern: &str) -> Option<String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, regex::Regex>>,
+    > = std::sync::OnceLock::new();
+    let re = {
+        let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+        cache
+            .entry(pattern.to_string())
+            .or_insert_with(|| regex::Regex::new(pattern).unwrap())
+            .clone()
+    };
+    re.captures(query)
+        .and_then(|c| c.iter().skip(1).flatten().next())
+        .map(|m| m.as_str().to_string())
+}
+
 /// komf 自有 metadata provider 对应的站点域名白名单（host 小写，含子域尾匹配）。
 /// 用于 MangaBaka/MangaDex 等聚合站点的外部链接过滤：只写入 komf 已有 provider 的链接。
 pub fn is_komf_provider_domain(host: &str) -> bool {

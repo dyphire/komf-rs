@@ -19,8 +19,10 @@ use crate::model::{
     SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
 use crate::providers::ehentai_archive::{EHentaiArchiveService, GalleryRow};
-use crate::providers::{CoreProviders, MetadataProvider, OfflineArchive, ProviderError};
-use crate::util::NameSimilarityMatcher;
+use crate::providers::{
+    detect_image_mime, CoreProviders, MetadataProvider, OfflineArchive, ProviderError,
+};
+use crate::util::{NameSimilarityMatcher, TtlCache};
 
 const API_URL: &str = "https://api.e-hentai.org/api.php";
 const MAX_PAGES: usize = 3;
@@ -1024,51 +1026,12 @@ fn ehentai_search_domain(domain: &str) -> &'static str {
 // Client —— 对应 Kotlin EHentaiClient.kt（双 client：api 限流 + img 独立）
 // ---------------------------------------------------------------------------
 
-/// 令牌式限流 —— 对应 Ktor HttpRequestRateLimiter(interval=6s, events=4, allowBurst=true)
-/// （近似：permit 间隔 = interval / events，超出排队等待）。
-#[derive(Clone)]
-struct RateLimiter {
-    permit_duration: Duration,
-    state: std::sync::Arc<tokio::sync::Mutex<RateLimiterState>>,
-}
-
-struct RateLimiterState {
-    cursor: std::time::Instant,
-}
-
-impl RateLimiter {
-    fn new(events_per_interval: u32, interval: Duration) -> Self {
-        Self {
-            permit_duration: interval / events_per_interval,
-            state: std::sync::Arc::new(tokio::sync::Mutex::new(RateLimiterState {
-                cursor: std::time::Instant::now(),
-            })),
-        }
-    }
-
-    async fn acquire(&self) {
-        let wait = {
-            let mut state = self.state.lock().await;
-            let now = std::time::Instant::now();
-            let base = if state.cursor > now {
-                state.cursor
-            } else {
-                now
-            };
-            state.cursor = base + self.permit_duration;
-            base.saturating_duration_since(now)
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct EHentaiClient {
     api: reqwest::Client,
     img: reqwest::Client,
-    rate_limiter: RateLimiter,
+    /// Kotlin Ktor HttpRequestRateLimiter(interval=6s, events=4)（共享 ThroughputLimiter）。
+    rate_limiter: std::sync::Arc<crate::rate_limiter::ThroughputLimiter>,
     /// 搜索域名（"e-hentai.org" / "exhentai.org"，仅用于搜索）。
     search_domain: String,
     /// 运行时 cookie（ipb_member_id/ipb_pass_hash/sk/igneous）：请求自动携带，Set-Cookie 自动刷新
@@ -1101,7 +1064,11 @@ impl EHentaiClient {
         Self {
             api,
             img,
-            rate_limiter: RateLimiter::new(4, Duration::from_secs(6)),
+            // Kotlin HttpRequestRateLimiter(interval=6s, events=4)（共享 ThroughputLimiter）
+            rate_limiter: std::sync::Arc::new(crate::rate_limiter::ThroughputLimiter::new(
+                4,
+                Duration::from_secs(6),
+            )),
             search_domain: search_domain.to_string(),
             cookies: std::sync::Arc::new(tokio::sync::Mutex::new(cookies)),
         }
@@ -1359,26 +1326,10 @@ impl EHentaiClient {
         let headers = self.cookie_header().await;
         let response = self.img.get(url).headers(headers).send().await?;
         self.update_cookies(&response).await;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::EHentai, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::EHentai, response).await?;
         let bytes = response.bytes().await?;
-        Ok(Some(Image::new(bytes.to_vec(), detect_mime(url))))
-    }
-}
-
-fn detect_mime(url: &str) -> Option<String> {
-    let lower = url.to_lowercase();
-    if lower.ends_with(".png") {
-        Some("image/png".into())
-    } else if lower.ends_with(".webp") {
-        Some("image/webp".into())
-    } else if lower.ends_with(".gif") {
-        Some("image/gif".into())
-    } else {
-        Some("image/jpeg".into())
+        // Kotlin getThumbnail 扩展名推断（共享 detect_image_mime）
+        Ok(Some(Image::new(bytes.to_vec(), detect_image_mime(url))))
     }
 }
 
@@ -1945,82 +1896,6 @@ fn posted_to_release_date(posted: Option<i64>) -> Option<ReleaseDate> {
 // Provider —— 对应 Kotlin EHentaiMetadataProvider.kt
 // ---------------------------------------------------------------------------
 
-/// 简单 TTL 缓存 —— 语义参考 Kotlin cache4k expireAfterWrite(5.minutes)。
-/// Kotlin 原版没有 ehentai provider，本实现为 Rust 扩展；capacity 为 Rust 自定的
-/// 软上限（cache4k 默认无条目上限），用于避免 Auto-Identify 扫库（gid 数量级
-/// 可达数万）把缓存无限撑大。超限时淘汰最旧条目（近似 LRU）。
-struct TtlCache<K, V> {
-    inner: tokio::sync::Mutex<HashMap<K, (V, std::time::Instant)>>,
-    ttl: Duration,
-    capacity: usize,
-}
-
-impl<K, V> TtlCache<K, V>
-where
-    K: Eq + std::hash::Hash + Clone,
-    V: Clone,
-{
-    fn new(ttl: Duration) -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(HashMap::new()),
-            ttl,
-            capacity: 10_000,
-        }
-    }
-
-    /// 命中且未过期直接返回；未命中执行 load，仅成功结果入缓存。
-    async fn get_or_load<E, F, Fut>(&self, key: K, load: F) -> Result<V, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<V, E>>,
-    {
-        {
-            let guard = self.inner.lock().await;
-            if let Some((value, created)) = guard.get(&key) {
-                if created.elapsed() < self.ttl {
-                    return Ok(value.clone());
-                }
-            }
-        }
-        let value = load().await?;
-        let mut guard = self.inner.lock().await;
-        self.insert_limited(&mut guard, key, value.clone());
-        Ok(value)
-    }
-
-    async fn put(&self, key: K, value: V) {
-        let mut guard = self.inner.lock().await;
-        self.insert_limited(&mut guard, key, value);
-    }
-
-    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
-    /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按遍历顺序取
-    /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
-    fn insert_limited(&self, guard: &mut HashMap<K, (V, std::time::Instant)>, key: K, value: V) {
-        if guard.len() >= self.capacity {
-            let now = std::time::Instant::now();
-            guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
-        }
-        guard.insert(key, (value, std::time::Instant::now()));
-        if guard.len() > self.capacity {
-            let excess = guard.len() - self.capacity;
-            let oldest: Vec<K> = {
-                let mut entries: Vec<(&K, &std::time::Instant)> =
-                    guard.iter().map(|(k, (_, c))| (k, c)).collect();
-                entries.sort_by_key(|(_, c)| **c);
-                entries
-                    .into_iter()
-                    .take(excess)
-                    .map(|(k, _)| k.clone())
-                    .collect()
-            };
-            for k in oldest {
-                guard.remove(&k);
-            }
-        }
-    }
-}
-
 pub struct EHentaiMetadataProvider {
     client: EHentaiClient,
     metadata_mapper: EHentaiMetadataMapper,
@@ -2035,6 +1910,7 @@ pub struct EHentaiMetadataProvider {
     /// 自动匹配仅 gid 匹配（Rust 扩展）：true → match 只做 gid 精准搜索，
     /// 无 gid / gid 无结果都跳过（不回落普通相似度搜索）；links 匹配不受影响。
     gid_only_match: bool,
+    /// 对应 Kotlin cache4k expireAfterWrite(5.minutes)（共享 TtlCache，含 10_000 条软上限）。
     cache: TtlCache<ProviderSeriesId, EHentaiBook>,
 }
 

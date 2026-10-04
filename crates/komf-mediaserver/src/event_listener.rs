@@ -428,9 +428,11 @@ impl KomgaEventHandler {
                 chunk = stream.next() => match chunk {
                     Some(Ok(bytes)) => {
                         buffer.extend_from_slice(&bytes);
-                        while let Some(pos) = find_frame_boundary(&buffer) {
+                        while let Some(pos) = crate::sse::find_frame_boundary(&buffer) {
                             let frame = buffer.drain(..pos).collect::<Vec<u8>>();
-                            if let Some((event_type, data)) = parse_sse_frame(&frame) {
+                            // 对齐 Kotlin：Komga SSE 帧必须同时带 event 与 data。
+                            if let Some((Some(event_type), data)) = crate::sse::parse_sse_frame(&frame)
+                            {
                                 let event = crate::komga::KomgaEvent::parse(&event_type, &data);
                                 self.handle_event(event).await;
                             }
@@ -552,41 +554,6 @@ fn screaming_snake(name: &str) -> String {
     out
 }
 
-/// 查找一帧 SSE 的边界（`\n\n`，兼容 `\r\n\r\n`）。
-fn find_frame_boundary(buffer: &[u8]) -> Option<usize> {
-    buffer
-        .windows(2)
-        .position(|w| w == b"\n\n")
-        .map(|pos| pos + 2)
-        .or_else(|| {
-            buffer
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .map(|pos| pos + 4)
-        })
-}
-
-/// 解析一帧 SSE：提取 `event:` 与 `data:` 行。
-fn parse_sse_frame(frame: &[u8]) -> Option<(String, String)> {
-    let text = String::from_utf8_lossy(frame);
-    let mut event_type: Option<String> = None;
-    let mut data: Option<String> = None;
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(rest) = line.strip_prefix("event:") {
-            event_type = Some(rest.trim().to_string());
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("data:") {
-            data = Some(rest.trim_start().to_string());
-        }
-    }
-    match (event_type, data) {
-        (Some(event_type), Some(data)) => Some((event_type, data)),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -643,8 +610,8 @@ mod tests {
     #[test]
     fn sse_frame_parsing() {
         let frame = b"event: TaskQueueStatus\ndata: {\"count\":1}\n\n";
-        let (event_type, data) = parse_sse_frame(frame).unwrap();
-        assert_eq!(event_type, "TaskQueueStatus");
+        let (event_type, data) = crate::sse::parse_sse_frame(frame).unwrap();
+        assert_eq!(event_type.as_deref(), Some("TaskQueueStatus"));
         assert!(data.contains("\"count\":1"));
     }
 

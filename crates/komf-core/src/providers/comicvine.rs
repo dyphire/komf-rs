@@ -25,96 +25,20 @@ const SIMILARITY_THRESHOLD: f64 = 0.1;
 //
 // Kotlin 每类 API 独立 LimiterInternal：burst = intervalLimiter(50, 60min)（tryAcquire 立即放行），
 // 突发窗口满时走 regular = rateLimiter(144, 60min)（每 25s 一个 permit，排队等待）。
-
-/// intervalLimiter(50, 60.minutes)：滑动窗口突发限流。tryAcquire 在窗口未满时立即放行。
-struct IntervalLimiter {
-    events_per_interval: u32,
-    interval: Duration,
-    state: Mutex<IntervalLimiterState>,
-}
-
-struct IntervalLimiterState {
-    count: u32,
-    window_start: Instant,
-}
-
-impl IntervalLimiter {
-    fn new(events_per_interval: u32, interval: Duration) -> Self {
-        Self {
-            events_per_interval,
-            interval,
-            state: Mutex::new(IntervalLimiterState {
-                count: 0,
-                window_start: Instant::now(),
-            }),
-        }
-    }
-
-    async fn try_acquire(&self) -> bool {
-        let mut state = self.state.lock().await;
-        let now = Instant::now();
-        if now.duration_since(state.window_start) >= self.interval {
-            // 对齐 Kotlin getWakeUpTime：窗口过期后对齐到当前时刻。
-            state.window_start = now;
-            state.count = 1;
-            return true;
-        }
-        if state.count < self.events_per_interval {
-            state.count += 1;
-            return true;
-        }
-        false
-    }
-}
-
-/// rateLimiter(144, 60.minutes)：令牌式限流，permit 间隔 = interval / events。
-struct RateLimiter {
-    permit_duration: Duration,
-    state: Mutex<RateLimiterState>,
-}
-
-struct RateLimiterState {
-    cursor: Instant,
-}
-
-impl RateLimiter {
-    fn new(events_per_interval: u32, interval: Duration) -> Self {
-        Self {
-            permit_duration: interval / events_per_interval,
-            state: Mutex::new(RateLimiterState {
-                cursor: Instant::now(),
-            }),
-        }
-    }
-
-    async fn acquire(&self) {
-        let wait = {
-            let mut state = self.state.lock().await;
-            let now = Instant::now();
-            let base = if state.cursor > now {
-                state.cursor
-            } else {
-                now
-            };
-            state.cursor = base + self.permit_duration;
-            base.saturating_duration_since(now)
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-    }
-}
+// burst / regular 分别复用共享 IntervalLimiter / ThroughputLimiter（crate::rate_limiter）。
 
 struct LimiterInternal {
-    bursting: IntervalLimiter,
-    regular: RateLimiter,
+    bursting: crate::rate_limiter::IntervalLimiter,
+    regular: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl LimiterInternal {
     fn new() -> Self {
         Self {
-            bursting: IntervalLimiter::new(50, Duration::from_secs(60 * 60)),
-            regular: RateLimiter::new(144, Duration::from_secs(60 * 60)),
+            // Kotlin intervalLimiter(50, 60.minutes)（共享 IntervalLimiter）
+            bursting: crate::rate_limiter::IntervalLimiter::new(50, Duration::from_secs(60 * 60)),
+            // Kotlin rateLimiter(144, 60.minutes)（共享 ThroughputLimiter）
+            regular: crate::rate_limiter::ThroughputLimiter::new(144, Duration::from_secs(60 * 60)),
         }
     }
 
@@ -312,15 +236,7 @@ impl ComicVineClient {
     where
         T: serde::de::DeserializeOwned,
     {
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(
-                CoreProviders::ComicVine,
-                status,
-                body,
-            ));
-        }
+        let response = super::ensure_success(CoreProviders::ComicVine, response).await?;
         let body: ComicVineResponse<T> = response.json().await?;
         if body.error != "OK" {
             return Err(ProviderError::message(format!(
@@ -399,15 +315,7 @@ impl ComicVineClient {
             );
             return Ok(None);
         }
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(
-                CoreProviders::ComicVine,
-                status,
-                body,
-            ));
-        }
+        let response = super::ensure_success(CoreProviders::ComicVine, response).await?;
         let bytes = response.bytes().await?;
         Ok(Some(Image::new(bytes.to_vec(), None)))
     }

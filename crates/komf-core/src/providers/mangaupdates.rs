@@ -9,7 +9,7 @@ use crate::model::{
     SeriesSearchResult, SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
 use crate::providers::ProviderError;
-use crate::providers::{CoreProviders, MetadataProvider};
+use crate::providers::{detect_image_mime, CoreProviders, MetadataProvider};
 use crate::util::NameSimilarityMatcher;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -222,15 +222,7 @@ impl MangaUpdatesClient {
             .json(&request)
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(
-                CoreProviders::MangaUpdates,
-                status,
-                body,
-            ));
-        }
+        let response = super::ensure_success(CoreProviders::MangaUpdates, response).await?;
         let mut page: SearchResultPage = response.json().await?;
         for result in page.results.iter_mut() {
             result.record.title = html_unescape(&result.record.title);
@@ -246,15 +238,7 @@ impl MangaUpdatesClient {
             .get(format!("{BASE_URL}/series/{series_id}"))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(
-                CoreProviders::MangaUpdates,
-                status,
-                body,
-            ));
-        }
+        let response = super::ensure_success(CoreProviders::MangaUpdates, response).await?;
         let mut series: MangaUpdatesSeries = response.json().await?;
         series.title = html_unescape(&series.title)
             .trim_end_matches(" (Novel)")
@@ -300,20 +284,8 @@ impl MangaUpdatesClient {
             return Ok(None);
         }
         let bytes = response.bytes().await?;
-        Ok(Some(Image::new(bytes.to_vec(), detect_mime(&url))))
-    }
-}
-
-fn detect_mime(url: &str) -> Option<String> {
-    let lower = url.to_lowercase();
-    if lower.ends_with(".png") {
-        Some("image/png".into())
-    } else if lower.ends_with(".webp") {
-        Some("image/webp".into())
-    } else if lower.ends_with(".gif") {
-        Some("image/gif".into())
-    } else {
-        Some("image/jpeg".into())
+        // Kotlin getThumbnail 扩展名推断（共享 detect_image_mime）
+        Ok(Some(Image::new(bytes.to_vec(), detect_image_mime(&url))))
     }
 }
 
@@ -722,13 +694,12 @@ pub fn create_provider(
 #[async_trait::async_trait]
 impl MetadataProvider for MangaUpdatesMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re =
-            regex::Regex::new(r"mangaupdates\.com/(?:series/(\d+)|series\.html\?id=(\d+))").ok()?;
-        re.captures(query).and_then(|c| {
-            c.get(1)
-                .or_else(|| c.get(2))
-                .map(|m| m.as_str().to_string())
-        })
+        // Kotlin：链接解析取第一个命中的捕获组（series/ 与 series.html?id= 两种形式；
+        // 正则 OnceLock 缓存）
+        super::capture_link_id(
+            query,
+            r"mangaupdates\.com/(?:series/(\d+)|series\.html\?id=(\d+))",
+        )
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::MangaUpdates

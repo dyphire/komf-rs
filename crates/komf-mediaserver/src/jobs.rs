@@ -287,19 +287,7 @@ impl KomfJobsRepository {
         let mut stmt = conn.prepare(
             "SELECT id, series_id, status, message, started_at, finished_at FROM komf_job_record WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(rusqlite::params![id.0.to_string()], |row| {
-            Ok(KomfJobRecord {
-                id: MetadataJobId(Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default()),
-                series_id: MediaServerSeriesId(row.get(1)?),
-                status: parse_status(&row.get::<_, String>(2)?),
-                message: row.get(3)?,
-                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?)
-                    .unwrap_or_default(),
-                finished_at: row
-                    .get::<_, Option<i64>>(5)?
-                    .and_then(|ms| DateTime::from_timestamp_millis(ms)),
-            })
-        })?;
+        let mut rows = stmt.query_map(rusqlite::params![id.0.to_string()], job_record_from_row)?;
         rows.next().transpose()
     }
 
@@ -308,19 +296,7 @@ impl KomfJobsRepository {
         let mut stmt = conn.prepare(
             "SELECT id, series_id, status, message, started_at, finished_at FROM komf_job_record ORDER BY started_at DESC LIMIT 200",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(KomfJobRecord {
-                id: MetadataJobId(Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default()),
-                series_id: MediaServerSeriesId(row.get(1)?),
-                status: parse_status(&row.get::<_, String>(2)?),
-                message: row.get(3)?,
-                started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?)
-                    .unwrap_or_default(),
-                finished_at: row
-                    .get::<_, Option<i64>>(5)?
-                    .and_then(|ms| DateTime::from_timestamp_millis(ms)),
-            })
-        })?;
+        let rows = stmt.query_map([], job_record_from_row)?;
         rows.collect()
     }
 
@@ -348,21 +324,7 @@ impl KomfJobsRepository {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-            |row| {
-                Ok(KomfJobRecord {
-                    id: MetadataJobId(
-                        Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
-                    ),
-                    series_id: MediaServerSeriesId(row.get(1)?),
-                    status: parse_status(&row.get::<_, String>(2)?),
-                    message: row.get(3)?,
-                    started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?)
-                        .unwrap_or_default(),
-                    finished_at: row
-                        .get::<_, Option<i64>>(5)?
-                        .and_then(|ms| DateTime::from_timestamp_millis(ms)),
-                })
-            },
+            job_record_from_row,
         )?;
         rows.collect()
     }
@@ -547,6 +509,21 @@ fn parse_status(status: &str) -> MetadataJobStatus {
         "FAILED" => MetadataJobStatus::Failed,
         _ => MetadataJobStatus::Running,
     }
+}
+
+/// 行 → `KomfJobRecord` 映射（对应 Kotlin SQLDelight `komf_job_record` 查询映射）。
+/// 三处查询 SELECT 列序一致：id, series_id, status, message, started_at, finished_at。
+fn job_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KomfJobRecord> {
+    Ok(KomfJobRecord {
+        id: MetadataJobId(Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default()),
+        series_id: MediaServerSeriesId(row.get(1)?),
+        status: parse_status(&row.get::<_, String>(2)?),
+        message: row.get(3)?,
+        started_at: DateTime::from_timestamp_millis(row.get::<_, i64>(4)?).unwrap_or_default(),
+        finished_at: row
+            .get::<_, Option<i64>>(5)?
+            .and_then(DateTime::from_timestamp_millis),
+    })
 }
 
 /// 内存任务追踪器 —— 对应 `KomfJobTracker.kt`。

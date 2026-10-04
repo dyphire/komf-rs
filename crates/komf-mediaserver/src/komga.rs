@@ -9,6 +9,7 @@
 //! 清掉并用静态凭证重试一次。
 use crate::client::{MediaServerClient, MediaServerError};
 use crate::config::AlternateTitleLabelsConfig;
+use crate::http_util::ensure_success;
 use crate::model::*;
 use komf_core::model::{Image, ReadingDirection, SeriesStatus, TitleType, WebLink};
 use serde::{Deserialize, Serialize};
@@ -410,6 +411,107 @@ impl KomgaClient {
         !self.session.lock().await.is_empty()
     }
 
+    /// 系列/书籍缩略图上传共享实现（两版 public 函数仅 URL 与最小尺寸守卫不同，
+    /// 其余 413 降级、尺寸收敛、multipart 重建重试逐字节相同）：
+    /// 413 / 过大降级：每轮把最长边减半重编码重试，最多 3 轮
+    /// （对齐 KomgaBangumi.user.js 换更小尺寸源图重试的语义）。
+    /// `path` 由调用方构造（`{API_PREFIX}/series/{id}/thumbnails` 或 books 版），
+    /// `min_size` 区分系列（SERIES_MIN_THUMBNAIL_SIZE）与书籍守卫
+    /// （BOOK_MIN_THUMBNAIL_SIZE）。返回 Ok(None) 表示守卫跳过上传。
+    async fn upload_thumbnail_inner(
+        &self,
+        path: String,
+        thumbnail: &Image,
+        selected: bool,
+        min_size: u64,
+    ) -> Result<Option<KomgaThumbnailDto>, MediaServerError> {
+        let mut attempt = thumbnail.clone();
+        'round: for scale_round in 0..=crate::image_utils::MAX_DOWNSCALE_ROUNDS {
+            if min_size > attempt.bytes.len() as u64 {
+                tracing::warn!(
+                    "Thumbnail size {} bytes is smaller than minimum {}. Skipping thumbnail upload",
+                    attempt.bytes.len(),
+                    min_size
+                );
+                return Ok(None);
+            }
+            if attempt.bytes.len() as u64 > self.thumbnail_size_limit {
+                if scale_round >= crate::image_utils::MAX_DOWNSCALE_ROUNDS {
+                    tracing::warn!(
+                        "Thumbnail size {} bytes is bigger than limit {} and cannot be downscaled further. Skipping thumbnail upload",
+                        thumbnail.bytes.len(),
+                        self.thumbnail_size_limit
+                    );
+                    return Ok(None);
+                }
+                match crate::image_utils::resize_towards(&attempt, self.thumbnail_size_limit) {
+                    Some(next) => attempt = next,
+                    None => {
+                        tracing::warn!(
+                            "Thumbnail size {} bytes is bigger than limit {} and cannot be decoded for downscale. Skipping thumbnail upload",
+                            thumbnail.bytes.len(),
+                            self.thumbnail_size_limit
+                        );
+                        return Ok(None);
+                    }
+                }
+                continue 'round;
+            }
+            let mime = attempt
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string());
+            // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
+            let had_session = self.has_session().await;
+            let mut retried = false;
+            let dto: KomgaThumbnailDto = loop {
+                let part = reqwest::multipart::Part::bytes(attempt.bytes.clone())
+                    .file_name("thumbnail")
+                    .mime_str(&mime)
+                    .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
+                let form = reqwest::multipart::Form::new().part("file", part);
+                let response = self
+                    .send(
+                        self.http
+                            .post(self.url(&path))
+                            .query(&[("selected", selected.to_string())])
+                            .multipart(form),
+                    )
+                    .await?;
+                if response.status() == reqwest::StatusCode::UNAUTHORIZED && had_session && !retried
+                {
+                    retried = true;
+                    continue;
+                }
+                let status = response.status();
+                if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+                    let body = response.text().await.unwrap_or_default();
+                    if scale_round >= crate::image_utils::MAX_DOWNSCALE_ROUNDS {
+                        return Err(MediaServerError::Status(status, body));
+                    }
+                    // 413 直接缩到 900kB 内重试（固定目标；900kB 为重编码字节波动留余量，
+                    // 对齐脚本 ≥1MB 阈值）；已 ≤900kB 仍 413 说明服务器限制更小，无法再降，直接报错。
+                    match crate::image_utils::resize_towards(&attempt, 900 * 1024) {
+                        Some(next) if next.bytes.len() != attempt.bytes.len() => {
+                            tracing::warn!(
+                                "Thumbnail upload returned 413 ({} bytes), retrying with image within 1MB",
+                                attempt.bytes.len()
+                            );
+                            attempt = next;
+                            continue 'round;
+                        }
+                        _ => return Err(MediaServerError::Status(status, body)),
+                    }
+                }
+                // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+                let response = ensure_success(response).await?;
+                break response.json().await?;
+            };
+            return Ok(Some(dto));
+        }
+        unreachable!("upload loop always returns")
+    }
+
     async fn clear_session(&self) {
         self.session.lock().await.clear();
     }
@@ -502,11 +604,8 @@ impl KomgaClient {
         request: reqwest::RequestBuilder,
     ) -> Result<T, MediaServerError> {
         let response = self.send(request).await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }
 
@@ -974,11 +1073,8 @@ impl MediaServerClient for KomgaClient {
                     .json(&body),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         let page: KomgaPage<KomgaSeriesDto> = response.json().await?;
         Ok(Page {
             content: page.content.iter().map(|dto| self.to_series(dto)).collect(),
@@ -1074,11 +1170,8 @@ impl MediaServerClient for KomgaClient {
                         .json(&body),
                 )
                 .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(MediaServerError::Status(status, body));
-            }
+            // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+            let response = ensure_success(response).await?;
             let page: KomgaPage<KomgaBookDto> = response.json().await?;
             all.extend(page.content.iter().map(|dto| self.to_book(dto)));
             if page.number >= page.total_pages - 1 {
@@ -1218,11 +1311,8 @@ impl MediaServerClient for KomgaClient {
                     .json(&body),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1243,11 +1333,8 @@ impl MediaServerClient for KomgaClient {
                     .json(&request),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1262,11 +1349,8 @@ impl MediaServerClient for KomgaClient {
                 series_id.0, thumbnail_id.0
             ))))
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1283,11 +1367,8 @@ impl MediaServerClient for KomgaClient {
                     .json(&request),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1302,11 +1383,8 @@ impl MediaServerClient for KomgaClient {
                 book_id.0, thumbnail_id.0
             ))))
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1323,11 +1401,8 @@ impl MediaServerClient for KomgaClient {
                     .json(&request),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1343,11 +1418,8 @@ impl MediaServerClient for KomgaClient {
                     .json(&request),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -1358,108 +1430,24 @@ impl MediaServerClient for KomgaClient {
         selected: bool,
         _lock: bool,
     ) -> Result<Option<MediaServerSeriesThumbnail>, MediaServerError> {
-        // 413 / 过大降级：每轮把最长边减半重编码重试，最多 3 轮
-        // （对齐 KomgaBangumi.user.js 换更小尺寸源图重试的语义）。
-        let mut attempt = thumbnail.clone();
-        'round: for scale_round in 0..=crate::image_utils::MAX_DOWNSCALE_ROUNDS {
-            if crate::image_utils::SERIES_MIN_THUMBNAIL_SIZE > attempt.bytes.len() as u64 {
-                tracing::warn!(
-                    "Thumbnail size {} bytes is smaller than minimum {}. Skipping thumbnail upload",
-                    attempt.bytes.len(),
-                    crate::image_utils::SERIES_MIN_THUMBNAIL_SIZE
-                );
-                return Ok(None);
-            }
-            if attempt.bytes.len() as u64 > self.thumbnail_size_limit {
-                if scale_round >= crate::image_utils::MAX_DOWNSCALE_ROUNDS {
-                    tracing::warn!(
-                        "Thumbnail size {} bytes is bigger than limit {} and cannot be downscaled further. Skipping thumbnail upload",
-                        thumbnail.bytes.len(),
-                        self.thumbnail_size_limit
-                    );
-                    return Ok(None);
-                }
-                match crate::image_utils::resize_towards(&attempt, self.thumbnail_size_limit) {
-                    Some(next) => attempt = next,
-                    None => {
-                        tracing::warn!(
-                            "Thumbnail size {} bytes is bigger than limit {} and cannot be decoded for downscale. Skipping thumbnail upload",
-                            thumbnail.bytes.len(),
-                            self.thumbnail_size_limit
-                        );
-                        return Ok(None);
-                    }
-                }
-                continue 'round;
-            }
-            let mime = attempt
-                .mime_type
-                .clone()
-                .unwrap_or_else(|| "image/jpeg".to_string());
-            // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
-            let had_session = self.has_session().await;
-            let mut retried = false;
-            let dto: KomgaThumbnailDto = loop {
-                let part = reqwest::multipart::Part::bytes(attempt.bytes.clone())
-                    .file_name("thumbnail")
-                    .mime_str(&mime)
-                    .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
-                let form = reqwest::multipart::Form::new().part("file", part);
-                let response = self
-                    .send(
-                        self.http
-                            .post(
-                                self.url(&format!(
-                                    "{API_PREFIX}/series/{}/thumbnails",
-                                    series_id.0
-                                )),
-                            )
-                            .query(&[("selected", selected.to_string())])
-                            .multipart(form),
-                    )
-                    .await?;
-                if response.status() == reqwest::StatusCode::UNAUTHORIZED && had_session && !retried
-                {
-                    retried = true;
-                    continue;
-                }
-                let status = response.status();
-                if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-                    let body = response.text().await.unwrap_or_default();
-                    if scale_round >= crate::image_utils::MAX_DOWNSCALE_ROUNDS {
-                        return Err(MediaServerError::Status(status, body));
-                    }
-                    // 413 直接缩到 900kB 内重试（固定目标；900kB 为重编码字节波动留余量，
-                    // 对齐脚本 ≥1MB 阈值）；已 ≤900kB 仍 413 说明服务器限制更小，无法再降，直接报错。
-                    match crate::image_utils::resize_towards(&attempt, 900 * 1024) {
-                        Some(next) if next.bytes.len() != attempt.bytes.len() => {
-                            tracing::warn!(
-                                "Thumbnail upload returned 413 ({} bytes), retrying with image within 1MB",
-                                attempt.bytes.len()
-                            );
-                            attempt = next;
-                            continue 'round;
-                        }
-                        _ => return Err(MediaServerError::Status(status, body)),
-                    }
-                }
-                if !status.is_success() {
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(MediaServerError::Status(status, body));
-                }
-                break response.json().await?;
-            };
-            return Ok(Some(MediaServerSeriesThumbnail {
-                id: MediaServerThumbnailId(dto.id),
-                series_id: MediaServerSeriesId(
-                    dto.series_id.unwrap_or_else(|| series_id.0.clone()),
-                ),
-                r#type: dto.r#type,
-                selected: dto.selected,
-                file_size: dto.file_size,
-            }));
-        }
-        unreachable!("upload loop always returns")
+        let Some(dto) = self
+            .upload_thumbnail_inner(
+                format!("{API_PREFIX}/series/{}/thumbnails", series_id.0),
+                thumbnail,
+                selected,
+                crate::image_utils::SERIES_MIN_THUMBNAIL_SIZE,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(MediaServerSeriesThumbnail {
+            id: MediaServerThumbnailId(dto.id),
+            series_id: MediaServerSeriesId(dto.series_id.unwrap_or_else(|| series_id.0.clone())),
+            r#type: dto.r#type,
+            selected: dto.selected,
+            file_size: dto.file_size,
+        }))
     }
 
     async fn upload_book_thumbnail(
@@ -1469,101 +1457,24 @@ impl MediaServerClient for KomgaClient {
         selected: bool,
         _lock: bool,
     ) -> Result<Option<MediaServerBookThumbnail>, MediaServerError> {
-        // 413 / 过大降级：每轮把最长边减半重编码重试，最多 3 轮
-        // （对齐 KomgaBangumi.user.js 换更小尺寸源图重试的语义）。
-        let mut attempt = thumbnail.clone();
-        'round: for scale_round in 0..=crate::image_utils::MAX_DOWNSCALE_ROUNDS {
-            if crate::image_utils::BOOK_MIN_THUMBNAIL_SIZE > attempt.bytes.len() as u64 {
-                tracing::warn!(
-                    "Thumbnail size {} bytes is smaller than minimum {}. Skipping thumbnail upload",
-                    attempt.bytes.len(),
-                    crate::image_utils::BOOK_MIN_THUMBNAIL_SIZE
-                );
-                return Ok(None);
-            }
-            if attempt.bytes.len() as u64 > self.thumbnail_size_limit {
-                if scale_round >= crate::image_utils::MAX_DOWNSCALE_ROUNDS {
-                    tracing::warn!(
-                        "Thumbnail size {} bytes is bigger than limit {} and cannot be downscaled further. Skipping thumbnail upload",
-                        thumbnail.bytes.len(),
-                        self.thumbnail_size_limit
-                    );
-                    return Ok(None);
-                }
-                match crate::image_utils::resize_towards(&attempt, self.thumbnail_size_limit) {
-                    Some(next) => attempt = next,
-                    None => {
-                        tracing::warn!(
-                            "Thumbnail size {} bytes is bigger than limit {} and cannot be decoded for downscale. Skipping thumbnail upload",
-                            thumbnail.bytes.len(),
-                            self.thumbnail_size_limit
-                        );
-                        return Ok(None);
-                    }
-                }
-                continue 'round;
-            }
-            let mime = attempt
-                .mime_type
-                .clone()
-                .unwrap_or_else(|| "image/jpeg".to_string());
-            // multipart body 不可 `try_clone`：会话过期 401 时重建 form 重试一次。
-            let had_session = self.has_session().await;
-            let mut retried = false;
-            let dto: KomgaThumbnailDto = loop {
-                let part = reqwest::multipart::Part::bytes(attempt.bytes.clone())
-                    .file_name("thumbnail")
-                    .mime_str(&mime)
-                    .map_err(|e| MediaServerError::message(format!("invalid mime: {e}")))?;
-                let form = reqwest::multipart::Form::new().part("file", part);
-                let response = self
-                    .send(
-                        self.http
-                            .post(self.url(&format!("{API_PREFIX}/books/{}/thumbnails", book_id.0)))
-                            .query(&[("selected", selected.to_string())])
-                            .multipart(form),
-                    )
-                    .await?;
-                if response.status() == reqwest::StatusCode::UNAUTHORIZED && had_session && !retried
-                {
-                    retried = true;
-                    continue;
-                }
-                let status = response.status();
-                if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-                    let body = response.text().await.unwrap_or_default();
-                    if scale_round >= crate::image_utils::MAX_DOWNSCALE_ROUNDS {
-                        return Err(MediaServerError::Status(status, body));
-                    }
-                    // 413 直接缩到 900kB 内重试（固定目标；900kB 为重编码字节波动留余量，
-                    // 对齐脚本 ≥1MB 阈值）；已 ≤900kB 仍 413 说明服务器限制更小，无法再降，直接报错。
-                    match crate::image_utils::resize_towards(&attempt, 900 * 1024) {
-                        Some(next) if next.bytes.len() != attempt.bytes.len() => {
-                            tracing::warn!(
-                                "Thumbnail upload returned 413 ({} bytes), retrying with image within 1MB",
-                                attempt.bytes.len()
-                            );
-                            attempt = next;
-                            continue 'round;
-                        }
-                        _ => return Err(MediaServerError::Status(status, body)),
-                    }
-                }
-                if !status.is_success() {
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(MediaServerError::Status(status, body));
-                }
-                break response.json().await?;
-            };
-            return Ok(Some(MediaServerBookThumbnail {
-                id: MediaServerThumbnailId(dto.id),
-                book_id: MediaServerBookId(dto.book_id.unwrap_or_else(|| book_id.0.clone())),
-                r#type: dto.r#type,
-                selected: dto.selected,
-                file_size: dto.file_size,
-            }));
-        }
-        unreachable!("upload loop always returns")
+        let Some(dto) = self
+            .upload_thumbnail_inner(
+                format!("{API_PREFIX}/books/{}/thumbnails", book_id.0),
+                thumbnail,
+                selected,
+                crate::image_utils::BOOK_MIN_THUMBNAIL_SIZE,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(MediaServerBookThumbnail {
+            id: MediaServerThumbnailId(dto.id),
+            book_id: MediaServerBookId(dto.book_id.unwrap_or_else(|| book_id.0.clone())),
+            r#type: dto.r#type,
+            selected: dto.selected,
+            file_size: dto.file_size,
+        }))
     }
 
     async fn refresh_metadata(
@@ -1577,11 +1488,8 @@ impl MediaServerClient for KomgaClient {
                     .post(self.url(&format!("{API_PREFIX}/series/{}/analyze", series_id.0))),
             )
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 }

@@ -18,14 +18,13 @@ use crate::model::{
     SeriesSearchResult, SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
 use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
-use crate::util::NameSimilarityMatcher;
+use crate::util::{NameSimilarityMatcher, TtlCache};
 use komf_api_models::config::DownloadProgress;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // API 模型（snake_case 与 MangaBaka API 一致）
@@ -1228,84 +1227,6 @@ fn is_fragment_keep(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 // Provider —— 对应 `MangaBakaMetadataProvider.kt`
 // ---------------------------------------------------------------------------
-// 简单 TTL 缓存 —— 对应 Kotlin cache4k expireAfterWrite(30.minutes)。
-// Kotlin 未配置 maximumSize；Rust 侧加软上限 capacity（对齐 ehentai.rs 的做法），
-// 避免长时间运行/扫库把缓存无限撑大，超限时淘汰最旧条目（近似 LRU）。
-// ---------------------------------------------------------------------------
-
-pub struct TtlCache<K, V> {
-    inner: tokio::sync::Mutex<HashMap<K, (V, Instant)>>,
-    ttl: Duration,
-    capacity: usize,
-}
-
-impl<K, V> TtlCache<K, V>
-where
-    K: Eq + std::hash::Hash + Clone,
-    V: Clone,
-{
-    fn new(ttl: Duration) -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(HashMap::new()),
-            ttl,
-            capacity: 10_000,
-        }
-    }
-
-    /// Kotlin cache4k：命中且未过期直接返回；未命中执行 load，仅成功结果入缓存。
-    async fn get_or_load<E, F, Fut>(&self, key: K, load: F) -> Result<V, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<V, E>>,
-    {
-        {
-            let guard = self.inner.lock().await;
-            if let Some((value, created)) = guard.get(&key) {
-                if created.elapsed() < self.ttl {
-                    return Ok(value.clone());
-                }
-            }
-        }
-        let value = load().await?;
-        let mut guard = self.inner.lock().await;
-        self.insert_limited(&mut guard, key, value.clone());
-        Ok(value)
-    }
-
-    async fn put(&self, key: K, value: V) {
-        let mut guard = self.inner.lock().await;
-        self.insert_limited(&mut guard, key, value);
-    }
-
-    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
-    /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按插入时间排序取
-    /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
-    fn insert_limited(&self, guard: &mut HashMap<K, (V, Instant)>, key: K, value: V) {
-        if guard.len() >= self.capacity {
-            let now = Instant::now();
-            guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
-        }
-        guard.insert(key, (value, Instant::now()));
-        if guard.len() > self.capacity {
-            let excess = guard.len() - self.capacity;
-            let oldest: Vec<K> = {
-                let mut entries: Vec<(&K, &Instant)> =
-                    guard.iter().map(|(k, (_, c))| (k, c)).collect();
-                entries.sort_by_key(|(_, c)| **c);
-                entries
-                    .into_iter()
-                    .take(excess)
-                    .map(|(k, _)| k.clone())
-                    .collect()
-            };
-            for k in oldest {
-                guard.remove(&k);
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 
 pub struct MangaBakaMetadataProvider {
     pub data_source: MangaBakaDataSource,
@@ -1479,9 +1400,8 @@ fn dedup_publishers(v: &mut Vec<Publisher>) {
 #[async_trait::async_trait]
 impl MetadataProvider for MangaBakaMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"mangabaka\.org/(\d+)").ok()?;
-        re.captures(query)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+        // Kotlin：链接解析取第一个捕获组（正则 OnceLock 缓存）
+        super::capture_link_id(query, r"mangabaka\.org/(\d+)")
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::MangaBaka

@@ -2,10 +2,7 @@
 
 use scraper::{Element, ElementRef, Html, Selector};
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::future::Future;
-use std::hash::Hash;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::ProviderConfig;
 use crate::model::{
@@ -13,8 +10,8 @@ use crate::model::{
     ProviderBookMetadata, ProviderSeriesId, ProviderSeriesMetadata, SeriesBook, SeriesMetadata,
     SeriesSearchResult, SeriesStatus, SeriesTitle, TitleType, WebLink,
 };
-use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
-use crate::util::NameSimilarityMatcher;
+use crate::providers::{detect_image_mime, CoreProviders, MetadataProvider, ProviderError};
+use crate::util::{NameSimilarityMatcher, TtlCache};
 
 const BASE_URL: &str = "https://www.webtoons.com";
 const MOBILE_BASE_URL: &str = "https://m.webtoons.com";
@@ -509,11 +506,7 @@ impl WebtoonsClient {
             .headers(self.mobile_headers.clone())
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Webtoons, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Webtoons, response).await?;
         Ok(response.json::<SearchApiResponse>().await?)
     }
 
@@ -525,11 +518,7 @@ impl WebtoonsClient {
             .headers(self.base_headers.clone())
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Webtoons, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Webtoons, response).await?;
         let text = response.text().await?;
         Ok(self.parser.parse_series(&text))
     }
@@ -556,11 +545,7 @@ impl WebtoonsClient {
             .headers(self.mobile_headers.clone())
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Webtoons, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Webtoons, response).await?;
         Ok(response
             .json::<EpisodeListApiResponse>()
             .await?
@@ -597,7 +582,8 @@ impl WebtoonsClient {
             return Ok(None);
         }
         let bytes = response.bytes().await?;
-        Ok(Some(Image::new(bytes.to_vec(), detect_mime(&url))))
+        // Kotlin getThumbnail 扩展名推断（共享 detect_image_mime）
+        Ok(Some(Image::new(bytes.to_vec(), detect_image_mime(&url))))
     }
 
     pub async fn get_chapter_thumbnail(&self, chapter: &Episode) -> Result<Image, ProviderError> {
@@ -610,13 +596,10 @@ impl WebtoonsClient {
             .headers(self.mobile_headers.clone())
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Webtoons, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Webtoons, response).await?;
         let bytes = response.bytes().await?;
-        Ok(Image::new(bytes.to_vec(), detect_mime(&url)))
+        // Kotlin getThumbnail 扩展名推断（共享 detect_image_mime）
+        Ok(Image::new(bytes.to_vec(), detect_image_mime(&url)))
     }
 }
 
@@ -661,92 +644,6 @@ fn remove_query_param(url: &str, key: &str) -> String {
             parsed.to_string()
         }
         Err(_) => url.to_string(),
-    }
-}
-
-fn detect_mime(url: &str) -> Option<String> {
-    let lower = url.to_lowercase();
-    if lower.ends_with(".png") {
-        Some("image/png".into())
-    } else if lower.ends_with(".webp") {
-        Some("image/webp".into())
-    } else if lower.ends_with(".gif") {
-        Some("image/gif".into())
-    } else {
-        Some("image/jpeg".into())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 简单 TTL 缓存 —— 对应 Kotlin cache4k（expireAfterWrite）
-// ---------------------------------------------------------------------------
-
-/// 容量上限（Rust 自定的软上限，cache4k 默认无条目上限），
-/// 超限时先清过期项，仍超限则淘汰最旧条目（近似 LRU）。与 ehentai 缓存一致。
-struct TtlCache<K, V> {
-    inner: tokio::sync::Mutex<HashMap<K, (V, Instant)>>,
-    ttl: Duration,
-    capacity: usize,
-}
-
-impl<K, V> TtlCache<K, V>
-where
-    K: Eq + Hash + Clone,
-    V: Clone,
-{
-    fn new(ttl: Duration) -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(HashMap::new()),
-            ttl,
-            capacity: 10_000,
-        }
-    }
-
-    /// Kotlin cache4k：命中且未过期直接返回；未命中执行 load，仅成功结果入缓存。
-    async fn get_or_load<E, F, Fut>(&self, key: K, load: F) -> Result<V, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<V, E>>,
-    {
-        {
-            let guard = self.inner.lock().await;
-            if let Some((value, created)) = guard.get(&key) {
-                if created.elapsed() < self.ttl {
-                    return Ok(value.clone());
-                }
-            }
-        }
-        let value = load().await?;
-        let mut guard = self.inner.lock().await;
-        self.insert_limited(&mut guard, key, value.clone());
-        Ok(value)
-    }
-
-    /// 插入并维持容量上限：先清过期项；仍超限则移除最旧的 excess 条（近似 LRU，
-    /// 与 cache4k 的"超限淘汰最旧"语义一致）。HashMap 无序，按遍历顺序取
-    /// 最早的 `excess` 个即可——容量只是软上限，淘汰顺序不影响正确性。
-    fn insert_limited(&self, guard: &mut HashMap<K, (V, Instant)>, key: K, value: V) {
-        if guard.len() >= self.capacity {
-            let now = Instant::now();
-            guard.retain(|_, (_, created)| now.duration_since(*created) < self.ttl);
-        }
-        guard.insert(key, (value, Instant::now()));
-        if guard.len() > self.capacity {
-            let excess = guard.len() - self.capacity;
-            let oldest: Vec<K> = {
-                let mut entries: Vec<(&K, &Instant)> =
-                    guard.iter().map(|(k, (_, c))| (k, c)).collect();
-                entries.sort_by_key(|(_, c)| **c);
-                entries
-                    .into_iter()
-                    .take(excess)
-                    .map(|(k, _)| k.clone())
-                    .collect()
-            };
-            for k in oldest {
-                guard.remove(&k);
-            }
-        }
     }
 }
 
@@ -1013,10 +910,9 @@ pub fn create_provider(
 #[async_trait::async_trait]
 impl MetadataProvider for WebtoonsMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        // series_id = URL path+query（对齐 WebtoonsSeriesId 的 encoded_path_and_query）
-        let re = regex::Regex::new(r"webtoons\.com([^\s]+)").ok()?;
-        re.captures(query)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+        // series_id = URL path+query（对应 WebtoonsSeriesId 的 encoded_path_and_query）
+        // Kotlin：链接解析取第一个捕获组（正则 OnceLock 缓存）
+        super::capture_link_id(query, r"webtoons\.com([^\s]+)")
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Webtoons

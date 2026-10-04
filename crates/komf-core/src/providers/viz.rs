@@ -11,7 +11,7 @@ use crate::model::{
     ReleaseDate, SeriesBook, SeriesMetadata, SeriesSearchResult, SeriesStatus, SeriesTitle,
     TitleType, WebLink,
 };
-use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
+use crate::providers::{detect_image_mime, CoreProviders, MetadataProvider, ProviderError};
 use crate::util::{BookNameParser, NameSimilarityMatcher};
 
 const VIZ_BASE_URL: &str = "https://www.viz.com";
@@ -414,11 +414,7 @@ impl VizClient {
             .query(&[("search", search_query), ("category", "Manga".to_string())])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Viz, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Viz, response).await?;
         let text = response.text().await?;
         Ok(self.parser.parse_search_results(&text))
     }
@@ -433,11 +429,7 @@ impl VizClient {
             .get(format!("{VIZ_BASE_URL}/manga-books/manga/{}/all", id.0))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Viz, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Viz, response).await?;
         let text = response.text().await?;
         Ok(self.parser.parse_series_all_books(&text))
     }
@@ -457,11 +449,7 @@ impl VizClient {
             ))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Viz, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Viz, response).await?;
         let text = response.text().await?;
         Ok(self.parser.parse_book(&text))
     }
@@ -473,25 +461,10 @@ impl VizClient {
         if status == reqwest::StatusCode::FORBIDDEN {
             return Ok(None); // Kotlin: ClientRequestException Forbidden -> null
         }
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Viz, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::Viz, response).await?;
         let bytes = response.bytes().await?;
-        Ok(Some(Image::new(bytes.to_vec(), detect_mime(url))))
-    }
-}
-
-fn detect_mime(url: &str) -> Option<String> {
-    let lower = url.to_lowercase();
-    if lower.ends_with(".png") {
-        Some("image/png".into())
-    } else if lower.ends_with(".webp") {
-        Some("image/webp".into())
-    } else if lower.ends_with(".gif") {
-        Some("image/gif".into())
-    } else {
-        Some("image/jpeg".into())
+        // Kotlin getThumbnail 扩展名推断（共享 detect_image_mime）
+        Ok(Some(Image::new(bytes.to_vec(), detect_image_mime(url))))
     }
 }
 
@@ -783,9 +756,8 @@ pub fn create_provider(
 #[async_trait::async_trait]
 impl MetadataProvider for VizMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"viz\.com/manga-books/manga/([^/?#]+)").ok()?;
-        re.captures(query)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+        // Kotlin：链接解析取第一个捕获组（正则 OnceLock 缓存）
+        super::capture_link_id(query, r"viz\.com/manga-books/manga/([^/?#]+)")
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Viz

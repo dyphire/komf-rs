@@ -10,7 +10,7 @@ use crate::model::{
     ProviderBookMetadata, ProviderSeriesId, ProviderSeriesMetadata, Publisher, PublisherType,
     ReleaseDate, SeriesBook, SeriesMetadata, SeriesSearchResult, SeriesTitle, TitleType, WebLink,
 };
-use crate::providers::{CoreProviders, MetadataProvider, ProviderError};
+use crate::providers::{detect_image_mime, CoreProviders, MetadataProvider, ProviderError};
 use crate::util::{BookNameParser, NameSimilarityMatcher};
 
 const YEN_PRESS_BASE_URL: &str = "https://yenpress.com/";
@@ -354,11 +354,7 @@ impl YenPressClient {
             .body(body)
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::YenPress, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::YenPress, response).await?;
         Ok(response.json::<YenPressSearchResponse>().await?.results)
     }
 
@@ -399,11 +395,7 @@ impl YenPressClient {
             .header("x-requested-with", "XMLHttpRequest")
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::YenPress, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::YenPress, response).await?;
         let text = response.text().await?;
         Ok(YenPressParser::parse_more_books_response(&text))
     }
@@ -415,11 +407,7 @@ impl YenPressClient {
             .get(format!("{YEN_PRESS_BASE_URL}titles/{}", book_id.0))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::YenPress, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::YenPress, response).await?;
         let text = response.text().await?;
         Ok(YenPressParser::parse_book(&text, book_id))
     }
@@ -438,7 +426,8 @@ impl YenPressClient {
             return Ok(None);
         }
         let bytes = response.bytes().await?;
-        Ok(Some(Image::new(bytes.to_vec(), detect_mime(url))))
+        // Kotlin getThumbnail 扩展名推断（共享 detect_image_mime）
+        Ok(Some(Image::new(bytes.to_vec(), detect_image_mime(url))))
     }
 
     async fn fetch_search_key(&self) -> Result<String, ProviderError> {
@@ -448,11 +437,7 @@ impl YenPressClient {
             .get(format!("{YEN_PRESS_BASE_URL}search"))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::YenPress, status, text));
-        }
+        let response = super::ensure_success(CoreProviders::YenPress, response).await?;
         let text = response.text().await?;
         YenPressParser::parse_search_key(&text)
             .ok_or_else(|| ProviderError::message("failed to parse YenPress search key"))
@@ -479,19 +464,6 @@ fn construct_query_payload(search_query: &str) -> String {
         "page": { "size": 10, "current": 1 }
     })
     .to_string()
-}
-
-fn detect_mime(url: &str) -> Option<String> {
-    let lower = url.to_lowercase();
-    if lower.ends_with(".png") {
-        Some("image/png".into())
-    } else if lower.ends_with(".webp") {
-        Some("image/webp".into())
-    } else if lower.ends_with(".gif") {
-        Some("image/gif".into())
-    } else {
-        Some("image/jpeg".into())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,9 +812,8 @@ pub fn create_provider(
 #[async_trait::async_trait]
 impl MetadataProvider for YenPressMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"yenpress\.com/series/([^/?#]+)").ok()?;
-        re.captures(query)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+        // Kotlin：链接解析取第一个捕获组（正则 OnceLock 缓存）
+        super::capture_link_id(query, r"yenpress\.com/series/([^/?#]+)")
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::YenPress

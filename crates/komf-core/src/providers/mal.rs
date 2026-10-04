@@ -172,11 +172,7 @@ impl MalClient {
             .await
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Mal, status, body));
-        }
+        let response = super::ensure_success(CoreProviders::Mal, response).await?;
         let body: MalSearchResponse = response.json().await?;
         Ok(body.data.into_iter().map(|e| e.node).collect())
     }
@@ -192,11 +188,7 @@ impl MalClient {
             .await
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status(CoreProviders::Mal, status, body));
-        }
+        let response = super::ensure_success(CoreProviders::Mal, response).await?;
         Ok(response.json().await?)
     }
 
@@ -454,9 +446,8 @@ pub fn create_provider(
 #[async_trait::async_trait]
 impl MetadataProvider for MalMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re = regex::Regex::new(r"myanimelist\.net/(?:manga|anime)/(\d+)").ok()?;
-        re.captures(query)
-            .map(|c| c.get(1).unwrap().as_str().to_string())
+        // Kotlin：链接解析取第一个捕获组（正则 OnceLock 缓存）
+        super::capture_link_id(query, r"myanimelist\.net/(?:manga|anime)/(\d+)")
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::Mal

@@ -19,6 +19,7 @@
 //!   服务端在 SSE 流上回握手响应，之后才派发 hub 消息（HandshakeTimeout 默认 15s）。
 use crate::client::MediaServerError;
 use crate::event_listener::{BookEvent, MediaServerEventListener, SeriesEvent};
+use crate::http_util::ensure_success;
 use crate::kavita::{KavitaChapter, KavitaClient, KavitaVolume};
 use crate::model::{MediaServerBookId, MediaServerLibraryId, MediaServerSeriesId};
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -290,10 +291,8 @@ impl KavitaSignalREventHandler {
             let response = self.open_sse(&jwt, connection).await?;
             let status = response.status();
             tracing::debug!("kavita signalr: sse opened status={status}");
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(MediaServerError::Status(status, body));
-            }
+            // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+            let response = ensure_success(response).await?;
             // 传输建立后必须先发握手帧；服务端在 SSE 流上回握手响应。
             self.send_handshake(&jwt, connection).await?;
             tracing::debug!("kavita signalr: handshake sent");
@@ -348,11 +347,8 @@ impl KavitaSignalREventHandler {
             .query(&[("negotiateVersion", "1"), ("access_token", jwt)])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         let parsed: NegotiateResponse = response.json().await?;
         if parsed.connection_id.is_empty() {
             return Err(MediaServerError::message(
@@ -460,7 +456,7 @@ impl KavitaSignalREventHandler {
                     received_any = true;
                     last_activity = tokio::time::Instant::now();
                     buffer.extend_from_slice(&bytes);
-                    while let Some(end) = find_frame_boundary(&buffer) {
+                    while let Some(end) = crate::sse::find_frame_boundary(&buffer) {
                         let frame: Vec<u8> = buffer.drain(..end).collect();
                         if let Some(data) = parse_sse_data(&frame) {
                             match self.handle_message(&data, &state).await {
@@ -626,11 +622,8 @@ impl KavitaSignalREventHandler {
                 Err(e) if e.is_timeout() => continue,
                 Err(e) => return Err(e.into()),
             };
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(MediaServerError::Status(status, body));
-            }
+            // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+            let response = ensure_success(response).await?;
             // LongPolling 响应体是文本帧流（消息以 record separator 0x1e 结尾，
             // 如 `{}\x1e`），不是 JSON 数组——用 json() 解析必然报
             // "error decoding response body"。按 0x1e 切分逐条处理。
@@ -858,31 +851,12 @@ enum MessageOutcome {
     Error(MediaServerError),
 }
 
-/// SSE 帧边界（`\n\n`，兼容 `\r\n\r\n`）。
-fn find_frame_boundary(buffer: &[u8]) -> Option<usize> {
-    buffer
-        .windows(2)
-        .position(|w| w == b"\n\n")
-        .map(|pos| pos + 2)
-        .or_else(|| {
-            buffer
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .map(|pos| pos + 4)
-        })
-}
-
 /// 从 SSE 帧提取 SignalR data 负载（`data: <json>\x1e`）。
+/// 复用共享 SSE 帧解析（`crate::sse`），并剥离 SignalR record
+/// separator（0x1e）与首尾空白。
 fn parse_sse_data(frame: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(frame);
-    let data = text.lines().find_map(|line| {
-        line.strip_prefix("data:")
-            .map(|s| s.trim_start())
-            .or_else(|| line.strip_prefix("data:").map(|s| s.trim()))
-    })?;
-    let data = data.strip_suffix('\u{1e}').unwrap_or(data);
-    let data = data.strip_suffix('\r').unwrap_or(data);
-    Some(data.trim().to_string())
+    let (_event, data) = crate::sse::parse_sse_frame(frame)?;
+    Some(data.trim_end_matches('\u{1e}').trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -913,11 +887,11 @@ mod tests {
     #[test]
     fn finds_frame_boundaries() {
         let buffer = b"data: a\x1e\n\ndata: b\x1e\n\n";
-        assert_eq!(find_frame_boundary(buffer), Some(10));
+        assert_eq!(crate::sse::find_frame_boundary(buffer), Some(10));
         let buffer = b"data: a\x1e\r\n\r\n";
-        assert_eq!(find_frame_boundary(buffer), Some(12));
+        assert_eq!(crate::sse::find_frame_boundary(buffer), Some(12));
         let buffer = b"partial";
-        assert_eq!(find_frame_boundary(buffer), None);
+        assert_eq!(crate::sse::find_frame_boundary(buffer), None);
     }
 
     #[test]

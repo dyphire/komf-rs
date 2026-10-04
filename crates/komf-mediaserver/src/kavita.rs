@@ -6,6 +6,7 @@
 //! 注：Kotlin 版经 `JwtConsumer` 校验 JWT 过期时间；本移植解析 JWT payload
 //! （不验证签名，仅取过期时间）实现相同语义的令牌刷新。
 use crate::client::{MediaServerClient, MediaServerError};
+use crate::http_util::ensure_success;
 use crate::model::*;
 use base64::Engine;
 use komf_core::model::{Image, SeriesStatus, WebLink};
@@ -694,11 +695,8 @@ impl KavitaAuthClient {
             .query(&[("apiKey", api_key), ("pluginName", "Komf")])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         let parsed: KavitaAuthResponse = response.json().await?;
         Ok(parsed.token)
     }
@@ -777,11 +775,8 @@ impl KavitaClient {
         request: reqwest::RequestBuilder,
     ) -> Result<T, MediaServerError> {
         let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }
 
@@ -790,11 +785,8 @@ impl KavitaClient {
     /// 只检查 HTTP 状态，不解析 body（对齐 Kotlin 只查 status 的行为）
     async fn send_write(&self, request: reqwest::RequestBuilder) -> Result<(), MediaServerError> {
         let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        ensure_success(response).await?;
         Ok(())
     }
 
@@ -829,11 +821,8 @@ impl KavitaClient {
             }))
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         let pagination_header = response
             .headers()
             .get("Pagination")
@@ -890,10 +879,8 @@ impl KavitaClient {
         if status == reqwest::StatusCode::NO_CONTENT || status == reqwest::StatusCode::NOT_FOUND {
             return Err(MediaServerError::NotFound(volume_id.to_string()));
         }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }
 
@@ -908,59 +895,39 @@ impl KavitaClient {
         if status == reqwest::StatusCode::NO_CONTENT || status == reqwest::StatusCode::NOT_FOUND {
             return Err(MediaServerError::NotFound(chapter_id.to_string()));
         }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }
 
-    pub async fn get_series_cover(&self, series_id: i32) -> Result<Image, MediaServerError> {
+    /// 封面图下载共享骨架（对齐 Kotlin `KavitaClient` 封面端点）：`apiKey` 查询
+    /// 参数认证，非 2xx 报错，`Content-Type` + bytes → `Image`。
+    /// 两个封面端点（series-cover/chapter-cover）仅 endpoint 与 id 参数名不同。
+    async fn get_cover_image(
+        &self,
+        endpoint: &str,
+        id_param: &str,
+        id: i32,
+    ) -> Result<Image, MediaServerError> {
         let response = self
             .http
-            .get(format!("{}/api/image/series-cover", self.base_uri))
-            .query(&[
-                ("seriesId", series_id.to_string()),
-                ("apiKey", self.api_key.clone()),
-            ])
+            .get(format!("{}/{}", self.base_uri, endpoint))
+            .query(&[(id_param, id.to_string()), ("apiKey", self.api_key.clone())])
             .send()
             .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
-        let mime = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let bytes = response.bytes().await?;
-        Ok(Image::new(bytes.to_vec(), mime))
+        // 对齐 Kotlin：非 2xx 读取响应体报 Status 错误。
+        let response = ensure_success(response).await?;
+        crate::http_util::image_from_response(response).await
+    }
+
+    pub async fn get_series_cover(&self, series_id: i32) -> Result<Image, MediaServerError> {
+        self.get_cover_image("api/image/series-cover", "seriesId", series_id)
+            .await
     }
 
     pub async fn get_chapter_cover(&self, chapter_id: i32) -> Result<Image, MediaServerError> {
-        let response = self
-            .http
-            .get(format!("{}/api/image/chapter-cover", self.base_uri))
-            .query(&[
-                ("chapterId", chapter_id.to_string()),
-                ("apiKey", self.api_key.clone()),
-            ])
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(MediaServerError::Status(status, body));
-        }
-        let mime = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let bytes = response.bytes().await?;
-        Ok(Image::new(bytes.to_vec(), mime))
+        self.get_cover_image("api/image/chapter-cover", "chapterId", chapter_id)
+            .await
     }
 
     pub async fn get_libraries(&self) -> Result<Vec<KavitaLibrary>, MediaServerError> {
@@ -1958,15 +1925,22 @@ impl KavitaMediaServerClientAdapter {
     }
 }
 
+/// 媒体服务器字符串 id → Kavita i32 id（对应 Kotlin 适配层
+/// `toIntOrNull() ?: error("invalid Kavita <kind> id: ...")` 的 15 处重复样板）。
+/// `kind` 保留原错误消息中的资源名（series/chapter/library）。
+fn parse_kavita_id(raw: &str, kind: &str) -> Result<i32, MediaServerError> {
+    raw.parse()
+        .map_err(|_| MediaServerError::message(format!("invalid Kavita {kind} id: {raw}")))
+}
+
 #[async_trait::async_trait]
 impl MediaServerClient for KavitaMediaServerClientAdapter {
     async fn get_series(
         &self,
         series_id: &MediaServerSeriesId,
     ) -> Result<MediaServerSeries, MediaServerError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series_id.0, "series")?;
         let series = self.client.get_series(id).await?;
         let metadata = self.client.get_series_metadata(id).await?;
         let details = self.client.get_series_details(id).await?;
@@ -1982,9 +1956,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         library_id: &MediaServerLibraryId,
         page_number: i32,
     ) -> Result<Page<MediaServerSeries>, MediaServerError> {
-        let library_id_i32: i32 = library_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita library id: {}", library_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita library id。
+        let library_id_i32: i32 = parse_kavita_id(&library_id.0, "library")?;
         let (content, pagination) = self
             .client
             .get_series_page(library_id_i32, page_number)
@@ -2028,9 +2001,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         &self,
         series_id: &MediaServerSeriesId,
     ) -> Result<Option<Image>, MediaServerError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series_id.0, "series")?;
         match self.client.get_series_cover(id).await {
             Ok(image) => Ok(Some(image)),
             Err(_) => Ok(None),
@@ -2049,9 +2021,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         &self,
         book_id: &MediaServerBookId,
     ) -> Result<MediaServerBook, MediaServerError> {
-        let id: i32 = book_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita chapter id。
+        let id: i32 = parse_kavita_id(&book_id.0, "chapter")?;
         let chapter = self.client.get_chapter(id).await?;
         let volume = self.client.get_volume(chapter.volume_id).await?;
         Ok(to_media_server_book(&chapter, &volume))
@@ -2061,9 +2032,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         &self,
         series_id: &MediaServerSeriesId,
     ) -> Result<Vec<MediaServerBook>, MediaServerError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series_id.0, "series")?;
         let volumes = self.client.get_volumes(id).await?;
         let mut books = Vec::new();
         for volume in volumes.iter() {
@@ -2086,9 +2056,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         &self,
         book_id: &MediaServerBookId,
     ) -> Result<Option<Image>, MediaServerError> {
-        let id: i32 = book_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita chapter id。
+        let id: i32 = parse_kavita_id(&book_id.0, "chapter")?;
         match self.client.get_chapter_cover(id).await {
             Ok(image) => Ok(Some(image)),
             Err(_) => Ok(None),
@@ -2119,9 +2088,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         series_id: &MediaServerSeriesId,
         metadata: &MediaServerSeriesMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series_id.0, "series")?;
         // newName 由 title 决定；写入的标题字段同时锁定（Kavita
         // scanner 重扫会重置未锁定的 sort/localized name）。
         let new_name = metadata.title.as_ref().map(|t| t.name.clone());
@@ -2172,9 +2140,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         series_id: &MediaServerSeriesId,
         _thumbnail_id: &MediaServerThumbnailId,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series_id.0, "series")?;
         let series = self.client.get_series(id).await?;
         // 封面重置只解锁封面，标题锁保持当前值（此前误把
         // sort/localized 锁清掉，重扫会把 komf 写入的标题重置）
@@ -2207,9 +2174,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         book_id: &MediaServerBookId,
         metadata: &MediaServerBookMetadataUpdate,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = book_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita chapter id。
+        let id: i32 = parse_kavita_id(&book_id.0, "chapter")?;
         let current_chapter = self.client.get_chapter(id).await?;
         let request = to_kavita_chapter_metadata_update(metadata, &current_chapter);
         self.client.update_chapter_metadata(&request).await
@@ -2229,9 +2195,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         book: &MediaServerBook,
         _book_number: Option<i32>,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = book.id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita chapter id: {}", book.id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita chapter id。
+        let id: i32 = parse_kavita_id(&book.id.0, "chapter")?;
         self.client.reset_chapter_lock(id).await
     }
 
@@ -2239,9 +2204,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         &self,
         series: &MediaServerSeries,
     ) -> Result<(), MediaServerError> {
-        let id: i32 = series.id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series.id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series.id.0, "series")?;
         let series = self.client.get_series(id).await?;
         // 对齐 PR#343：重置清掉 komf 写入的标题，标题请求走 400 重试
         self.update_series_titles(&series, kavita_series_reset_update_request(&series))
@@ -2258,9 +2222,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         _selected: bool,
         lock: bool,
     ) -> Result<Option<MediaServerSeriesThumbnail>, MediaServerError> {
-        let id: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let id: i32 = parse_kavita_id(&series_id.0, "series")?;
         self.client.upload_series_cover(id, thumbnail, lock).await?;
         Ok(None)
     }
@@ -2272,9 +2235,8 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         _selected: bool,
         lock: bool,
     ) -> Result<Option<MediaServerBookThumbnail>, MediaServerError> {
-        let id: i32 = book_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita chapter id: {}", book_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita chapter id。
+        let id: i32 = parse_kavita_id(&book_id.0, "chapter")?;
         let chapter = self.client.get_chapter(id).await?;
         self.client
             .upload_volume_cover(chapter.volume_id, thumbnail, lock)
@@ -2287,12 +2249,10 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         library_id: &MediaServerLibraryId,
         series_id: &MediaServerSeriesId,
     ) -> Result<(), MediaServerError> {
-        let library_id_i32: i32 = library_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita library id: {}", library_id.0))
-        })?;
-        let series_id_i32: i32 = series_id.0.parse().map_err(|_| {
-            MediaServerError::message(format!("invalid Kavita series id: {}", series_id.0))
-        })?;
+        // 对齐 Kotlin：invalid Kavita library id。
+        let library_id_i32: i32 = parse_kavita_id(&library_id.0, "library")?;
+        // 对齐 Kotlin：invalid Kavita series id。
+        let series_id_i32: i32 = parse_kavita_id(&series_id.0, "series")?;
         self.client.scan_library(library_id_i32).await?;
         self.client.scan_series(library_id_i32, series_id_i32).await
     }
