@@ -395,6 +395,26 @@ pub struct ProvidersModule {
     pub oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
 }
 
+/// 各容器（default + 库级）的主标题语言（`postProcessing.seriesTitleLanguage`）：
+/// 作用于 MangaDex 标题语言、MangaBaka 主标题选择、bangumi 作者/出版社中文名
+/// （use_chinese_names）。库级允许覆盖全局值。
+#[derive(Debug, Clone, Default)]
+pub struct SeriesTitleLanguages {
+    pub default: Option<String>,
+    /// 库 id → 该库 postProcessing.seriesTitleLanguage（YAML 深合并后的生效值）。
+    pub libraries: std::collections::HashMap<String, Option<String>>,
+}
+
+impl SeriesTitleLanguages {
+    /// 容器生效值：库级 Some 优先，否则（库级缺失/None/未配置条目）回退 default。
+    pub fn for_library(&self, library_id: Option<&str>) -> Option<String> {
+        library_id
+            .and_then(|id| self.libraries.get(id))
+            .and_then(|v| v.clone())
+            .or_else(|| self.default.clone())
+    }
+}
+
 impl ProvidersModule {
     pub fn new(
         config: &MetadataProvidersConfig,
@@ -410,9 +430,10 @@ impl ProvidersModule {
         http_client: reqwest::Client,
         database_work_dir: Option<&std::path::Path>,
         oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
-        series_title_language: Option<String>,
+        series_title_languages: Option<SeriesTitleLanguages>,
     ) -> Self {
         let default_name_matcher = config.name_matching_mode;
+        let series_title_languages = series_title_languages.unwrap_or_default();
 
         // 离线数据源（bangumi/Archive、e-hentai-db）全局唯一实例：数据文件全局一份
         // （缺省 workDir/bangumi-archive、workDir/ehentai/e-hentai.db），default 与所有
@@ -449,7 +470,7 @@ impl ProvidersModule {
             &http_client,
             database_work_dir,
             oauth_manager.clone(),
-            series_title_language.clone(),
+            series_title_languages.for_library(None),
             bangumi_archive.clone(),
             ehentai_archive.clone(),
         );
@@ -466,7 +487,7 @@ impl ProvidersModule {
                         &http_client,
                         database_work_dir,
                         oauth_manager.clone(),
-                        series_title_language.clone(),
+                        series_title_languages.for_library(Some(library_id)),
                         bangumi_archive.clone(),
                         ehentai_archive.clone(),
                     ),
@@ -560,6 +581,7 @@ fn create_metadata_providers(
         database_work_dir,
         oauth_manager.clone(),
         bangumi_provider_archive,
+        series_title_language.clone(),
     ) {
         bangumi_got_archive = config.bangumi.archive.enabled;
         providers.push(RegisteredProvider {
@@ -723,5 +745,42 @@ impl MetadataProvider for UnimplementedProvider {
         _match_query: &MatchQuery,
     ) -> Result<Option<ProviderSeriesMetadata>, ProviderError> {
         Err(ProviderError::NotImplemented(self.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 库级主标题语言覆盖：库级 Some 优先；库级缺失/None 或未配置条目回退 default。
+    #[test]
+    fn series_title_languages_library_override() {
+        let mut libs = std::collections::HashMap::new();
+        libs.insert("lib-zh".to_string(), Some("zh".to_string()));
+        libs.insert("lib-none".to_string(), None);
+        let langs = SeriesTitleLanguages {
+            default: Some("en".to_string()),
+            libraries: libs,
+        };
+        // default 容器
+        assert_eq!(langs.for_library(None).as_deref(), Some("en"));
+        // 库级覆盖
+        assert_eq!(langs.for_library(Some("lib-zh")).as_deref(), Some("zh"));
+        // 库级显式 None / 未配置条目 → 回退 default
+        assert_eq!(langs.for_library(Some("lib-none")).as_deref(), Some("en"));
+        assert_eq!(
+            langs.for_library(Some("lib-missing")).as_deref(),
+            Some("en")
+        );
+        // default 为 None（komga 未配置）：库级 Some 仍生效，其余为 None
+        let langs = SeriesTitleLanguages {
+            default: None,
+            libraries: [("lib-zh".to_string(), Some("zh".to_string()))]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(langs.for_library(Some("lib-zh")).as_deref(), Some("zh"));
+        assert_eq!(langs.for_library(None), None);
+        assert_eq!(langs.for_library(Some("lib-missing")), None);
     }
 }

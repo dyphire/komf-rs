@@ -408,9 +408,6 @@ pub struct BangumiConfigDto {
     pub artist_roles: Option<Vec<KomfAuthorRole>>,
     pub tag_whitelist: Option<Vec<String>>,
     pub tag_whitelist_file: Option<String>,
-    /// 主标题语言（postProcessing.seriesTitleLanguage）联动：非中文时 bangumi
-    /// 作者/出版社不查 name_cn（用原名）；None/非 zh* → 原名。Rust 扩展。
-    pub series_title_language: Option<String>,
     pub archive: Option<BangumiArchiveConfigDto>,
 }
 

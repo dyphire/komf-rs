@@ -84,7 +84,6 @@ async fn main() {
                     ..Default::default()
                 },
                 archive: komf_core::config::BangumiArchiveConfig::default(),
-                series_title_language: None,
             },
             matcher,
             None,
@@ -92,6 +91,7 @@ async fn main() {
             None,
             None,
             None, // archive（全局服务由 ProvidersModule 创建；example 走在线 API）
+            Some("zh".to_string()),
         );
         run(&p, "Bangumi").await;
     }

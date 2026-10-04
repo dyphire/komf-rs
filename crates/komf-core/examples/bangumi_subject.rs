@@ -27,7 +27,6 @@ async fn main() {
                 ..Default::default()
             },
             archive: BangumiArchiveConfig::default(),
-            series_title_language: None,
         },
         matcher,
         None,
@@ -35,6 +34,7 @@ async fn main() {
         None,
         None, // archive（全局服务由 ProvidersModule 创建；example 走在线 API）
         None,
+        Some("zh".to_string()),
     )
     .expect("bangumi provider create failed");
 

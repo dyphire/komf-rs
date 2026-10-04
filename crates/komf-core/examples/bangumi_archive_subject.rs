@@ -114,7 +114,6 @@ async fn main() {
                 update_interval_hours: 0,
                 idle_release_secs: None,
             },
-            series_title_language: None,
         },
         matcher,
         None,
@@ -122,6 +121,7 @@ async fn main() {
         None,
         None,
         archive,
+        Some("zh".to_string()),
     )
     .expect("provider create failed");
 

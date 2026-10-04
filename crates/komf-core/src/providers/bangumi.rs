@@ -1527,6 +1527,7 @@ pub fn create_provider(
     _work_dir: Option<&std::path::Path>,
     oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
     archive: Option<std::sync::Arc<BangumiArchiveService>>,
+    series_title_language: Option<String>,
 ) -> Option<BangumiMetadataProvider> {
     let provider = &config.provider;
     if !provider.enabled {
@@ -1561,10 +1562,10 @@ pub fn create_provider(
     // bangumi/Archive 离线数据源：全局唯一实例由 `ProvidersModule::with_oauth` 创建并传入
     // （数据文件全局一份；库级容器共享同一服务。provider 禁用但 archive 启用时，服务经
     // `MetadataProvidersContainer` 侧通道注册，状态徽标 / 手动更新仍可用）。
-    // seriesTitleLanguage 联动：中文（zh/zh-hans/zh-tw/...）→ 作者/出版社查 name_cn；
+    // seriesTitleLanguage 联动（ProvidersModule 传入的全局主标题语言，与 MangaDex
+    // 同源）：中文（zh/zh-hans/zh-tw/...）→ 作者/出版社查 name_cn；
     // None 或非中文（ja/en/...）→ 用原名（不查 name_cn）。
-    let use_chinese_names = config
-        .series_title_language
+    let use_chinese_names = series_title_language
         .as_deref()
         .map(|l| l.to_ascii_lowercase().starts_with("zh"))
         .unwrap_or(false);

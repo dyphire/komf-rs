@@ -562,7 +562,6 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             ),
             tag_whitelist: Some(config.bangumi.provider.tag_whitelist.clone()),
             tag_whitelist_file: config.bangumi.provider.tag_whitelist_file.clone(),
-            series_title_language: config.bangumi.series_title_language.clone(),
             archive: Some(BangumiArchiveConfigDto {
                 enabled: Some(config.bangumi.archive.enabled),
                 dir: config.bangumi.archive.dir.clone(),
@@ -1282,11 +1281,6 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
                         .or(base.bangumi.archive.idle_release_secs),
                 })
                 .unwrap_or_else(|| base.bangumi.archive.clone()),
-            series_title_language: dto
-                .bangumi
-                .as_ref()
-                .and_then(|d| d.series_title_language.clone())
-                .or_else(|| base.bangumi.series_title_language.clone()),
         },
         webtoons: dto
             .webtoons

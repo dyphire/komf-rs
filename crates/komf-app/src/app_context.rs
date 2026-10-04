@@ -94,20 +94,25 @@ fn build_state(
     let work_dir = work_dir_from(config_path);
     let db_work_dir = work_dir.join("mangabaka");
 
-    // MangaDex/MangaBaka 标题语言偏好复用全局 postProcessing.seriesTitleLanguage
-    let series_title_language = config
-        .komga
-        .metadata_update
-        .default
-        .post_processing
-        .series_title_language
-        .clone();
+    // MangaDex 标题语言 / MangaBaka 主标题 / bangumi 作者出版社中文名共用的
+    // 主标题语言：取 komga.metadataUpdate 的值，库级 postProcessing 可覆盖全局。
+    let series_title_languages = {
+        let mu = &config.komga.metadata_update;
+        komf_core::providers::SeriesTitleLanguages {
+            default: mu.default.post_processing.series_title_language.clone(),
+            libraries: mu
+                .library
+                .iter()
+                .map(|(id, p)| (id.clone(), p.post_processing.series_title_language.clone()))
+                .collect(),
+        }
+    };
     let providers_module = ProvidersModule::with_oauth(
         &config.metadata_providers,
         http_client.clone(),
         Some(&work_dir),
         Some(oauth_manager.clone()),
-        series_title_language.clone(),
+        Some(series_title_languages),
     );
     // bangumi/Archive、e-hentai-db 离线数据源句柄（archive 未启用 → None；/api/update-*-db 与 /config 用）。
     // 注意：需在 `media_server_module` 移动 `providers_module.metadata_providers` 之前取出。
@@ -179,7 +184,13 @@ fn build_state(
     let tracker_services = Arc::new(komf_core::trackers::TrackerServices::new(
         http_client.clone(),
         Some(oauth_manager.clone()),
-        series_title_language.clone(),
+        config
+            .komga
+            .metadata_update
+            .default
+            .post_processing
+            .series_title_language
+            .clone(),
     ));
     AppState::from_modules(
         config.clone(),

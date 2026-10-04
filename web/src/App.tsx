@@ -424,7 +424,6 @@ function ProviderList(props: {
                   {key === 'bangumi' && (
                     <>
                       <Field label={t('f.tagWhitelist')}><CommaField value={cur.tagWhitelist} onChange={(v) => upd([...base, 'tagWhitelist'], v)} /></Field>
-                      <Field label={t('f.seriesTitleLanguage')}><TriText value={cur.seriesTitleLanguage} onChange={(v) => upd([...base, 'seriesTitleLanguage'], v)} placeholder="zh" /></Field>
                       <SwitchField label={t('f.archiveEnabled')} value={cur.archive?.enabled} onChange={(v) => upd([...base, 'archive', 'enabled'], v)} />
                       <Field label={t('f.archiveDir')}><TriText value={cur.archive?.dir} onChange={(v) => upd([...base, 'archive', 'dir'], v)} /></Field>
                       <Field label={t('f.archiveUpdateIntervalHours')}><input type="number" min="0" value={cur.archive?.updateIntervalHours ?? 168} onChange={(e) => upd([...base, 'archive', 'updateIntervalHours'], Number(e.target.value))} /></Field>
