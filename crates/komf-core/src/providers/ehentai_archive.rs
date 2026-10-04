@@ -782,25 +782,51 @@ pub struct EHentaiArchiveService {
     progress: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
 }
 
+/// 同 db 路径的全局单例注册表：热重载重建 ProvidersModule 时重复启动服务会导致
+/// 双实例各自做 FTS 迁移重建（撞 database is locked）且周期更新循环叠加
+/// （循环持有 Arc<Self> 永不退出）。键 = db 文件路径（canonicalize 失败时原样）。
+fn instances() -> &'static std::sync::Mutex<
+    std::collections::HashMap<PathBuf, std::sync::Weak<EHentaiArchiveService>>,
+> {
+    static INSTANCES: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<PathBuf, std::sync::Weak<EHentaiArchiveService>>,
+        >,
+    > = std::sync::OnceLock::new();
+    INSTANCES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 impl EHentaiArchiveService {
     /// 启动后台任务（非阻塞）。db 文件缺省 workDir/ehentai/e-hentai.db。
-    /// 只创建服务并加载现有数据；周期自动更新由编排方（app_context）统一调用
-    /// `start_auto_update` 启动，服务本身不自行调度。
+    /// 同 db 路径全局单例：重复调用返回已存在实例（热重载重建模块时复用）。
+    /// 周期自动更新由编排方（app_context）统一调用 `start_auto_update` 启动，
+    /// 服务本身不自行调度。
     pub fn start(
         config: &crate::config::EHentaiArchiveConfig,
         http_client: reqwest::Client,
         work_dir: Option<&Path>,
     ) -> Arc<Self> {
-        let store: Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>> = Arc::new(RwLock::new(None));
-        let ready = Arc::new(AtomicBool::new(false));
-        let fts_ready = Arc::new(AtomicBool::new(false));
-        let opened = Arc::new(AtomicBool::new(false));
         let db_path = config
             .db_file
             .as_ref()
             .map(PathBuf::from)
             .or_else(|| work_dir.map(|d| d.join("ehentai").join("e-hentai.db")))
             .unwrap_or_else(|| PathBuf::from("e-hentai.db"));
+        let key = db_path.canonicalize().unwrap_or_else(|_| db_path.clone());
+        {
+            let reg = instances().lock().unwrap();
+            if let Some(existing) = reg.get(&key).and_then(|w| w.upgrade()) {
+                tracing::debug!(
+                    "ehentai archive: reuse existing service for {}",
+                    key.display()
+                );
+                return existing;
+            }
+        }
+        let store: Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>> = Arc::new(RwLock::new(None));
+        let ready = Arc::new(AtomicBool::new(false));
+        let fts_ready = Arc::new(AtomicBool::new(false));
+        let opened = Arc::new(AtomicBool::new(false));
         let meta = meta_path(work_dir);
         let url = config
             .url
@@ -829,6 +855,10 @@ impl EHentaiArchiveService {
             download_in_progress: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(None)),
         });
+        instances()
+            .lock()
+            .unwrap()
+            .insert(key, Arc::downgrade(&svc));
 
         // 后台空闲释放：每 min(idle,60)s 检查一次，空闲超时释放 SQLite 页面缓存
         if idle_secs > 0 {

@@ -131,10 +131,8 @@ fn build_state(
         // mylar ${configDir} 占位符基准（=配置目录，work_dir 语义：目录/文件父目录/cwd）
         Some(work_dir.clone()),
     );
-    let manga_baka_db_downloader = Arc::new(MangaBakaDbDownloader::new(
-        db_work_dir.clone(),
-        http_client.clone(),
-    ));
+    let manga_baka_db_downloader =
+        MangaBakaDbDownloader::new(db_work_dir.clone(), http_client.clone());
     // MangaBaka 管理 API 仓储：数据库文件存在时启用（link/unlink/tags/系列详情）。
     let manga_baka_repository = {
         let database_file = db_work_dir.join("mangabaka.sqlite");
@@ -144,10 +142,8 @@ fn build_state(
             None
         }
     };
-    let book_walker_db_downloader = Arc::new(BookWalkerDbDownloader::new(
-        work_dir.join("bookwalker"),
-        http_client.clone(),
-    ));
+    let book_walker_db_downloader =
+        BookWalkerDbDownloader::new(work_dir.join("bookwalker"), http_client.clone());
 
     // =====================================================================
     // 统一自动更新编排（四个离线数据源同一处调度）

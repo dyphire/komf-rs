@@ -282,10 +282,13 @@ async fn match_library(
 ) -> Response {
     let services = select_services_for(kind, &state);
     // 对齐 Kotlin：matchLibraryMetadata 后台执行（Unit），恒 202。
-    services
-        .metadata_service_for(&library_id)
-        .match_library_metadata(&MediaServerLibraryId(library_id))
-        .await;
+    // 整库扫描可达数小时：若在请求任务内 await，代理/客户端超时断连会 drop 处理器
+    // future，扫描被静默中止（无任何错误日志）——必须真正 spawn 后台执行。
+    let service = services.metadata_service_for(&library_id);
+    let library = MediaServerLibraryId(library_id);
+    tokio::spawn(async move {
+        service.match_library_metadata(&library).await;
+    });
     StatusCode::ACCEPTED.into_response()
 }
 

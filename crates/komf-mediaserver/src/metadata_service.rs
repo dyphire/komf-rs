@@ -63,6 +63,12 @@ pub struct MetadataService {
     chinese_conversion: ChineseConversionConfig,
     /// 转换器实例（按配置方向构建；未启用/初始化失败为 None → 不转换）。
     chinese_converter: Option<std::sync::Arc<komf_core::util::ChineseConverter>>,
+    /// per-series 匹配互斥锁（Rust 扩展）：手动库扫描 / SSE 自动匹配 / 手动
+    /// identify 可能并发命中同一系列。komga 侧元数据更新为后写覆盖，并发匹配
+    /// 最坏浪费请求、不产生脏数据，但聚合+封面的重复开销可观——按系列 id 加
+    /// 细粒度锁串行化。条目只增不删（系列数有界）。
+    series_match_locks:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl MetadataService {
@@ -112,7 +118,22 @@ impl MetadataService {
             library_id,
             chinese_conversion,
             chinese_converter,
+            series_match_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// per-series 匹配互斥锁：获取（或创建）该系列专属的异步锁。
+    /// 调用方持有返回的锁直至匹配完成，实现并发命中同系列时串行执行。
+    fn series_match_lock(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.series_match_locks
+            .lock()
+            .unwrap()
+            .entry(series_id.0.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     pub fn available_providers(&self, library_id: &MediaServerLibraryId) -> Vec<CoreProviders> {
@@ -241,6 +262,8 @@ impl MetadataService {
         fallback_provider_series_id: &ProviderSeriesId,
         edition: Option<&str>,
     ) -> MetadataJobId {
+        // per-series 互斥：identify 与自动匹配/库扫描并发命中同系列时串行执行。
+        let _guard = self.series_match_lock(series_id).lock_owned().await;
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
         let result = self
             .identify_series_metadata_inner(
@@ -759,6 +782,8 @@ impl MetadataService {
         series_id: &MediaServerSeriesId,
         apply_links_skip: bool,
     ) -> MetadataJobId {
+        // per-series 互斥：SSE 自动匹配与手动库扫描并发命中同系列时串行执行。
+        let _guard = self.series_match_lock(series_id).lock_owned().await;
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
         let result = self
             .match_series_metadata_inner(&tx, series_id, apply_links_skip)
@@ -776,6 +801,8 @@ impl MetadataService {
     /// 库级扫描（Auto-Identify Library）用：注册 job 并执行匹配，但**不**做失败收藏夹
     /// 移除（由 match_library_metadata 用本地缓存统一维护）。返回匹配结果。
     async fn match_series_metadata_outcome(&self, series_id: &MediaServerSeriesId) -> MatchOutcome {
+        // per-series 互斥：库扫描与 SSE 自动匹配/identify 并发命中同系列时串行执行。
+        let _guard = self.series_match_lock(series_id).lock_owned().await;
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
         let result = self.match_series_metadata_inner(&tx, series_id, true).await;
         let outcome = result.as_ref().map(|o| *o).unwrap_or(MatchOutcome::Skipped);

@@ -2575,20 +2575,47 @@ pub struct MangaBakaDbDownloader {
     pub download_in_progress: Arc<std::sync::atomic::AtomicBool>,
     pub progress:
         Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
+    /// 周期自动更新循环是否已启动（防热重载重复 spawn：循环持有 Arc<Self> 永不退出）。
+    pub auto_update_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MangaBakaDbDownloader {
-    pub fn new(work_dir: impl Into<PathBuf>, http: reqwest::Client) -> Self {
+    pub fn new(work_dir: impl Into<PathBuf>, http: reqwest::Client) -> Arc<Self> {
         let work_dir = work_dir.into();
-        let downloader = Self {
+        // 同工作目录全局单例：热重载重建模块时重复构造会叠加更新循环
+        // （循环持有实例 Arc 永不退出）。键 = 工作目录。
+        fn instances() -> &'static std::sync::Mutex<
+            std::collections::HashMap<PathBuf, std::sync::Weak<MangaBakaDbDownloader>>,
+        > {
+            static INSTANCES: std::sync::OnceLock<
+                std::sync::Mutex<
+                    std::collections::HashMap<PathBuf, std::sync::Weak<MangaBakaDbDownloader>>,
+                >,
+            > = std::sync::OnceLock::new();
+            INSTANCES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        }
+        let key = work_dir.canonicalize().unwrap_or_else(|_| work_dir.clone());
+        {
+            let reg = instances().lock().unwrap();
+            if let Some(existing) = reg.get(&key).and_then(|w| w.upgrade()) {
+                tracing::debug!("MangaBaka: reuse existing downloader for {}", key.display());
+                return existing;
+            }
+        }
+        let downloader = Arc::new(Self {
             database_file: work_dir.join("mangabaka.sqlite"),
             database_archive: work_dir.join("mangabaka.tar.gz"),
             work_dir,
             http,
             download_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             progress: Arc::new(std::sync::Mutex::new(None)),
-        };
-        // 清理上次"解压完成 → rename 原子替换"之间崩溃/被杀残留的临时库。
+            auto_update_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        instances()
+            .lock()
+            .unwrap()
+            .insert(key, Arc::downgrade(&downloader));
+        // 清理上次"下载完成 → commit rename"之间崩溃/被杀残留的临时库。
         // 下载任务结束时的兜底清理（launch_download）在进程被杀时不执行；
         // 构造时刻（应用启动）该文件绝不可能是"正在使用"。
         let tmp = PathBuf::from(format!("{}.tmp", downloader.database_file.display()));
@@ -2675,6 +2702,14 @@ impl MangaBakaDbDownloader {
     /// interval_hours == 0 时不启动（仅手动下载）。
     pub fn start_auto_update(&self, interval_hours: u64) {
         if interval_hours == 0 {
+            return;
+        }
+        // 幂等：热重载会再次调用本方法，而循环持有 Arc<Self> 永不退出——
+        // 无守卫时每次重载叠加一个更新循环（离线源互斥下变成重复检查）。
+        if self
+            .auto_update_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             return;
         }
         let this = self.clone();
@@ -3040,6 +3075,7 @@ impl Clone for MangaBakaDbDownloader {
             http: self.http.clone(),
             download_in_progress: self.download_in_progress.clone(),
             progress: self.progress.clone(),
+            auto_update_started: self.auto_update_started.clone(),
         }
     }
 }

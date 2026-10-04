@@ -1253,15 +1253,42 @@ pub struct BangumiArchiveService {
     progress: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
 }
 
+/// 同数据目录的全局单例注册表：WebUI 保存配置触发热重载时会整体重建
+/// ProvidersModule，若无单例保护会重复启动服务——两个实例各自做 FTS 迁移重建
+/// 撞 database is locked、周期更新循环叠加（循环持有 Arc<Self> 永不退出）。
+/// 键 = 数据目录（canonicalize 失败时原样）。
+fn instances() -> &'static std::sync::Mutex<
+    std::collections::HashMap<PathBuf, std::sync::Weak<BangumiArchiveService>>,
+> {
+    static INSTANCES: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<PathBuf, std::sync::Weak<BangumiArchiveService>>,
+        >,
+    > = std::sync::OnceLock::new();
+    INSTANCES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 impl BangumiArchiveService {
     /// 启动后台任务（非阻塞）。`dir` 为数据目录（缺省 workDir/bangumi-archive）。
-    /// 只创建服务并加载现有数据；周期自动更新由编排方（app_context）统一调用
-    /// `start_auto_update` 启动，服务本身不自行调度。
+    /// 同 `dir` 全局单例：重复调用返回已存在实例（热重载重建模块时复用）。
+    /// 周期自动更新由编排方（app_context）统一调用 `start_auto_update` 启动，
+    /// 服务本身不自行调度。
     pub fn start(
         _config: &crate::config::BangumiArchiveConfig,
         http_client: reqwest::Client,
         dir: PathBuf,
     ) -> Arc<Self> {
+        let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        {
+            let reg = instances().lock().unwrap();
+            if let Some(existing) = reg.get(&key).and_then(|w| w.upgrade()) {
+                tracing::debug!(
+                    "bangumi archive: reuse existing service for {}",
+                    key.display()
+                );
+                return existing;
+            }
+        }
         let store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>> = Arc::new(RwLock::new(None));
         let ready = Arc::new(AtomicBool::new(false));
         let opened = Arc::new(AtomicBool::new(false));
@@ -1275,6 +1302,10 @@ impl BangumiArchiveService {
             download_in_progress: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(None)),
         });
+        instances()
+            .lock()
+            .unwrap()
+            .insert(key, Arc::downgrade(&svc));
         // 打开 + init_schema（v8 迁移可能 drop 旧表；FTS 本地重建是同步重 IO）
         // 跑在阻塞线程上，不占用 tokio worker。
         crate::util::heavy_pool::spawn_heavy(move || {
