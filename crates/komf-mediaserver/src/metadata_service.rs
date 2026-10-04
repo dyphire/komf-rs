@@ -469,7 +469,10 @@ impl MetadataService {
             provider: provider_name,
         });
 
-        let metadata = if self.aggregate_metadata {
+        // Rust 扩展：ehentai 为主 provider 时不做后续聚合——其元数据为同人志/gid
+        // 粒度，系列级字段（状态/连载/总卷数等）只有 ehentai 有值时反而是噪声
+        // （bangumi 等的空值合并进来无意义）；ehentai 作主来源时以其为准直接使用。
+        let metadata = if self.aggregate_metadata && provider_name != CoreProviders::EHentai {
             let providers: Vec<Arc<dyn MetadataProvider>> = self
                 .metadata_providers
                 .providers(&series.library_id.0)
@@ -924,30 +927,33 @@ impl MetadataService {
             provider: matched_provider.expect("matched implies provider"),
         });
 
-        let metadata = if self.aggregate_metadata {
-            let providers: Vec<Arc<dyn MetadataProvider>> = self
-                .metadata_providers
-                .providers(&series.library_id.0)
-                .into_iter()
-                .filter(|p| Some(p.provider_name()) != matched_provider)
-                .collect();
-            // 聚合除首个成功 provider 外的其余 provider
-            // （matched 已携带主 provider 的备选排除名单，聚合内各 provider 名单随 merge 并集）。
-            // matched 此处按值移入聚合（原实现逐字段 clone，大系列下封面合计内存翻倍）。
-            self.aggregate_metadata_from_providers(
-                &series,
-                &books,
-                matched.series_metadata,
-                matched.book_metadata,
-                matched.excluded_alt_titles,
-                providers,
-                None,
-                &tx,
-            )
-            .await
-        } else {
-            matched
-        };
+        // Rust 扩展：ehentai 为主 provider（首个匹配成功）时不做后续聚合，
+        // 直接使用其元数据（理由同 identify 路径：同人志粒度数据以其为准）。
+        let metadata =
+            if self.aggregate_metadata && matched_provider != Some(CoreProviders::EHentai) {
+                let providers: Vec<Arc<dyn MetadataProvider>> = self
+                    .metadata_providers
+                    .providers(&series.library_id.0)
+                    .into_iter()
+                    .filter(|p| Some(p.provider_name()) != matched_provider)
+                    .collect();
+                // 聚合除首个成功 provider 外的其余 provider
+                // （matched 已携带主 provider 的备选排除名单，聚合内各 provider 名单随 merge 并集）。
+                // matched 此处按值移入聚合（原实现逐字段 clone，大系列下封面合计内存翻倍）。
+                self.aggregate_metadata_from_providers(
+                    &series,
+                    &books,
+                    matched.series_metadata,
+                    matched.book_metadata,
+                    matched.excluded_alt_titles,
+                    providers,
+                    None,
+                    &tx,
+                )
+                .await
+            } else {
+                matched
+            };
 
         // Rust 扩展：简繁转换应用于元数据更新（chineseConversion.update.enabled + fields）
         let metadata = self.apply_chinese_conversion(metadata);
@@ -1273,6 +1279,15 @@ impl MetadataService {
         let mut current =
             SeriesAndBookMetadata::new(series_metadata, book_metadata).with_oneshots(books);
         current.excluded_alt_titles = excluded_alt_titles;
+        // Rust 扩展：ehentai 不作为非主 provider 参与聚合。其元数据为同人志/gid
+        // 粒度（标题带译者/版本装饰、标签偏本子里番），只在 ehentai 本身是主
+        // provider（匹配/识别来源，数据已作种子）时使用；作为聚合补充源只会
+        // 污染系列级标题/标签/备选，故在此统一剔除（覆盖自动匹配与手动识别
+        // 两条聚合路径）。
+        let providers: Vec<Arc<dyn MetadataProvider>> = providers
+            .into_iter()
+            .filter(|p| p.provider_name() != CoreProviders::EHentai)
+            .collect();
         for provider in providers {
             let matched = self
                 .match_series(series, books, &search_titles, provider.clone(), edition, tx)
