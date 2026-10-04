@@ -127,14 +127,20 @@ async fn job_events(State(state): State<SharedState>, Path(job_id): Path<String>
                 .into_response();
         }
     };
-    let job_tracker = {
+    let (job_tracker, repository) = {
         let state = state.read().unwrap();
-        state.job_tracker.clone()
+        (state.job_tracker.clone(), state.jobs_repository.clone())
     };
     let Some(receiver) = job_tracker.subscribe(&job_id).await else {
-        // 对齐 Kotlin：job 不存在时返回 200 SSE 流，发一个空 data 的
-        // `EventStreamNotFoundEvent`（eventsStreamNotFoundName）后关闭。
-        return event_stream_not_found();
+        // Rust 扩展（收尾语义）：内存 tracker 无此 job（含 komf 重启后任务丢失）
+        // 时先查持久化记录，替客户端收尾：
+        // - 落库终态（COMPLETED/FAILED）→ 回放真实 JobFinishedEvent 后关流；
+        // - 落库残留 RUNNING（进程崩溃/被杀）→ FAILED "interrupted"；
+        // - 查无记录 → 对齐 Kotlin：空 data 的 EventStreamNotFoundEvent 后关流。
+        return match repository.get_job(&job_id).ok().flatten() {
+            Some(record) => finished_job_replay(record),
+            None => event_stream_not_found(),
+        };
     };
     let stream = event_stream(receiver);
     Sse::new(stream)
@@ -150,7 +156,11 @@ async fn job_events(State(state): State<SharedState>, Path(job_id): Path<String>
 ///
 /// - 连接时先回放当前 RUNNING 快照（`JobCreatedEvent`），再进入实时流；
 /// - `?ids=a,b,c` 可选过滤（逗号分隔 jobId，非法 UUID 忽略；传了但全非法 → 空流）；
-/// - 单个 job 终态只发 `JobFinishedEvent`，流本身不断开；慢客户端丢帧追赶。
+/// - 单个 job 终态只发 `JobFinishedEvent`，流本身不断开；慢客户端丢帧追赶；
+/// - 收尾语义（Rust 扩展）：`?ids=` 中"不在 RUNNING 快照里"的 job，连接建立时
+///   合成一帧终态 `JobFinishedEvent` 回放——komf 重启后内存任务丢失，客户端
+///   EventSource 重连拿不到终态事件会永久挂起；服务端查持久化记录代其收尾：
+///   已完成的按落库状态发；残留 RUNNING（崩溃中断）或查无记录的发 FAILED。
 #[derive(Debug, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct GlobalEventsQuery {
@@ -180,18 +190,87 @@ async fn global_job_events(
         other => other.filter(|set| !set.is_empty()),
     };
 
-    let job_tracker = {
+    let (job_tracker, repository) = {
         let state = state.read().unwrap();
-        state.job_tracker.clone()
+        (state.job_tracker.clone(), state.jobs_repository.clone())
     };
     // 先订阅再取快照：订阅与快照之间的新建 job 会同时出现在 live 缓冲与快照中，
     // 用 seen 集合对 Created 去重；反之若先快照后订阅则会漏 Created。
     let receiver = job_tracker.subscribe_all();
     let snapshot = job_tracker.running_jobs().await;
-    let stream = global_event_stream(receiver, snapshot, filter);
+    // 终态收尾：?ids= 中不在 RUNNING 快照里的 job 合成 JobFinishedEvent 帧。
+    let finalized = finalized_frames(filter.as_ref(), &snapshot, &repository);
+    let stream = global_event_stream(receiver, snapshot, filter, finalized);
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+/// 收尾帧：对显式 ?ids= 中"不在 RUNNING 快照"的每个 job，查持久化记录合成终态帧：
+/// - 落库为终态（COMPLETED/FAILED）→ 按落库状态/消息/完成时间回放（重启后重放终态）；
+/// - 落库残留 RUNNING（进程崩溃/被杀，状态从未更新）→ FAILED "interrupted"；
+/// - 查无记录（未知 id / 持久化前的历史 job）→ FAILED "not found"。
+/// 无 ?ids= 的全量 firehose 不合成任何帧。
+fn finalized_frames(
+    filter: Option<&HashSet<String>>,
+    snapshot: &[komf_mediaserver::jobs::KomfJobRecord],
+    repository: &std::sync::Arc<komf_mediaserver::jobs::KomfJobsRepository>,
+) -> Vec<(String, String)> {
+    let Some(ids) = filter else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for id in ids {
+        if snapshot.iter().any(|r| r.id.0.to_string() == *id) {
+            continue;
+        }
+        let uuid = match Uuid::parse_str(id) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let record = repository
+            .get_job(&komf_mediaserver::jobs::MetadataJobId(uuid))
+            .ok()
+            .flatten();
+        let (status, series_id, message, finished_at) = match record {
+            Some(r) if r.status != MetadataJobStatus::Running => {
+                let dto_status = match r.status {
+                    MetadataJobStatus::Completed => KomfMetadataJobStatus::Completed,
+                    _ => KomfMetadataJobStatus::Failed,
+                };
+                (
+                    dto_status,
+                    r.series_id.0,
+                    r.message,
+                    r.finished_at.unwrap_or_else(chrono::Utc::now),
+                )
+            }
+            Some(r) => (
+                KomfMetadataJobStatus::Failed,
+                r.series_id.0,
+                Some("job interrupted (server restarted before completion)".to_string()),
+                chrono::Utc::now(),
+            ),
+            None => (
+                KomfMetadataJobStatus::Failed,
+                String::new(),
+                Some("job not found (unknown id or predates job persistence)".to_string()),
+                chrono::Utc::now(),
+            ),
+        };
+        let data = komf_api_models::job::job_finished_json(
+            id,
+            &series_id,
+            status,
+            message.as_deref(),
+            &finished_at.to_rfc3339(),
+        );
+        out.push((
+            JOB_FINISHED_EVENT_NAME.to_string(),
+            serde_json::to_string(&data).unwrap_or_default(),
+        ));
+    }
+    out
 }
 
 /// 连接建立时立即发出的存活注释帧（`: ok`），消除 axum `KeepAlive` 首个 15s 静默期：
@@ -224,6 +303,7 @@ fn global_event_stream(
     mut receiver: tokio::sync::broadcast::Receiver<GlobalJobEvent>,
     snapshot: Vec<komf_mediaserver::jobs::KomfJobRecord>,
     filter: Option<HashSet<String>>,
+    finalized: Vec<(String, String)>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
         // 连接建立立即发存活注释帧（`: ok`），先于快照回放。
@@ -237,6 +317,11 @@ fn global_event_stream(
             }
             seen.insert(job_id.clone());
             let (name, data) = global_frame_created(record);
+            yield Ok(Event::default().event(name).data(data));
+        }
+        // 终态收尾帧：?ids= 中已不在 RUNNING 的 job（含重启丢失的）补发
+        // JobFinishedEvent，客户端无需永久等待（先于实时流，建立连接即拿到）。
+        for (name, data) in finalized {
             yield Ok(Event::default().event(name).data(data));
         }
         loop {
@@ -337,6 +422,47 @@ fn event_stream_not_found() -> Response {
             .event("EventStreamNotFoundEvent")
             .data("");
         yield Ok::<Event, Infallible>(event);
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+/// 内存 tracker 已丢失但持久化记录仍在（典型：komf 重启）→ 回放终态
+/// `JobFinishedEvent` 后关流，替重连的客户端收尾。残留 RUNNING（崩溃中断）
+/// 按 FAILED 收尾。
+fn finished_job_replay(record: komf_mediaserver::jobs::KomfJobRecord) -> Response {
+    let job_id = record.id.0.to_string();
+    let (status, message, finished_at) = if record.status == MetadataJobStatus::Running {
+        (
+            KomfMetadataJobStatus::Failed,
+            Some("job interrupted (server restarted before completion)".to_string()),
+            chrono::Utc::now(),
+        )
+    } else {
+        let dto_status = match record.status {
+            MetadataJobStatus::Completed => KomfMetadataJobStatus::Completed,
+            _ => KomfMetadataJobStatus::Failed,
+        };
+        (
+            dto_status,
+            record.message,
+            record.finished_at.unwrap_or_else(chrono::Utc::now),
+        )
+    };
+    let data = komf_api_models::job::job_finished_json(
+        &job_id,
+        &record.series_id.0,
+        status,
+        message.as_deref(),
+        &finished_at.to_rfc3339(),
+    );
+    let data = serde_json::to_string(&data).unwrap_or_default();
+    let stream = async_stream::stream! {
+        yield sse_ok();
+        yield Ok::<Event, Infallible>(
+            Event::default().event(JOB_FINISHED_EVENT_NAME).data(data),
+        );
     };
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
@@ -530,7 +656,7 @@ mod sse_connect_tests {
             started_at: chrono::Utc::now(),
             finished_at: None,
         }];
-        let response = Sse::new(global_event_stream(rx, snapshot, None))
+        let response = Sse::new(global_event_stream(rx, snapshot, None, Vec::new()))
             .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
             .into_response();
         let text = String::from_utf8_lossy(
@@ -562,5 +688,106 @@ mod sse_connect_tests {
             .expect("帧无错误");
         let data = first.into_data().expect("SSE 帧应为 data 帧");
         assert_eq!(&data[..], b": ok\n\n");
+    }
+
+    /// per-job 事件流收尾：内存 tracker 丢失但持久化记录仍在（komf 重启场景）
+    /// → 回放终态 JobFinishedEvent 而非笼统的 EventStreamNotFoundEvent；
+    /// 残留 RUNNING（崩溃中断）按 FAILED 收尾。
+    #[tokio::test]
+    async fn finished_job_replay_emits_terminal_frame() {
+        let mk = |status, finished_at| komf_mediaserver::jobs::KomfJobRecord {
+            id: komf_mediaserver::jobs::MetadataJobId(Uuid::new_v4()),
+            series_id: komf_mediaserver::model::MediaServerSeriesId("s1".into()),
+            status,
+            message: None,
+            started_at: chrono::Utc::now(),
+            finished_at,
+        };
+        // 已完成的 job：按落库状态回放 COMPLETED
+        let response =
+            finished_job_replay(mk(MetadataJobStatus::Completed, Some(chrono::Utc::now())));
+        let text = String::from_utf8_lossy(
+            &axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .into_owned();
+        assert!(text.contains(JOB_FINISHED_EVENT_NAME), "实际：{text}");
+        assert!(text.contains("COMPLETED"), "实际：{text}");
+        assert!(text.contains("s1"), "seriesId 应回放，实际：{text}");
+        // 崩溃残留的 RUNNING：FAILED 收尾
+        let response = finished_job_replay(mk(MetadataJobStatus::Running, None));
+        let text = String::from_utf8_lossy(
+            &axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .into_owned();
+        assert!(text.contains(JOB_FINISHED_EVENT_NAME), "实际：{text}");
+        assert!(text.contains("FAILED"), "实际：{text}");
+    }
+
+    /// firehose 收尾帧：?ids= 中"不在 RUNNING 快照"的 job 合成终态帧——
+    /// 落库终态按原状态；残留 RUNNING → FAILED interrupted；查无记录 → FAILED not found；
+    /// 仍在 RUNNING 快照中的不合成。
+    #[test]
+    fn finalized_frames_cover_restarted_jobs() {
+        use komf_mediaserver::jobs::{KomfJobRecord, KomfJobsRepository, MetadataJobId};
+        let db = std::env::temp_dir().join(format!(
+            "komf_job_routes_test_{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&db);
+        let repo = std::sync::Arc::new(KomfJobsRepository::open(&db).unwrap());
+        let completed_id = Uuid::new_v4();
+        let stale_id = Uuid::new_v4();
+        let running_snapshot_id = Uuid::new_v4();
+        let unknown_id = Uuid::new_v4();
+        repo.insert_job(&KomfJobRecord {
+            id: MetadataJobId(completed_id),
+            series_id: komf_mediaserver::model::MediaServerSeriesId("sc".into()),
+            status: MetadataJobStatus::Completed,
+            message: Some("ok".into()),
+            started_at: chrono::Utc::now(),
+            finished_at: Some(chrono::Utc::now()),
+        })
+        .unwrap();
+        repo.insert_job(&KomfJobRecord {
+            id: MetadataJobId(stale_id),
+            series_id: komf_mediaserver::model::MediaServerSeriesId("ss".into()),
+            status: MetadataJobStatus::Running,
+            message: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+        })
+        .unwrap();
+        let snapshot = vec![KomfJobRecord {
+            id: MetadataJobId(running_snapshot_id),
+            series_id: komf_mediaserver::model::MediaServerSeriesId("sr".into()),
+            status: MetadataJobStatus::Running,
+            message: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+        }];
+        let filter: HashSet<String> = [completed_id, stale_id, running_snapshot_id, unknown_id]
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        let frames = finalized_frames(Some(&filter), &snapshot, &repo);
+        assert_eq!(frames.len(), 3, "RUNNING 快照中的 job 不应合成收尾帧");
+        let joined: String = frames
+            .iter()
+            .map(|(n, d)| format!("{n} {d}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("COMPLETED"), "实际：{joined}");
+        assert!(
+            joined.contains("interrupted"),
+            "残留 RUNNING 应 FAILED 收尾：{joined}"
+        );
+        assert!(joined.contains("not found"), "未知 id 应收尾：{joined}");
+        // 无 ?ids= 的全量 firehose 不合成任何帧
+        assert!(finalized_frames(None, &snapshot, &repo).is_empty());
+        let _ = std::fs::remove_file(&db);
     }
 }
