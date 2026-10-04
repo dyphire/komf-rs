@@ -473,15 +473,19 @@ impl BangumiMetadataMapper {
             r#type: Some(TitleType::Native),
             language: None,
         });
-        if let Some(name_cn) = &subject.name_cn {
-            if !name_cn.is_empty() {
-                titles.push(SeriesTitle {
-                    name: name_cn.clone(),
-                    r#type: None,
-                    language: Some("zh".into()),
-                });
-            }
-        }
+        // nameCn→null/zh（保持 Kotlin）。name_cn 为空（无译名作品常留空，原名即中文名）
+        // 时回退用原名：保证 zh 语言标签候选存在，seriesTitleLanguage=zh 时主标题
+        // 仍可更新（否则无 zh 候选 → 主标题保持旧值）。
+        let name_cn = subject
+            .name_cn
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&subject.name);
+        titles.push(SeriesTitle {
+            name: name_cn.clone(),
+            r#type: None,
+            language: Some("zh".into()),
+        });
 
         let mut aliases: Vec<(String, Option<String>)> = Vec::new();
         // 预置主标题（原名/中文名）：别名与其相同则跳过
@@ -1373,6 +1377,58 @@ fn archive_status_and_total_book_count() {
     let s2: BangumiSubject = serde_json::from_str(j2).unwrap();
     let md2 = mapper.to_series_metadata(&s2, &[], None);
     assert_eq!(md2.metadata.total_book_count, Some(20));
+}
+
+/// name_cn 为空/null 时回退用原名作为 zh 候选（无译名作品常留空 name_cn，
+/// 原名即中文名）：保证 seriesTitleLanguage=zh 时主标题可更新。
+#[test]
+fn empty_name_cn_falls_back_to_name_as_zh_title() {
+    let mapper = BangumiMetadataMapper::new(
+        crate::config::SeriesMetadataConfig::default(),
+        crate::config::BookMetadataConfig::default(),
+        vec![],
+        vec![],
+        vec![],
+    );
+    // null
+    let j1 = r#"{
+            "id": 1, "name": "盗墓笔记", "name_cn": null,
+            "summary": null, "tags": [], "infobox": []
+        }"#;
+    let s1: BangumiSubject = serde_json::from_str(j1).unwrap();
+    let md1 = mapper.to_series_metadata(&s1, &[], None);
+    assert!(md1
+        .metadata
+        .titles
+        .contains(&SeriesTitle {
+            name: "盗墓笔记".to_string(),
+            r#type: None,
+            language: Some("zh".to_string()),
+        }));
+    // 空串
+    let j2 = r#"{
+            "id": 2, "name": "盗墓笔记", "name_cn": "",
+            "summary": null, "tags": [], "infobox": []
+        }"#;
+    let s2: BangumiSubject = serde_json::from_str(j2).unwrap();
+    let md2 = mapper.to_series_metadata(&s2, &[], None);
+    assert!(md2
+        .metadata
+        .titles
+        .iter()
+        .any(|t| t.name == "盗墓笔记" && t.language.as_deref() == Some("zh")));
+    // 非空 name_cn 保持原行为
+    let j3 = r#"{
+            "id": 3, "name": "X", "name_cn": "中文名",
+            "summary": null, "tags": [], "infobox": []
+        }"#;
+    let s3: BangumiSubject = serde_json::from_str(j3).unwrap();
+    let md3 = mapper.to_series_metadata(&s3, &[], None);
+    assert!(md3
+        .metadata
+        .titles
+        .iter()
+        .any(|t| t.name == "中文名" && t.language.as_deref() == Some("zh")));
 }
 
 /// 特殊别名结构：`[非官方|电锯人]` 的 k 是标签非语言 → language None；
