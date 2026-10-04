@@ -730,6 +730,163 @@ impl KomfJobTracker {
         records.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         records
     }
+
+    /// 为该 job 创建终态守卫；job 正常完成后须由调用方 `dismiss()`。
+    pub fn guard(self: &Arc<Self>, job_id: MetadataJobId) -> JobTerminalGuard {
+        JobTerminalGuard::new(self, job_id)
+    }
+}
+
+/// 任务终态守卫 —— `register_job` 后持有。执行 future 被 drop（客户端/代理超时断连
+/// 导致 axum 中止请求任务）或 panic 时，已注册的 job 会永远滞留 RUNNING：事件流
+/// 持续回放 RUNNING、getJob 持续返回 RUNNING，客户端进度无限等待。守卫在 Drop 里
+/// 兜底 `fail_job`，保证 job 必达终态；正常路径 `finish_job` 之后 `dismiss()` 解除。
+pub struct JobTerminalGuard {
+    tracker: Arc<KomfJobTracker>,
+    job_id: Option<MetadataJobId>,
+}
+
+impl JobTerminalGuard {
+    fn new(tracker: &Arc<KomfJobTracker>, job_id: MetadataJobId) -> Self {
+        Self {
+            tracker: tracker.clone(),
+            job_id: Some(job_id),
+        }
+    }
+
+    /// 正常终态后解除守卫。complete_job/fail_job 已把 job 移出内存表，兜底 fail
+    /// 本为 no-op；显式解除避免每个已完成 job 都白起一个兜底任务。
+    pub fn dismiss(mut self) {
+        self.job_id = None;
+    }
+}
+
+impl Drop for JobTerminalGuard {
+    fn drop(&mut self) {
+        let Some(job_id) = self.job_id.take() else {
+            return;
+        };
+        let tracker = self.tracker.clone();
+        let message = "job terminated unexpectedly (connection dropped or task failed)".to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    tracker.fail_job(&job_id, message, false).await;
+                });
+            }
+            // runtime 已关闭（进程退出中）：事件无人消费，仅落库保证重启后状态正确。
+            Err(_) => {
+                let _ = tracker.repository.update_job_status(
+                    &job_id,
+                    MetadataJobStatus::Failed,
+                    Some(message),
+                );
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+mod terminal_guard_tests {
+    use super::*;
+
+    fn test_tracker() -> Arc<KomfJobTracker> {
+        let dir = std::env::temp_dir().join(format!(
+            "komf-job-guard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Arc::new(KomfJobsRepository::open(&dir.join("jobs.sqlite")).unwrap());
+        Arc::new(KomfJobTracker::new(repo, "komga"))
+    }
+
+    async fn wait_for(mut check: impl FnMut() -> bool) {
+        for _ in 0..100 {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("condition not met within 2s");
+    }
+
+    /// 模拟 axum 中止请求任务（客户端/代理超时断连）：执行 future 被 drop 后，
+    /// 守卫兜底把 job 置 FAILED，全局流收到终态帧——客户端不会无限等待。
+    #[tokio::test]
+    async fn aborted_task_fails_its_job() {
+        let tracker = test_tracker();
+        let mut global = tracker.subscribe_all();
+        let (id_tx, id_rx) = tokio::sync::oneshot::channel();
+        let worker = {
+            let tracker = tracker.clone();
+            tokio::spawn(async move {
+                let (job_id, _tx) = tracker
+                    .register_job(MediaServerSeriesId("s-abort".into()))
+                    .await;
+                let _guard = tracker.guard(job_id.clone());
+                let _ = id_tx.send(job_id);
+                futures::future::pending::<()>().await;
+            })
+        };
+        let job_id = id_rx.await.unwrap();
+
+        worker.abort();
+        wait_for(|| {
+            matches!(
+                tracker.repository.get_job(&job_id),
+                Ok(Some(record)) if record.status == MetadataJobStatus::Failed
+            )
+        })
+        .await;
+        // 全局流：Created 之后必有 FAILED 终态帧（fail_job 广播 Finished）。
+        let created = global.recv().await.unwrap();
+        assert!(matches!(created.kind, GlobalJobEventKind::Created { .. }));
+        let finished = global.recv().await.unwrap();
+        assert!(matches!(
+            finished.kind,
+            GlobalJobEventKind::Finished {
+                status: MetadataJobStatus::Failed,
+                ..
+            }
+        ));
+        // 兜底后 job 已离开内存表（后续订阅走持久化收尾）。
+        assert!(tracker.running_jobs().await.is_empty());
+    }
+
+    /// 正常完成 + dismiss：守卫不触发兜底，状态保持 COMPLETED，全局流无额外 Finished。
+    #[tokio::test]
+    async fn dismissed_guard_leaves_completed_job_untouched() {
+        let tracker = test_tracker();
+        let (job_id, _tx) = tracker
+            .register_job(MediaServerSeriesId("s-done".into()))
+            .await;
+        let guard = tracker.guard(job_id.clone());
+        tracker.complete_job(&job_id).await;
+        guard.dismiss();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let record = tracker.repository.get_job(&job_id).unwrap().unwrap();
+        assert_eq!(record.status, MetadataJobStatus::Completed);
+    }
+
+    /// 忘记 dismiss 也安全：complete_job 已把 job 移出内存表，armed 守卫的兜底
+    /// fail_job 是 no-op，不会把已完成的 job 改回 FAILED。
+    #[tokio::test]
+    async fn armed_guard_drop_after_completion_is_noop() {
+        let tracker = test_tracker();
+        let (job_id, _tx) = tracker
+            .register_job(MediaServerSeriesId("s-done2".into()))
+            .await;
+        tracker.complete_job(&job_id).await;
+        drop(tracker.guard(job_id.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let record = tracker.repository.get_job(&job_id).unwrap().unwrap();
+        assert_eq!(record.status, MetadataJobStatus::Completed);
+    }
 }
 
 #[cfg(test)]

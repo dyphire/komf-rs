@@ -243,10 +243,12 @@ impl MetadataService {
         edition: Option<&str>,
     ) -> MetadataJobId {
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
+        let terminal_guard = self.job_tracker.guard(job_id.clone());
         let result = self
             .set_series_metadata_inner(&tx, series_id, provider_name, provider_series_id, edition)
             .await;
         self.finish_job(&job_id, &tx, result).await;
+        terminal_guard.dismiss();
         job_id
     }
 
@@ -256,29 +258,46 @@ impl MetadataService {
     /// 限制（手动操作不被自动跳过拦截）。links 无可用链接/全部失败时回退请求指定的
     /// provider + id。
     pub async fn identify_series_metadata(
-        &self,
+        self: &Arc<Self>,
         series_id: &MediaServerSeriesId,
         fallback_provider: CoreProviders,
         fallback_provider_series_id: &ProviderSeriesId,
         edition: Option<&str>,
     ) -> MetadataJobId {
-        // per-series 互斥：identify 与自动匹配/库扫描并发命中同系列时串行执行。
-        let _guard = self.series_match_lock(series_id).lock_owned().await;
+        // 后台执行（对齐 Kotlin launchJob）：单系列匹配可超过代理/客户端超时
+        // （kmrs 代理 30s），请求任务内 await 会被断连 drop 静默中止——job 注册后
+        // 立即返回 jobId，执行脱离请求生命周期；per-series 锁在后台任务内获取
+        // （并发命中同系列仍串行）。终态由 finish_job / JobTerminalGuard 保证
+        // （panic/drop 兜底 FAILED，客户端不会无限等待）。
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
-        let result = self
-            .identify_series_metadata_inner(
-                &tx,
-                series_id,
-                fallback_provider,
-                fallback_provider_series_id,
-                edition,
-            )
-            .await;
-        // Rust 扩展：Identify 成功 → 从失败收藏夹移除。
-        if result.is_ok() {
-            self.maybe_remove_from_failed_collection(series_id).await;
-        }
-        self.finish_job(&job_id, &tx, result).await;
+        let terminal_guard = self.job_tracker.guard(job_id.clone());
+        let service = Arc::clone(self);
+        let series_id = series_id.clone();
+        let fallback_provider_series_id = fallback_provider_series_id.clone();
+        let edition = edition.map(str::to_string);
+        tokio::spawn({
+            let job_id = job_id.clone();
+            async move {
+                let _lock = service.series_match_lock(&series_id).lock_owned().await;
+                let result = service
+                    .identify_series_metadata_inner(
+                        &tx,
+                        &series_id,
+                        fallback_provider,
+                        &fallback_provider_series_id,
+                        edition.as_deref(),
+                    )
+                    .await;
+                // Rust 扩展：Identify 成功 → 从失败收藏夹移除。
+                if result.is_ok() {
+                    service
+                        .maybe_remove_from_failed_collection(&series_id)
+                        .await;
+                }
+                service.finish_job(&job_id, &tx, result).await;
+                terminal_guard.dismiss();
+            }
+        });
         job_id
     }
 
@@ -764,8 +783,35 @@ impl MetadataService {
 
     /// 对应 `matchSeriesMetadata`。返回 jobId，错误通过 job 事件/状态体现。
     /// Rust 扩展：匹配成功（更新了元数据）→ 自动从失败收藏夹移除。
-    pub async fn match_series_metadata(&self, series_id: &MediaServerSeriesId) -> MetadataJobId {
-        self.match_series_metadata_impl(series_id, true).await
+    /// 后台执行（对齐 Kotlin launchJob），理由同 identify_series_metadata。
+    pub async fn match_series_metadata(
+        self: &Arc<Self>,
+        series_id: &MediaServerSeriesId,
+    ) -> MetadataJobId {
+        let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
+        let terminal_guard = self.job_tracker.guard(job_id.clone());
+        let service = Arc::clone(self);
+        let series_id = series_id.clone();
+        tokio::spawn({
+            let job_id = job_id.clone();
+            async move {
+                let _lock = service.series_match_lock(&series_id).lock_owned().await;
+                let result = service
+                    .match_series_metadata_inner(&tx, &series_id, true)
+                    .await;
+                if result
+                    .as_ref()
+                    .is_ok_and(|outcome| *outcome == MatchOutcome::Updated)
+                {
+                    service
+                        .maybe_remove_from_failed_collection(&series_id)
+                        .await;
+                }
+                service.finish_job(&job_id, &tx, result.map(|_| ())).await;
+                terminal_guard.dismiss();
+            }
+        });
+        job_id
     }
 
     /// SSE 事件触发（on_books_added）专用：匹配**不受 linksSkipEnabled 影响**
@@ -783,8 +829,10 @@ impl MetadataService {
         apply_links_skip: bool,
     ) -> MetadataJobId {
         // per-series 互斥：SSE 自动匹配与手动库扫描并发命中同系列时串行执行。
+        // 事件监听路径在调用方（on_books_added）串行 await 全部 job，保持内联执行。
         let _guard = self.series_match_lock(series_id).lock_owned().await;
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
+        let terminal_guard = self.job_tracker.guard(job_id.clone());
         let result = self
             .match_series_metadata_inner(&tx, series_id, apply_links_skip)
             .await;
@@ -795,6 +843,7 @@ impl MetadataService {
             self.maybe_remove_from_failed_collection(series_id).await;
         }
         self.finish_job(&job_id, &tx, result.map(|_| ())).await;
+        terminal_guard.dismiss();
         job_id
     }
 
@@ -804,9 +853,11 @@ impl MetadataService {
         // per-series 互斥：库扫描与 SSE 自动匹配/identify 并发命中同系列时串行执行。
         let _guard = self.series_match_lock(series_id).lock_owned().await;
         let (job_id, tx) = self.job_tracker.register_job(series_id.clone()).await;
+        let terminal_guard = self.job_tracker.guard(job_id.clone());
         let result = self.match_series_metadata_inner(&tx, series_id, true).await;
         let outcome = result.as_ref().map(|o| *o).unwrap_or(MatchOutcome::Skipped);
         self.finish_job(&job_id, &tx, result.map(|_| ())).await;
+        terminal_guard.dismiss();
         outcome
     }
 
@@ -2939,5 +2990,275 @@ mod tests {
             .map(|t| t.name.as_str())
             .collect();
         assert_eq!(names, vec!["Frieren", "葬送のフリーレン 第二部"]);
+    }
+}
+
+/// 后台执行（spawn）+ 终态守卫的端到端语义。
+#[cfg(test)]
+mod job_lifecycle_tests {
+    use super::*;
+    use crate::config::ChineseUpdateConfig;
+    use crate::jobs::MetadataJobStatus;
+    use crate::metadata_post_processor::MetadataPostProcessor;
+
+    /// get_series 阻塞到测试放行（模拟慢匹配）；放行后返回 Err 使 job 失败。
+    #[derive(Default)]
+    struct BlockingClient {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl MediaServerClient for BlockingClient {
+        async fn get_series(
+            &self,
+            _series_id: &MediaServerSeriesId,
+        ) -> Result<MediaServerSeries, MediaServerError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(MediaServerError::message("stub released"))
+        }
+        async fn get_series_page(
+            &self,
+            _library_id: &MediaServerLibraryId,
+            _page_number: i32,
+        ) -> Result<Page<MediaServerSeries>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_series_thumbnail(
+            &self,
+            _series_id: &MediaServerSeriesId,
+        ) -> Result<Option<Image>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_series_thumbnails(
+            &self,
+            _series_id: &MediaServerSeriesId,
+        ) -> Result<Vec<MediaServerSeriesThumbnail>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_book(
+            &self,
+            _book_id: &MediaServerBookId,
+        ) -> Result<MediaServerBook, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_books(
+            &self,
+            _series_id: &MediaServerSeriesId,
+        ) -> Result<Vec<MediaServerBook>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_book_thumbnails(
+            &self,
+            _book_id: &MediaServerBookId,
+        ) -> Result<Vec<MediaServerBookThumbnail>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_book_thumbnail(
+            &self,
+            _book_id: &MediaServerBookId,
+        ) -> Result<Option<Image>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_library(
+            &self,
+            _library_id: &MediaServerLibraryId,
+        ) -> Result<MediaServerLibrary, MediaServerError> {
+            unimplemented!()
+        }
+        async fn get_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn update_series_metadata(
+            &self,
+            _series_id: &MediaServerSeriesId,
+            _metadata: &MediaServerSeriesMetadataUpdate,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+        async fn delete_series_thumbnail(
+            &self,
+            _series_id: &MediaServerSeriesId,
+            _thumbnail_id: &MediaServerThumbnailId,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+        async fn update_book_metadata(
+            &self,
+            _book_id: &MediaServerBookId,
+            _metadata: &MediaServerBookMetadataUpdate,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+        async fn delete_book_thumbnail(
+            &self,
+            _book_id: &MediaServerBookId,
+            _thumbnail_id: &MediaServerThumbnailId,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+        async fn reset_book_metadata(
+            &self,
+            _book: &MediaServerBook,
+            _book_number: Option<i32>,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+        async fn reset_series_metadata(
+            &self,
+            _series: &MediaServerSeries,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+        async fn upload_series_thumbnail(
+            &self,
+            _series_id: &MediaServerSeriesId,
+            _thumbnail: &Image,
+            _selected: bool,
+            _lock: bool,
+        ) -> Result<Option<MediaServerSeriesThumbnail>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn upload_book_thumbnail(
+            &self,
+            _book_id: &MediaServerBookId,
+            _thumbnail: &Image,
+            _selected: bool,
+            _lock: bool,
+        ) -> Result<Option<MediaServerBookThumbnail>, MediaServerError> {
+            unimplemented!()
+        }
+        async fn refresh_metadata(
+            &self,
+            _library_id: &MediaServerLibraryId,
+            _series_id: &MediaServerSeriesId,
+        ) -> Result<(), MediaServerError> {
+            unimplemented!()
+        }
+    }
+
+    fn test_service(client: Arc<dyn MediaServerClient>) -> Arc<MetadataService> {
+        let dir = std::env::temp_dir().join(format!(
+            "komf-svc-lifecycle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Arc::new(KomfJobsRepository::open(&dir.join("jobs.sqlite")).unwrap());
+        let tracker = Arc::new(KomfJobTracker::new(repo.clone(), "komga"));
+        let providers = Arc::new(komf_core::providers::MetadataProviders::new(
+            komf_core::providers::MetadataProvidersContainer::new(vec![]),
+        ));
+        let post_processor = MetadataPostProcessor::new(
+            MediaType::Manga,
+            false,
+            None,
+            false,
+            vec![],
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec![],
+        );
+        let updater = Arc::new(MetadataUpdater::new(
+            client.clone(),
+            repo.clone(),
+            "komga",
+            post_processor,
+            None,
+            vec![],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+        ));
+        Arc::new(MetadataService::new(
+            client,
+            providers,
+            false,
+            MetadataMerger::new(false, false),
+            updater,
+            repo,
+            "komga",
+            MediaType::Manga,
+            tracker,
+            SearchTitleExtractionConfig::default(),
+            false,
+            false,
+            None,
+            None,
+            ChineseConversionConfig {
+                enabled: false,
+                direction: Default::default(),
+                search: false,
+                matching: false,
+                update: ChineseUpdateConfig {
+                    enabled: false,
+                    fields: vec![],
+                },
+            },
+        ))
+    }
+
+    /// 回归：单系列匹配后台执行——注册后立即返回 jobId（不等待匹配完成），
+    /// 匹配在后台继续，结束后经 finish_job 收敛终态并广播 Finished 帧。
+    /// 若仍在请求任务内 await，get_series 阻塞时调用方会一起挂住（超时失败）。
+    #[tokio::test]
+    async fn match_series_returns_job_id_before_completion() {
+        let client = Arc::new(BlockingClient::default());
+        let service = test_service(client.clone());
+        let series_id = MediaServerSeriesId("s1".into());
+        let mut global = service.job_tracker.subscribe_all();
+
+        let job_id = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.match_series_metadata(&series_id),
+        )
+        .await
+        .expect("注册后应立即返回 jobId，不应等待匹配完成");
+
+        // 后台任务已进入 get_series（仍阻塞）：job 保持 RUNNING。
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.entered.notified())
+            .await
+            .expect("后台匹配任务应已启动");
+        assert!(service
+            .job_tracker
+            .running_jobs()
+            .await
+            .iter()
+            .any(|r| r.id == job_id));
+
+        // 放行：get_series 返回 Err → finish_job 失败收尾。
+        client.release.notify_one();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(event) = global.recv().await {
+                    if let crate::jobs::GlobalJobEventKind::Finished { status, .. } = event.kind {
+                        break status;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("应收到终态帧");
+        assert_eq!(finished, MetadataJobStatus::Failed);
+        let record = service
+            .series_match_repository
+            .get_job(&job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, MetadataJobStatus::Failed);
     }
 }
