@@ -879,13 +879,16 @@ fn get_book_number(name: &str) -> Option<crate::model::BookRange> {
 /// Kotlin `isbn10ToIsbn13`：10 位 ISBN 转 13 位（"978" + 前 9 位 + 校验位）。
 fn isbn10_to_isbn13(isbn10: &str) -> Option<String> {
     let stripped = isbn10.replace('-', "");
-    if stripped.len() == 13 {
+    // Kotlin `length`/`substring` 按字符计；这里同样按字符处理，
+    // 避免损坏的 ISBN 含多字节字符时按字节切片 panic。
+    let char_len = stripped.chars().count();
+    if char_len == 13 {
         return Some(stripped);
     }
-    if stripped.len() != 10 {
+    if char_len != 10 {
         return None;
     }
-    let intermediate = format!("978{}", &stripped[..9]);
+    let intermediate = format!("978{}", stripped.chars().take(9).collect::<String>());
     let mut sum: u32 = 0;
     for (index, ch) in intermediate.chars().enumerate() {
         let d = if index % 2 == 0 { 1u32 } else { 3u32 };
@@ -897,20 +900,18 @@ fn isbn10_to_isbn13(isbn10: &str) -> Option<String> {
 }
 
 /// Kotlin `String.trimIndent()` 的近似：删除非空行的公共最小前导空白。
+/// 缩进宽度按字符数计算（与 Kotlin 一致），避免多字节字符（如 U+3000）处切片 panic。
 fn trim_indent(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
     let min_indent = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .map(|l| l.chars().count() - l.trim_start().chars().count())
         .min()
         .unwrap_or(0);
     lines
         .iter()
-        .map(|l| {
-            let skip = l.len().min(min_indent);
-            &l[skip..]
-        })
+        .map(|l| l.chars().skip(min_indent).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -2736,6 +2737,9 @@ mod tests {
         );
         // 长度非法 → None（Kotlin require 抛异常，Rust 返回 None 由调用方兜底）
         assert_eq!(isbn10_to_isbn13("123"), None);
+        // 回归：损坏的 ISBN 含多字节字符（10 字节但 8 字符）时不得 panic。
+        // 旧实现按字节切片 `&stripped[..9]` 会落在 U+3000 内部。
+        assert_eq!(isbn10_to_isbn13("1234567\u{3000}"), None);
     }
 
     /// Kotlin `bookNumberRegex = "\(([^)]*)\)[^(]*$"`：取末尾括号内的数字。
@@ -2755,6 +2759,15 @@ mod tests {
         let input = "    第一行\n        第二行缩进";
         let out = trim_indent(input);
         assert_eq!(out, "第一行\n    第二行缩进");
+    }
+
+    /// 回归：前导空白含 U+3000（3 字节）时，公共缩进字节数可能落在多字节字符
+    /// 内部，按字节切片会 panic（`start byte index is not a char boundary`）。
+    #[test]
+    fn trim_indent_handles_multibyte_whitespace() {
+        let input = "      abc\n \u{3000} \u{3000} xyz";
+        let out = trim_indent(input);
+        assert_eq!(out, "abc\nxyz");
     }
 
     #[test]

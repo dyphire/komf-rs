@@ -172,18 +172,19 @@ pub struct BookWalkerImage {
 
 impl BookWalkerImage {
     /// 对应 Kotlin `url600`：`{CDN}/600/{id[0..2]}/{id[3]}/{id[4]}/{id[5..]}.webp`。
+    /// Kotlin 切片按字符计；image_id 来自外部数据，这里同样按字符处理，
+    /// 避免含多字节字符（异常数据）时按字节切片 panic。
     fn url600(&self) -> String {
-        let bytes = self.id.as_bytes();
-        let (first, second, third, rest) = if bytes.len() >= 5 {
+        let mut chars = self.id.chars();
+        let (first, second, third, rest) = if self.id.chars().take(5).count() >= 5 {
             (
-                // Kotlin：first=id[0..3]，second=id[3], third=id[4], last=id[5..]
-                &self.id[0..3],
-                &self.id[3..4],
-                &self.id[4..5],
-                &self.id[5..],
+                chars.by_ref().take(3).collect::<String>(),
+                chars.next().unwrap_or_default().to_string(),
+                chars.next().unwrap_or_default().to_string(),
+                chars.collect::<String>(),
             )
         } else {
-            (self.id.as_str(), "", "", "")
+            (self.id.clone(), String::new(), String::new(), String::new())
         };
         format!("{SOS_BRIGADE_CDN}/600/{first}/{second}/{third}/{rest}.webp")
     }
@@ -2008,6 +2009,23 @@ mod tests {
         assert_eq!(
             image.url600(),
             "https://img.sos-dan.net/600/012/3/4/56789.webp"
+        );
+    }
+
+    /// 回归：image_id 含多字节字符（≥5 字符）时不得 panic。
+    /// 旧实现按字节切片 `&self.id[0..3]` 会落在多字节字符内部。
+    #[test]
+    fn image_url600_handles_multibyte_id() {
+        let image = BookWalkerImage {
+            id: "あいうえお".to_string(),
+            name: "c".to_string(),
+            mime: "image/webp".to_string(),
+            width: 0,
+            height: 0,
+        };
+        assert_eq!(
+            image.url600(),
+            "https://img.sos-dan.net/600/あいう/え/お/.webp"
         );
     }
 
