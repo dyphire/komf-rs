@@ -57,8 +57,6 @@ pub struct MetadataService {
     links_match_enabled: bool,
     /// Auto-Identify Library 匹配失败系列归集收藏夹名（Rust 扩展）；None = 禁用。
     failed_match_collection_name: Option<String>,
-    /// 本 service 对应的库（default service 为 None）。收藏夹按库级建（名 = 配置名 + `[库名]`）。
-    library_id: Option<MediaServerLibraryId>,
     /// Rust 扩展：简繁转换配置（搜索/匹配/更新范围与字段）。
     chinese_conversion: ChineseConversionConfig,
     /// 转换器实例（按配置方向构建；未启用/初始化失败为 None → 不转换）。
@@ -87,7 +85,6 @@ impl MetadataService {
         links_skip_enabled: bool,
         links_match_enabled: bool,
         failed_match_collection_name: Option<String>,
-        library_id: Option<MediaServerLibraryId>,
         chinese_conversion: ChineseConversionConfig,
     ) -> Self {
         let chinese_converter = if chinese_conversion.enabled {
@@ -115,7 +112,6 @@ impl MetadataService {
             links_skip_enabled,
             links_match_enabled,
             failed_match_collection_name,
-            library_id,
             chinese_conversion,
             chinese_converter,
             series_match_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -575,11 +571,16 @@ impl MetadataService {
     }
 
     /// 收藏夹名称对：(主名 = 配置名 + `[库名]`，兜底名 = 配置名 + `[库id]`)。
-    /// 按库 id 专属——同名库冲突时先建者占主名，后续库自动落到库 id 兜底名。
-    /// default 服务无库 id，两名为同一配置名。
-    async fn failed_collection_names(&self) -> Option<(String, String)> {
+    /// 按**目标库**（扫描的库 / 系列所在库）命名——与 service 是否有库级配置无关，
+    /// 未配置库级设置的库（走 default service）也能得到带库名后缀的专属收藏夹。
+    /// 同名库冲突时先建者占主名，后续库自动落到库 id 兜底名。
+    /// 无库上下文（library_id=None）时两名为同一配置名。
+    async fn failed_collection_names(
+        &self,
+        library_id: Option<&MediaServerLibraryId>,
+    ) -> Option<(String, String)> {
         let base = self.failed_match_collection_name.as_ref()?;
-        let Some(library_id) = &self.library_id else {
+        let Some(library_id) = library_id else {
             return Some((base.clone(), base.clone()));
         };
         match self.media_server_client.get_library(library_id).await {
@@ -591,61 +592,206 @@ impl MetadataService {
         }
     }
 
-    /// 按名称对查找收藏夹（先主名后兜底名）→ 集合（id + seriesIds）；未找到/失败返回 None。
-    async fn find_collection(&self, names: &(String, String)) -> Option<MediaServerCollection> {
+    /// 按名称对列表查找收藏夹（先主名后兜底名，跨名称对保序）→ 命中集合列表；
+    /// 未找到/加载失败返回空。
+    async fn find_collections(
+        &self,
+        names_list: &[(String, String)],
+    ) -> Vec<MediaServerCollection> {
         match self.media_server_client.get_collections().await {
             Ok(collections) => collections
                 .into_iter()
-                .find(|c| c.name == names.0 || c.name == names.1),
+                .filter(|c| names_list.iter().any(|n| c.name == n.0 || c.name == n.1))
+                .collect(),
             Err(error) => {
                 tracing::warn!("failed to load collections: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 按名称对查找收藏夹（先主名后兜底名）→ 集合（id + seriesIds）；未找到/失败返回 None。
+    async fn find_collection(&self, names: &(String, String)) -> Option<MediaServerCollection> {
+        self.find_collections(std::slice::from_ref(names))
+            .await
+            .into_iter()
+            .next()
+    }
+
+    /// 加载系列并解析其所在库的失败收藏夹名称对；配置为空/系列加载失败返回 None。
+    async fn failed_collection_context(
+        &self,
+        series_id: &MediaServerSeriesId,
+    ) -> Option<(MediaServerSeries, (String, String))> {
+        let series = self
+            .media_server_client
+            .get_series(series_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    "failed to load series {} for failed-collection update: {error}",
+                    series_id.0
+                );
+                error
+            })
+            .ok()?;
+        let names = self
+            .failed_collection_names(Some(&series.library_id))
+            .await?;
+        Some((series, names))
+    }
+
+    /// 创建失败收藏夹（先主名，创建冲突回退兜底名）。成功返回集合；失败 warn 返回 None。
+    async fn create_failed_collection(
+        &self,
+        names: &(String, String),
+        series_id: &MediaServerSeriesId,
+    ) -> Option<MediaServerCollection> {
+        let mut created = self
+            .media_server_client
+            .create_collection(&names.0, &[series_id.0.clone()])
+            .await;
+        if created.is_err() && names.0 != names.1 {
+            tracing::warn!(
+                "collection \"{}\" creation failed, falling back to \"{}\"",
+                names.0,
+                names.1
+            );
+            created = self
+                .media_server_client
+                .create_collection(&names.1, &[series_id.0.clone()])
+                .await;
+        }
+        match created {
+            Ok(collection) => Some(collection),
+            Err(error) => {
+                tracing::warn!("failed to create failed-match collection: {error}");
                 None
             }
         }
     }
 
-    /// 匹配成功 → 从失败收藏夹移除（public match / identify 用；仅配置非空时生效）。
-    async fn maybe_remove_from_failed_collection(&self, series_id: &MediaServerSeriesId) {
-        let Some(names) = self.failed_collection_names().await else {
-            return;
-        };
-        let Some(collection) = self.find_collection(&names).await else {
-            return;
-        };
-        if !collection.series_ids.iter().any(|id| id == &series_id.0) {
+    /// 把系列加入失败收藏夹：更新本地缓存并持久化（幂等；缓存为空时按名称对创建）。
+    /// 库扫描（预加载缓存）与单系列/SSE 入口共用。
+    async fn add_series_to_failed_collection(
+        &self,
+        collection: &mut Option<(String, Vec<String>)>,
+        names: &(String, String),
+        series: &MediaServerSeries,
+    ) {
+        if let Some((collection_id, ids)) = collection {
+            if ids.iter().any(|id| id == &series.id.0) {
+                return; // 幂等：已在收藏夹
+            }
+            ids.push(series.id.0.clone());
+            match self
+                .media_server_client
+                .update_collection_series(collection_id, ids)
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    "added series \"{}\" {} to failed-match collection",
+                    series.name,
+                    series.id.0
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to add series {} to collection: {error}",
+                        series.id.0
+                    );
+                }
+            }
             return;
         }
-        let ids: Vec<String> = collection
-            .series_ids
-            .into_iter()
-            .filter(|id| id != &series_id.0)
-            .collect();
+        if let Some(created) = self.create_failed_collection(names, &series.id).await {
+            tracing::info!(
+                "created collection \"{}\" with series \"{}\" {}",
+                created.name,
+                series.name,
+                series.id.0
+            );
+            *collection = Some((created.id, created.series_ids));
+        }
+    }
+
+    /// 把系列从失败收藏夹移除：更新本地缓存并持久化。
+    /// 收藏夹不存在或不含该系列时 no-op。库扫描与单系列/SSE 入口共用。
+    async fn remove_series_from_failed_collection(
+        &self,
+        collection: &mut Option<(String, Vec<String>)>,
+        series: &MediaServerSeries,
+    ) {
+        let Some((collection_id, ids)) = collection else {
+            return;
+        };
+        if !ids.iter().any(|id| id == &series.id.0) {
+            return;
+        }
+        ids.retain(|id| id != &series.id.0);
         match self
             .media_server_client
-            .update_collection_series(&collection.id, &ids)
+            .update_collection_series(collection_id, ids)
             .await
         {
             Ok(()) => tracing::info!(
-                "removed series {} from collection \"{}\" (matched)",
-                series_id.0,
-                collection.name
+                "removed series \"{}\" {} from failed-match collection (matched)",
+                series.name,
+                series.id.0
             ),
-            Err(error) => tracing::warn!(
-                "failed to remove series {} from collection \"{}\": {error}",
-                series_id.0,
-                collection.name
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    "failed to remove series {} from collection: {error}",
+                    series.id.0
+                );
+            }
         }
+    }
+
+    /// 匹配成功 → 从失败收藏夹移除（public match / identify 用；仅配置非空时生效）。
+    /// 收藏夹名按**系列所在库**解析（default service 也能定位带库名后缀的专属收藏夹）；
+    /// 同时查找旧版无后缀收藏夹名，清理升级前遗留的条目。
+    async fn maybe_remove_from_failed_collection(&self, series_id: &MediaServerSeriesId) {
+        let Some(base) = self.failed_match_collection_name.clone() else {
+            return;
+        };
+        let Some((series, names)) = self.failed_collection_context(series_id).await else {
+            return;
+        };
+        let mut collection = self
+            .find_collections(&[names, (base.clone(), base)])
+            .await
+            .into_iter()
+            .find(|c| c.series_ids.iter().any(|id| id == &series_id.0))
+            .map(|c| (c.id, c.series_ids));
+        self.remove_series_from_failed_collection(&mut collection, &series)
+            .await;
+    }
+
+    /// 匹配失败 → 加入失败收藏夹（不存在则创建；已存在时幂等跳过）。
+    /// SSE 自动匹配用——与库扫描同一命名/回退规则，但独立查找（事件稀疏，
+    /// 无需库扫描的本地缓存）。配置为空时静默禁用。
+    async fn add_to_failed_collection(&self, series_id: &MediaServerSeriesId) {
+        let Some((series, names)) = self.failed_collection_context(series_id).await else {
+            return;
+        };
+        let mut collection = self
+            .find_collection(&names)
+            .await
+            .map(|c| (c.id, c.series_ids));
+        self.add_series_to_failed_collection(&mut collection, &names, &series)
+            .await;
     }
 
     /// 对应 `matchLibraryMetadata`。
     ///
     /// 对齐 Kotlin：返回 Unit（后台启动语义；分页/系列级错误仅 log，路由恒 202）。
     pub async fn match_library_metadata(&self, library_id: &MediaServerLibraryId) {
-        // Rust 扩展：失败收藏夹（按库 id 专属；主名 = 配置名 + `[库名]`，
+        // Rust 扩展：失败收藏夹（按目标库专属；主名 = 配置名 + `[库名]`，
         // 同名冲突时自动落到配置名 + `[库id]`）。整库扫描加载一次，
         // 之后本地维护 seriesIds 缓存，避免每个系列一次 GET。
-        let collection_names = self.failed_collection_names().await;
+        // 注意：命名按**本次扫描的库**解析（而非 service 的库级配置）——未配置库级
+        // 设置的库走 default service，也能得到带库名后缀的专属收藏夹。
+        let collection_names = self.failed_collection_names(Some(library_id)).await;
         let mut collection: Option<(String, Vec<String>)> = match &collection_names {
             Some(names) => self
                 .find_collection(names)
@@ -678,99 +824,18 @@ impl MetadataService {
                         continue;
                     }
                 }
-                let collection_name_display = collection_names
-                    .as_ref()
-                    .map(|names| names.0.clone())
-                    .unwrap_or_default();
                 let outcome = self.match_series_metadata_outcome(&series.id).await;
                 if outcome == MatchOutcome::Updated {
                     // 匹配成功 → 从收藏夹删除。
-                    if let Some((collection_id, ids)) = &mut collection {
-                        if ids.iter().any(|id| id == &series.id.0) {
-                            ids.retain(|id| id != &series.id.0);
-                            if let Err(error) = self
-                                .media_server_client
-                                .update_collection_series(collection_id, ids)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "failed to remove series {} from collection: {error}",
-                                    series.id.0
-                                );
-                            } else {
-                                tracing::info!(
-                                    "removed series \"{}\" {} from failed-match collection (matched)",
-                                    series.name,
-                                    series.id.0
-                                );
-                            }
-                        }
-                    }
+                    self.remove_series_from_failed_collection(&mut collection, &series)
+                        .await;
                 } else if outcome == MatchOutcome::NoMatch {
                     // 匹配失败 → 加入收藏夹（不存在则创建）；被跳过（Skipped）不加入。
                     let Some(names) = &collection_names else {
                         continue;
                     };
-                    match &mut collection {
-                        Some((collection_id, ids)) => {
-                            ids.push(series.id.0.clone());
-                            if let Err(error) = self
-                                .media_server_client
-                                .update_collection_series(collection_id, ids)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "failed to add series {} to collection: {error}",
-                                    series.id.0
-                                );
-                            } else {
-                                tracing::info!(
-                                    "added series \"{}\" {} to failed-match collection \"{}\"",
-                                    series.name,
-                                    series.id.0,
-                                    collection_name_display
-                                );
-                            }
-                        }
-                        None => {
-                            // 先主名（配置名 + [库名]）；同名收藏夹被其他库占用（创建冲突）
-                            // 时自动回退兜底名（配置名 + [库id]），保证按库 id 专属。
-                            let mut created = self
-                                .media_server_client
-                                .create_collection(&names.0, &[series.id.0.clone()])
-                                .await;
-                            if created.is_err() && names.0 != names.1 {
-                                tracing::warn!(
-                                    "collection \"{}\" creation failed, falling back to \"{}\"",
-                                    names.0,
-                                    names.1
-                                );
-                                created = self
-                                    .media_server_client
-                                    .create_collection(&names.1, &[series.id.0.clone()])
-                                    .await;
-                            }
-                            match created {
-                                Ok(created_collection) => {
-                                    tracing::info!(
-                                        "created collection \"{}\" with series \"{}\" {}",
-                                        created_collection.name,
-                                        series.name,
-                                        series.id.0
-                                    );
-                                    collection = Some((
-                                        created_collection.id,
-                                        created_collection.series_ids,
-                                    ));
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "failed to create failed-match collection: {error}"
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    self.add_series_to_failed_collection(&mut collection, names, &series)
+                        .await;
                 }
             }
             if page.page_number >= page.total_pages - 1 {
@@ -838,11 +903,17 @@ impl MetadataService {
         let result = self
             .match_series_metadata_inner(&tx, series_id, apply_links_skip)
             .await;
-        if result
-            .as_ref()
-            .is_ok_and(|outcome| *outcome == MatchOutcome::Updated)
-        {
-            self.maybe_remove_from_failed_collection(series_id).await;
+        // Rust 扩展：失败收藏夹双向维护——匹配成功移除（识别成功后不再需要手动处理），
+        // SSE 自动匹配失败加入（与库扫描同一命名规则，供后续 Auto-Identify Library
+        // 跳过/手动处理）。Skipped（linksSkip 等）不加不移。
+        match result.as_ref() {
+            Ok(MatchOutcome::Updated) => {
+                self.maybe_remove_from_failed_collection(series_id).await;
+            }
+            Ok(MatchOutcome::NoMatch) => {
+                self.add_to_failed_collection(series_id).await;
+            }
+            _ => {}
         }
         self.finish_job(&job_id, &tx, result.map(|_| ())).await;
         terminal_guard.dismiss();
@@ -944,21 +1015,20 @@ impl MetadataService {
                 );
                 return Ok(MatchOutcome::Skipped);
             }
-            let from_link: Option<SeriesAndBookMetadata> = if links_match
-                && self.links_match_enabled
-            {
-                // 链接直用：多 provider 合并（与 identify 共用 fetch_from_links）
-                match self.fetch_from_links(&series, &books, &tx).await {
-                    LinksFetchOutcome::Success(metadata, provider, _) => {
-                        matched_provider = Some(provider);
-                        Some(metadata)
+            let from_link: Option<SeriesAndBookMetadata> =
+                if links_match && self.links_match_enabled {
+                    // 链接直用：多 provider 合并（与 identify 共用 fetch_from_links）
+                    match self.fetch_from_links(&series, &books, &tx).await {
+                        LinksFetchOutcome::Success(metadata, provider, _) => {
+                            matched_provider = Some(provider);
+                            Some(metadata)
+                        }
+                        // 有 provider 特征但无可用直用链接 / 全部拉取失败：搜索兜底
+                        LinksFetchOutcome::NoCandidates | LinksFetchOutcome::AllFailed => None,
                     }
-                    // 有 provider 特征但无可用直用链接 / 全部拉取失败：搜索兜底
-                    LinksFetchOutcome::NoCandidates | LinksFetchOutcome::AllFailed => None,
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
             if let Some(metadata) = from_link {
                 Some(metadata)
             } else {
@@ -3192,7 +3262,6 @@ mod job_lifecycle_tests {
             SearchTitleExtractionConfig::default(),
             false,
             false,
-            None,
             None,
             ChineseConversionConfig {
                 enabled: false,

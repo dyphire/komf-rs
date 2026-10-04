@@ -19,7 +19,7 @@ use crate::metadata_merger::MetadataMerger;
 use crate::metadata_post_processor::{MetadataPostProcessor, PublisherTagNameConfig};
 use crate::metadata_service::{MetadataService, MetadataServiceProvider};
 use crate::metadata_updater::MetadataUpdater;
-use crate::model::{MediaServer, MediaServerLibraryId};
+use crate::model::MediaServer;
 use crate::stump::{StumpClient, StumpMediaServerClientAdapter};
 use crate::stump_event::StumpEventHandler;
 use komf_core::providers::MetadataProviders;
@@ -334,7 +334,6 @@ impl MediaServerModule {
             repository.clone(),
             job_tracker.clone(),
             media_server,
-            None,
         );
 
         let library_services: HashMap<String, Arc<MetadataService>> = config
@@ -354,7 +353,6 @@ impl MediaServerModule {
                         repository.clone(),
                         job_tracker.clone(),
                         media_server,
-                        Some(MediaServerLibraryId(library_id.clone())),
                     ),
                 )
             })
@@ -377,7 +375,6 @@ impl MediaServerModule {
         repository: Arc<KomfJobsRepository>,
         job_tracker: Arc<KomfJobTracker>,
         media_server: MediaServer,
-        library_id: Option<MediaServerLibraryId>,
     ) -> Arc<MetadataService> {
         Arc::new(MetadataService::new(
             media_server_client,
@@ -393,7 +390,6 @@ impl MediaServerModule {
             config.post_processing.links_skip_enabled,
             config.post_processing.links_match_enabled,
             config.failed_match_collection_name.clone(),
-            library_id,
             config.chinese_conversion.clone(),
         ))
     }
