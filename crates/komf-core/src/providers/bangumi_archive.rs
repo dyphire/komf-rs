@@ -1,23 +1,24 @@
 //! bangumi/Archive 离线数据源 —— 对齐 BangumiKomga `bangumi_archive/`。
 //!
-//! 架构：
+//! 架构（v8：主数据直接入库，无 mmap）：
 //! ```text
 //! BangumiArchiveService（tokio::spawn 后台：下载 → 构建 → 周期更新）
 //!   └── Arc<RwLock<Option<Arc<BangumiArchiveStore>>>>（原子替换共享槽）
-//!         ├── Mutex<rusqlite::Connection>
-//!         │     ├── subjects_idx:  id/type/name/name_cn/row_offset
-//!         │     ├── subjects_fts:  FTS5 unicode61 + 分析链预分词（content 指向 subjects_idx）
-//!         │     ├── relations_idx: (subject_id, relation_type, related_subject_id)
-//!         │     ├── persons: person 实体（id/name/name_cn/type/career）
-//!         │     ├── subject_persons: subject↔person 关联（含 position 角色）
-//!         │     └── archive_update: key/value（last_updated）
-//!         └── Mutex<Option<memmap2::Mmap>>（subject.jsonlines 零拷贝读行；
-//!               可释放/按需重映射，Windows 下 drop 即回收 working set）
+//!         └── Mutex<rusqlite::Connection>
+//!               ├── subjects:        主数据（id/type/name/name_cn/aliases/json 原文）
+//!               ├── subjects_fts:    FTS5 unicode61 + 分析链预分词（content 指向 subjects）
+//!               ├── relations_idx:   (subject_id, relation_type, related_subject_id)
+//!               ├── persons:         person 实体（id/name/name_cn/type/career/aliases）
+//!               ├── subject_persons: subject↔person 关联（含 position 角色）
+//!               └── archive_update:  key/value（last_updated / fts_version）
 //! ```
 //!
 //! 数据源：https://github.com/bangumi/Archive（release zip 约 418MB，解压后
-//! jsonlines 约 1GB+）。查询：SQLite 查偏移 → mmap seek → readline → JSON。
-//! 未就绪/构建中 → 调用方回退在线 API。
+//! jsonlines 约 1GB+）。导入成功后 jsonlines 自动删除（主数据已完整入库，
+//! zip 缓存保留，更新/重建时重新解压）。查询全部走 SQLite（page cache
+//! 由 PRAGMA cache_size 钳制）——v7 及之前的 mmap jsonlines 方案会让批量匹配
+//! 的 RSS 随触过的文件页单调涨到 ~1GB，v8 起彻底移除。未就绪/构建中 → 调用方
+//! 回退在线 API。
 
 use crate::providers::bangumi::{BangumiInfoBoxItem, BangumiRating, BangumiSubject, BangumiTag};
 use crate::providers::{CoreProviders, ProviderError};
@@ -388,7 +389,7 @@ pub(crate) fn parse_archive_infobox(text: &str) -> Vec<BangumiInfoBoxItem> {
     out
 }
 
-/// 关联条目（relations_idx JOIN subjects_idx 输出）。
+/// 关联条目（relations_idx JOIN subjects 输出）。
 #[derive(Debug, Clone)]
 pub struct RelatedSubject {
     pub id: u64,
@@ -399,22 +400,23 @@ pub struct RelatedSubject {
 }
 
 // ---------------------------------------------------------------------------
-// ArchiveDataStore —— SQLite 索引 + mmap 数据源
+// ArchiveDataStore —— SQLite 单库（主数据 + 索引）
 // ---------------------------------------------------------------------------
 
-const DDL_SUBJECTS_IDX: &str = "CREATE TABLE IF NOT EXISTS subjects_idx (
-    id         INTEGER PRIMARY KEY,
-    type       INTEGER,
-    name       TEXT,
-    name_cn    TEXT,
-    aliases    TEXT,
-    row_offset INTEGER NOT NULL
+/// v8 主数据表：jsonlines 原文整行入库（id 主键）。FTS content 表即本表。
+const DDL_SUBJECTS: &str = "CREATE TABLE IF NOT EXISTS subjects (
+    id      INTEGER PRIMARY KEY,
+    type    INTEGER,
+    name    TEXT,
+    name_cn TEXT,
+    aliases TEXT,
+    json    TEXT
 )";
 const DDL_FTS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS subjects_fts USING fts5(
     name,
     name_cn,
     aliases,
-    content='subjects_idx',
+    content='subjects',
     content_rowid='id',
     tokenize='unicode61'
 )";
@@ -444,10 +446,10 @@ const DDL_SUBJECT_PERSONS: &str = "CREATE TABLE IF NOT EXISTS subject_persons (
 const DDL_SP_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_subject_persons_subject ON subject_persons(subject_id)";
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
-/// FTS 召回候选上限 = limit*25（clamp 25..=1000）：每个候选都要 mmap 随机读 +
-/// 整条 subject JSON 解析，旧固定值 1000 对 limit=10~25 的搜索是纯浪费
+/// FTS 召回候选上限 = limit*25（clamp 25..=1000）：每个候选都要按主键读出一整行
+/// subject JSON 并解析，旧固定值 1000 对 limit=10~25 的搜索是纯浪费
 /// （对齐 bookwalker/mangabaka 的"小候选集 + 精排"模式）。
 fn fts_max_candidates(limit: usize) -> i64 {
     limit.saturating_mul(25).clamp(25, 1000) as i64
@@ -457,8 +459,10 @@ const FTS_MAX_QUERY_TERMS: usize = 60;
 /// FTS 结构版本（写入 archive_update.fts_version）：分词器/写入方式变化时随
 /// SCHEMA_VERSION 递增。init_schema 据此本地重建 FTS。
 /// 注意：不能用 COUNT(*) 判 FTS 是否为空——外部内容表的无 MATCH 查询直通
-/// content 表（FTS5 文档 4.4.4），COUNT 恒等于 subjects_idx 行数。
-const FTS_SCHEMA_VERSION: &str = "7";
+/// content 表（FTS5 文档 4.4.4），COUNT 恒等于 subjects 行数。
+/// "9"：修复 rebuild_fts 游标（旧 MAX(rowid) 直通 content 表导致仅索引首批
+/// 50k 行）——既有 v8 库据此标记启动时全量重建 FTS。
+const FTS_SCHEMA_VERSION: &str = "9";
 
 /// Archive relation_type（数字）→ 中文名（对齐 BangumiKomga SubjectRelation；
 /// 其余类型原样返回，Rust 侧只消费"单行本"）。
@@ -474,168 +478,55 @@ fn map_relation_type(t: Option<String>) -> Option<String> {
 
 pub struct BangumiArchiveStore {
     conn: Mutex<rusqlite::Connection>,
-    /// subject.jsonlines 路径：mmap 槽位为空（已释放/映射失败）时按需重映射。
-    subjects_path: PathBuf,
-    /// mmap 槽位：查询时短暂锁定并只拷贝目标行字节；release_hot_pages 可
-    /// 释放槽位（unix=MADV_DONTNEED；Windows=drop unmap 立即回收 working set）。
-    mm: Mutex<Option<memmap2::Mmap>>,
-    /// 最近一次 mmap 读取的毫秒时间戳（活动标记，供诊断/统计）。
-    last_used: std::sync::atomic::AtomicU64,
-    /// 最近一次周期强制释放的毫秒时间戳。
-    last_release: std::sync::atomic::AtomicU64,
-    /// 周期强制释放间隔（毫秒）；0 = 禁用。
-    idle_release_ms: u64,
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl BangumiArchiveStore {
-    pub fn open(
-        db_path: &Path,
-        subjects_path: &Path,
-        idle_release_secs: u64,
-    ) -> Result<Self, ProviderError> {
+    pub fn open(db_path: &Path) -> Result<Self, ProviderError> {
         let conn = rusqlite::Connection::open(db_path)
             .map_err(|e| ProviderError::message(format!("archive sqlite open failed: {e}")))?;
-        // 读写在应用层已串行（同一把 Mutex，重建期共享槽位置 None），WAL 无收益；
-        // 改用 DELETE：单事务构建的 rollback journal 随 COMMIT 自动删除，无遗留大文件、
-        // 无需手动 checkpoint。journal_mode 持久化于 db 文件头，旧 WAL 库首次打开时
-        // SQLite 会自动 checkpoint 并清理 -wal/-shm。
+        // 读写在应用层已串行（同一把 Mutex），WAL 无收益；改用 DELETE：单事务构建的
+        // rollback journal 随 COMMIT 自动删除。cache_size 钳住 page cache（32MB），
+        // 批量匹配的大结果集不再像 v7 mmap 那样把 RSS 推到文件全量。
         conn.execute_batch(
             "PRAGMA journal_mode=DELETE;
              PRAGMA synchronous=NORMAL;
              PRAGMA cache_size=-32000;",
         )
         .map_err(|e| ProviderError::message(format!("archive pragma failed: {e}")))?;
-        let mm = std::fs::File::open(subjects_path)
-            .ok()
-            .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
         Ok(Self {
             conn: Mutex::new(conn),
-            subjects_path: subjects_path.to_path_buf(),
-            mm: Mutex::new(mm),
-            last_used: std::sync::atomic::AtomicU64::new(now_ms()),
-            last_release: std::sync::atomic::AtomicU64::new(now_ms()),
-            idle_release_ms: idle_release_secs.saturating_mul(1000),
         })
-    }
-
-    /// 释放 mmap 热页：unix 下 MADV_DONTNEED（映射保留，页回收）；Windows 下
-    /// drop 槽位中的 Mmap（unmap 立即回收 working set——madvise 在 Windows 上
-    /// 无对应语义，旧实现为空操作，密集查询后 RSS 单调涨到 mmap 全量）。
-    /// 下次查询按需重映射（read_line_at_offset）。
-    fn release_hot_pages(&self) {
-        #[cfg(unix)]
-        {
-            let slot = self.mm.lock().unwrap();
-            if let Some(mm) = slot.as_ref() {
-                unsafe {
-                    libc::madvise(
-                        mm.as_ptr() as *mut libc::c_void,
-                        mm.len(),
-                        libc::MADV_DONTNEED,
-                    );
-                }
-                tracing::debug!("bangumi archive: released mmap hot pages");
-            }
-        }
-        #[cfg(not(unix))]
-        if self.mm.lock().unwrap().take().is_some() {
-            tracing::debug!("bangumi archive: dropped mmap (unmap releases working set)");
-        }
-    }
-
-    /// 周期强制释放 mmap 热页：每 idle 秒无条件 MADV_DONTNEED（CAS 防并发，
-    /// 供周期任务调用）。与旧"空闲释放"的关键区别：不再要求"距上次查询 ≥ idle"——
-    /// 密集查询（Auto-Identify 全库扫 / SSE 触发的匹配）会持续刷新 last_used，
-    /// 旧逻辑下热页永不释放、RSS 涨到 mmap 全量（jsonlines 1GB+）。
-    /// 下次查询按需从磁盘重读，代价仅为随机读几 KB 行。
-    pub fn release_periodic(&self) {
-        let idle = self.idle_release_ms;
-        if idle == 0 {
-            return;
-        }
-        let now = now_ms();
-        let last = self.last_release.load(std::sync::atomic::Ordering::Relaxed);
-        if now.saturating_sub(last) < idle {
-            return;
-        }
-        if self
-            .last_release
-            .compare_exchange(
-                last,
-                now,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            self.release_hot_pages();
-        }
-    }
-
-    /// 标记活动：仅更新时间戳（供未来诊断/统计用；释放由周期任务统一负责）。
-    fn touch(&self) {
-        self.last_used
-            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn init_schema(&self) -> Result<(), ProviderError> {
         let c = self.conn.lock().unwrap();
-        // v5 → v6：FTS 分词器 trigram → unicode61 + 预分词分析链（kmrs Lucene 语义）。
-        // 必须本地重建而非等下载更新——do_update 在远程数据未更新时会跳过重建，
-        // 仅重建 FTS 即可：subjects_idx 保留原始标题，重新分析填充。
-        let fts_is_trigram = c
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='subjects_fts'",
-                [],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-            .map(|sql| sql.contains("trigram"))
-            .unwrap_or(false);
-        if fts_is_trigram {
-            c.execute_batch("DROP TABLE IF EXISTS subjects_fts;")
-                .map_err(|e| ProviderError::message(format!("archive fts migrate v6: {e}")))?;
-        }
-        // 旧库缺 aliases 列（v3）→ 重建索引表（build 会全量重插）
-        let has_alias = match c.prepare("PRAGMA table_info(subjects_idx)") {
-            Ok(mut st) => st
-                .query_map([], |r| r.get::<_, String>(1))
-                .map(|rows| rows.filter_map(|r| r.ok()).any(|n| n == "aliases"))
-                .unwrap_or(false),
-            Err(_) => false,
-        };
-        if !has_alias {
-            c.execute_batch(
-                "DROP TABLE IF EXISTS subjects_fts; DROP TABLE IF EXISTS subjects_idx;",
-            )
-            .map_err(|e| ProviderError::message(format!("archive schema migrate: {e}")))?;
-        }
-        // v4 → v5：缺 persons 表（person 实体数据未入库）→ 清空索引强制下次 build 全量重建
-        let has_persons = c
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='persons'")
+        // v8 迁移：v7 及更早的库主数据在 subjects_idx（无 json 列，行定位靠
+        // row_offset + mmap jsonlines）。主数据入库后旧表整体废弃——检测到
+        // subjects_idx 即 drop 全部数据表，由启动/build 流程用本地 jsonlines
+        // （若齐全）或下次下载更新重建。这比逐版本 ALTER 更干净，且老库必然
+        // 伴随全量重写（1GB+ 主数据搬家）。
+        let legacy = c
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='subjects_idx'")
             .map(|mut st| {
                 st.query_map([], |_| Ok(()))
                     .map(|mut rows| rows.next().is_some())
                     .unwrap_or(false)
             })
             .unwrap_or(false);
-        if !has_persons {
+        if legacy {
             c.execute_batch(
-                "DROP TABLE IF EXISTS subjects_fts; DROP TABLE IF EXISTS subjects_idx;
-                 DROP TABLE IF EXISTS relations_idx; DROP TABLE IF EXISTS subject_persons;",
+                "DROP TABLE IF EXISTS subjects_fts;
+                 DROP TABLE IF EXISTS subjects_idx;
+                 DROP TABLE IF EXISTS relations_idx;
+                 DROP TABLE IF EXISTS persons;
+                 DROP TABLE IF EXISTS subject_persons;",
             )
-            .map_err(|e| ProviderError::message(format!("archive schema migrate v5: {e}")))?;
+            .map_err(|e| ProviderError::message(format!("archive schema migrate v8: {e}")))?;
+            // 清掉旧 fts_version：rebuild_fts 成功后才落新标记（中途失败下次启动自愈）
+            let _ = c.execute("DELETE FROM archive_update WHERE key='fts_version'", []);
         }
         for ddl in [
-            DDL_SUBJECTS_IDX,
+            DDL_SUBJECTS,
             DDL_FTS,
             DDL_RELATIONS,
             DDL_REL_INDEX,
@@ -647,7 +538,7 @@ impl BangumiArchiveStore {
             c.execute_batch(ddl)
                 .map_err(|e| ProviderError::message(format!("archive schema failed: {e}")))?;
         }
-        // persons 缺 aliases 列（旧库）→ ALTER TABLE ADD COLUMN（不重建，下次 build 填充）
+        // persons 缺 aliases 列（v5 旧库）→ ALTER TABLE ADD COLUMN（不重建，下次 build 填充）
         let has_p_aliases = match c.prepare("PRAGMA table_info(persons)") {
             Ok(mut st) => st
                 .query_map([], |r| r.get::<_, String>(1))
@@ -663,9 +554,9 @@ impl BangumiArchiveStore {
         }
         c.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(|e| ProviderError::message(format!("archive version failed: {e}")))?;
-        // FTS 版本迁移：fts_version 落后且索引有数据 → 本地分析重建
-        // （v6 场景：trigram → 预分词 unicode61；subjects_idx 保留原始标题，
-        // 重新分析即可，无需重新下载——do_update 在远程未更新时会跳过重建）。
+        // FTS 版本迁移：fts_version 落后且主表有数据 → 本地分析重建
+        // （subjects 保留原始标题列，重新分析即可，无需重新下载——do_update
+        // 在远程未更新时会跳过重建）。
         let fts_ver: String = c
             .query_row(
                 "SELECT value FROM archive_update WHERE key='fts_version'",
@@ -674,9 +565,7 @@ impl BangumiArchiveStore {
             )
             .unwrap_or_default();
         let idx_rows = c
-            .query_row("SELECT COUNT(*) FROM subjects_idx", [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row("SELECT COUNT(*) FROM subjects", [], |r| r.get::<_, i64>(0))
             .unwrap_or(0);
         if idx_rows > 0 && fts_ver != FTS_SCHEMA_VERSION {
             Self::rebuild_fts(&c)?;
@@ -702,7 +591,7 @@ impl BangumiArchiveStore {
         };
         tx("BEGIN")?;
         let result = (|| -> Result<(usize, usize, usize, usize), ProviderError> {
-            tx("DELETE FROM subjects_idx")?;
+            tx("DELETE FROM subjects")?;
             // delete-all 特殊命令清空 FTS（原因见 rebuild_fts；普通 DELETE 在此场景
             // 会触发 SQLite 的 malformed 缺陷）
             tx("INSERT INTO subjects_fts(subjects_fts) VALUES('delete-all')")?;
@@ -736,9 +625,8 @@ impl BangumiArchiveStore {
             .map_err(|e| ProviderError::message(format!("archive subjects open: {e}")))?;
         let reader = std::io::BufReader::new(file);
         let mut lines = reader.lines();
-        let mut batch: Vec<(u64, i64, String, Option<String>, String, u64)> = Vec::new();
+        let mut batch: Vec<(u64, i64, String, Option<String>, String, String)> = Vec::new();
         let mut count = 0usize;
-        let mut offset = 0u64;
         loop {
             let Some(line) = lines.next() else { break };
             let line = line.map_err(|e| ProviderError::message(format!("archive read: {e}")))?;
@@ -750,10 +638,9 @@ impl BangumiArchiveStore {
                 item.name,
                 item.name_cn,
                 aliases,
-                offset,
+                line,
             ));
             count += 1;
-            offset += line.len() as u64 + 1;
             if batch.len() >= 10000 {
                 Self::insert_subject_batch(&c, &batch)?;
                 batch.clear();
@@ -768,21 +655,21 @@ impl BangumiArchiveStore {
     /// 事务内逐行插入（rusqlite execute 不支持多行参数）。
     fn insert_subject_batch(
         c: &rusqlite::Connection,
-        batch: &[(u64, i64, String, Option<String>, String, u64)],
+        batch: &[(u64, i64, String, Option<String>, String, String)],
     ) -> Result<(), ProviderError> {
         for b in batch {
             // OR REPLACE：dump 可能存在重复 id（BangumiKomga executemany 同语义，后行覆盖）
             c.execute(
-                "INSERT OR REPLACE INTO subjects_idx (id, type, name, name_cn, aliases, row_offset)
+                "INSERT OR REPLACE INTO subjects (id, type, name, name_cn, aliases, json)
                  VALUES (?1,?2,?3,?4,?5,?6)",
-                rusqlite::params![b.0 as i64, b.1, b.2, b.3, b.4, b.5 as i64],
+                rusqlite::params![b.0 as i64, b.1, b.2, b.3, b.4, b.5],
             )
             .map_err(|e| ProviderError::message(format!("archive insert: {e}")))?;
         }
         Ok(())
     }
 
-    /// 读出 subjects_idx 一页的原始标题并跑分析链（keyset 分页：id > after_id
+    /// 读出 subjects 一页的原始标题并跑分析链（keyset 分页：id > after_id
     /// ORDER BY id LIMIT n），得到 FTS 行
     /// (id, name_tokens, name_cn_tokens, aliases_tokens)。
     fn subject_fts_rows_page(
@@ -792,7 +679,7 @@ impl BangumiArchiveStore {
     ) -> Result<Vec<(i64, String, Option<String>, Option<String>)>, ProviderError> {
         let mut stmt = c
             .prepare(
-                "SELECT id, name, name_cn, aliases FROM subjects_idx \
+                "SELECT id, name, name_cn, aliases FROM subjects \
                  WHERE id > ?1 ORDER BY id LIMIT ?2",
             )
             .map_err(|e| ProviderError::message(format!("archive fts rows: {e}")))?;
@@ -854,20 +741,25 @@ impl BangumiArchiveStore {
         const BATCH: i64 = 50_000;
         let mut last_id: i64 = -1;
         loop {
-            let batch_result = (|| -> Result<i64, ProviderError> {
+            let batch_result = (|| -> Result<(i64, i64), ProviderError> {
                 c.execute_batch("BEGIN")
                     .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
-                let result = (|| -> Result<i64, ProviderError> {
+                let result = (|| -> Result<(i64, i64), ProviderError> {
                     let rows = Self::subject_fts_rows_page(c, last_id, BATCH)?;
+                    // keyset 游标取本批（subjects 表按 id 升序）最大 id。
+                    // 不能用 MAX(rowid) FROM subjects_fts——外部内容 FTS 的无 MATCH
+                    // 查询直通 content 表，MAX 返回的是全表最大 id 而非本批进度，
+                    // 首批后游标跳到末尾、仅索引第一批（v7 起潜伏，v8 修复）。
+                    let page_last = rows.last().map(|r| r.0).unwrap_or(last_id);
                     Self::insert_fts_rows(c, &rows)?;
-                    Ok(rows.len() as i64)
+                    Ok((rows.len() as i64, page_last))
                 })();
                 match result {
-                    Ok(n) => {
+                    Ok(v) => {
                         c.execute_batch("COMMIT").map_err(|e| {
                             ProviderError::message(format!("archive fts rebuild: {e}"))
                         })?;
-                        Ok(n)
+                        Ok(v)
                     }
                     Err(e) => {
                         let _ = c.execute_batch("ROLLBACK");
@@ -875,18 +767,11 @@ impl BangumiArchiveStore {
                     }
                 }
             })();
-            let n = batch_result?;
+            let (n, page_last) = batch_result?;
             if n == 0 {
                 break;
             }
-            // keyset 游标：FTS rowid 即 subject id，取本批最大 rowid 续扫
-            last_id = c
-                .query_row(
-                    "SELECT COALESCE(MAX(rowid), -1) FROM subjects_fts",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map_err(|e| ProviderError::message(format!("archive fts rebuild: {e}")))?;
+            last_id = page_last;
         }
         c.execute(
             "INSERT OR REPLACE INTO archive_update VALUES ('fts_version', ?1)",
@@ -1056,9 +941,7 @@ impl BangumiArchiveStore {
     pub fn validate(&self) -> bool {
         let c = self.conn.lock().unwrap();
         let subj = c
-            .query_row("SELECT COUNT(*) FROM subjects_idx", [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row("SELECT COUNT(*) FROM subjects", [], |r| r.get::<_, i64>(0))
             .unwrap_or(0);
         let rel = c
             .query_row("SELECT COUNT(*) FROM relations_idx", [], |r| {
@@ -1086,58 +969,22 @@ impl BangumiArchiveStore {
         );
     }
 
-    /// mmap 槽位为空（周期释放/映射失败）时按需重映射；返回是否可用。
-    /// Windows 下 release_hot_pages 每 idle 秒 unmap 整个文件，之后首个查询
-    /// 经此重映射即可恢复——不能因槽位为空就直接放弃查询。
-    fn ensure_mapped(&self) -> bool {
-        let mut slot = self.mm.lock().unwrap();
-        if slot.is_none() {
-            *slot = std::fs::File::open(&self.subjects_path)
-                .ok()
-                .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
-        }
-        slot.is_some()
-    }
-
-    fn read_line_at_offset(&self, offset: u64) -> Option<serde_json::Value> {
-        // 锁内只定位并拷贝目标行的几 KB 字节，锁外解析（不持有锁跨越解析）；
-        // 槽位为空（release_hot_pages 已释放/映射失败）时按需重映射。
-        let line = {
-            let mut slot = self.mm.lock().unwrap();
-            if slot.is_none() {
-                *slot = std::fs::File::open(&self.subjects_path)
-                    .ok()
-                    .and_then(|f| unsafe { memmap2::Mmap::map(&f).ok() });
-            }
-            let mm = slot.as_ref()?;
-            let start = offset as usize;
-            if start >= mm.len() {
-                return None;
-            }
-            let end = mm[start..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map(|i| start + i)
-                .unwrap_or(mm.len());
-            std::str::from_utf8(&mm[start..end]).ok()?.to_string()
-        };
-        serde_json::from_str(&line).ok()
-    }
-
-    fn offsets_by_ids(&self, ids: &[u64]) -> Vec<(u64, u64)> {
+    /// 按主键批量取 json 原文（IN 查询），返回 (id, json) 列表（顺序由 SQLite 决定，
+    /// 调用方按需重排）。json 列即 jsonlines 原文，消费侧自行 serde 解析。
+    fn json_by_ids(&self, ids: &[u64]) -> Vec<(u64, String)> {
         let c = self.conn.lock().unwrap();
         if ids.is_empty() {
             return Vec::new();
         }
         let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("SELECT id, row_offset FROM subjects_idx WHERE id IN ({placeholders})");
+        let sql = format!("SELECT id, json FROM subjects WHERE id IN ({placeholders})");
         let mut stmt = match c.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
         let params = rusqlite::params_from_iter(ids.iter().map(|i| *i as i64));
         stmt.query_map(params, |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?))
         })
         .ok()
         .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
@@ -1147,24 +994,25 @@ impl BangumiArchiveStore {
     /// 搜索（FTS5 渐进前缀 AND；仅书籍 type=1）。
     /// FTS 未命中即返回空：v6 分析链索引（索引/查询同一归一化链）已覆盖
     /// LIKE 曾兜底的场景，不再保留三列 LIKE 全表扫回退（且该回退无 LIMIT，
-    /// 命中后还会全量 mmap 读出）。
+    /// 命中后还会全量读出）。
     pub fn search(&self, query: &str, limit: usize) -> Vec<serde_json::Value> {
-        self.touch();
         let query = query.trim();
-        // mmap 槽位为空时按需重映射（Windows 周期释放后首个查询在此恢复），
-        // 只有映射真正失败（数据文件缺失等）才返回空。
-        if query.is_empty() || !self.ensure_mapped() {
+        if query.is_empty() {
             return Vec::new();
         }
-        let c = self.conn.lock().unwrap();
-        let ids = fts_search_ids(&c, query, limit);
-        drop(c);
-        let offsets: std::collections::HashMap<u64, u64> =
-            self.offsets_by_ids(&ids).into_iter().collect();
+        let ids = {
+            let c = self.conn.lock().unwrap();
+            fts_search_ids(&c, query, limit)
+        };
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let rows = self.json_by_ids(&ids);
+        let by_id: std::collections::HashMap<u64, String> = rows.into_iter().collect();
         let mut out: Vec<serde_json::Value> = Vec::new();
         for id in &ids {
-            if let Some(&off) = offsets.get(id) {
-                if let Some(v) = self.read_line_at_offset(off) {
+            if let Some(json) = by_id.get(id) {
+                if let Ok(v) = serde_json::from_str(json) {
                     out.push(v);
                 }
             }
@@ -1173,27 +1021,26 @@ impl BangumiArchiveStore {
     }
 
     pub fn get_by_id(&self, subject_id: u64) -> Option<serde_json::Value> {
-        self.touch();
-        let c = self.conn.lock().unwrap();
-        let offset = c
+        let json: String = self
+            .conn
+            .lock()
+            .unwrap()
             .query_row(
-                "SELECT row_offset FROM subjects_idx WHERE id=?1",
+                "SELECT json FROM subjects WHERE id=?1",
                 [subject_id as i64],
-                |r| r.get::<_, i64>(0),
+                |r| r.get(0),
             )
-            .ok()? as u64;
-        drop(c);
-        self.read_line_at_offset(offset)
+            .ok()?;
+        serde_json::from_str(&json).ok()
     }
 
-    /// 关联条目（JOIN subjects_idx 输出 id/name/name_cn/type/relation）。
+    /// 关联条目（JOIN subjects 输出 id/name/name_cn/type/relation）。
     pub fn get_related(&self, subject_id: u64) -> Vec<RelatedSubject> {
-        self.touch();
         let c = self.conn.lock().unwrap();
         let mut stmt = match c.prepare(
             "SELECT s.id, s.name, s.name_cn, s.type, r.relation_type
              FROM relations_idx r
-             JOIN subjects_idx s ON r.related_subject_id = s.id
+             JOIN subjects s ON r.related_subject_id = s.id
              WHERE r.subject_id = ?1
              ORDER BY r.related_subject_id ASC",
         ) {
@@ -1216,7 +1063,6 @@ impl BangumiArchiveStore {
 
     /// 某条目的 person 关联（JOIN persons 实体；按 position 排序）。
     pub fn get_persons(&self, subject_id: u64) -> Vec<PersonInfo> {
-        self.touch();
         let c = self.conn.lock().unwrap();
         let mut stmt = match c.prepare(
             "SELECT sp.person_id, p.name, p.name_cn, p.type, p.career, sp.position, sp.appear_eps, p.aliases
@@ -1343,7 +1189,7 @@ fn fts_search_ids(c: &rusqlite::Connection, query: &str, limit: usize) -> Vec<u6
     }
     let tokens = &tokens[..tokens.len().min(FTS_MAX_QUERY_TERMS)];
     let mut stmt = match c.prepare(
-        "SELECT f.rowid FROM subjects_fts f JOIN subjects_idx i ON i.id = f.rowid
+        "SELECT f.rowid FROM subjects_fts f JOIN subjects i ON i.id = f.rowid
          WHERE subjects_fts MATCH ?1 AND i.type = 1
          ORDER BY rank LIMIT ?2",
     ) {
@@ -1395,15 +1241,13 @@ fn fts_and_expr(tokens: &[String]) -> String {
 pub struct BangumiArchiveService {
     store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>>,
     ready: Arc<AtomicBool>,
-    /// 打开现有数据（index+mmap）的启动任务是否已完成（无论成败）。
-    /// 周期更新循环等待该标志，避免打开任务在 do_update 释放旧 store 后重新 mmap
-    /// subject.jsonlines → 解压覆盖写入撞 os error 1224。
+    /// 打开现有数据的启动任务是否已完成（无论成败）。
+    /// 周期更新循环等待该标志，避免打开任务与 do_update 的整文件替换撞车。
     opened: Arc<AtomicBool>,
     /// 周期自动更新循环是否已启动（防重复 spawn）。
     auto_update_started: Arc<AtomicBool>,
     http_client: reqwest::Client,
     data_dir: PathBuf,
-    idle_release_secs: u64,
     /// 更新互斥：下载/构建期间忽略新的触发（复用进行中的进度流）。
     download_in_progress: Arc<AtomicBool>,
     progress: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
@@ -1414,7 +1258,7 @@ impl BangumiArchiveService {
     /// 只创建服务并加载现有数据；周期自动更新由编排方（app_context）统一调用
     /// `start_auto_update` 启动，服务本身不自行调度。
     pub fn start(
-        config: &crate::config::BangumiArchiveConfig,
+        _config: &crate::config::BangumiArchiveConfig,
         http_client: reqwest::Client,
         dir: PathBuf,
     ) -> Arc<Self> {
@@ -1428,33 +1272,49 @@ impl BangumiArchiveService {
             auto_update_started: Arc::new(AtomicBool::new(false)),
             http_client: http_client.clone(),
             data_dir: dir.clone(),
-            idle_release_secs: config.idle_release_secs.unwrap_or(0),
             download_in_progress: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(None)),
         });
-        let idle_release_secs = config.idle_release_secs.unwrap_or(0);
-        // 后台空闲释放：每 min(idle,60)s 检查一次，空闲超时自动释放 mmap 热页
-        if idle_release_secs > 0 {
-            let svc_idle = svc.clone();
-            tokio::spawn(async move {
-                let tick = std::time::Duration::from_secs(idle_release_secs.min(60).max(1));
-                loop {
-                    tokio::time::sleep(tick).await;
-                    if let Some(s) = svc_idle.store.read().unwrap().as_ref() {
-                        s.release_periodic();
-                    }
-                }
-            });
-        }
-        // 打开 + init_schema（可能触发 FTS 本地重建，同步重 IO）跑在阻塞线程上，
-        // 不占用 tokio worker
+        // 打开 + init_schema（v8 迁移可能 drop 旧表；FTS 本地重建是同步重 IO）
+        // 跑在阻塞线程上，不占用 tokio worker。
         crate::util::heavy_pool::spawn_heavy(move || {
             let _ = std::fs::create_dir_all(&dir);
             let db_path = dir.join("archive_index.db");
             let subjects_path = dir.join("subject.jsonlines");
-            // 尝试打开现有索引 + mmap（无条件：状态徽标/手动更新需要就绪）
-            if let Ok(s) = BangumiArchiveStore::open(&db_path, &subjects_path, idle_release_secs) {
+            let relations_path = dir.join("subject-relations.jsonlines");
+            let persons_path = dir.join("person.jsonlines");
+            let subject_persons_path = dir.join("subject-persons.jsonlines");
+            if let Ok(s) = BangumiArchiveStore::open(&db_path) {
                 let _ = s.init_schema();
+                // v8 迁移/首次解压后：库未就绪但本地 jsonlines 齐全 → 直接后台重建
+                // （init_schema 已把旧表 drop 掉；do_update 在远程数据未更新时会
+                // 跳过重建，不能指望更新流程自愈本地迁移）。
+                if !s.validate()
+                    && subjects_path.exists()
+                    && relations_path.exists()
+                    && persons_path.exists()
+                    && subject_persons_path.exists()
+                {
+                    match s.build(
+                        &subjects_path,
+                        &relations_path,
+                        &persons_path,
+                        &subject_persons_path,
+                    ) {
+                        Ok((subj, rel, persons, sp)) => {
+                            tracing::info!(
+                                "bangumi archive rebuilt locally ({subj} subjects, {rel} relations, {persons} persons, {sp} subject_persons)"
+                            );
+                            // 主数据已完整入库（build 单事务提交 + FTS 重建成功）——
+                            // jsonlines 是 ~1GB 的纯冗余，删除省磁盘（更新流程会
+                            // 从 zip 缓存/远程重新解压）。
+                            remove_extracted_jsonlines(&dir);
+                        }
+                        Err(e) => {
+                            tracing::warn!("bangumi archive local rebuild failed: {e}");
+                        }
+                    }
+                }
                 if s.validate() {
                     *store.write().unwrap() = Some(Arc::new(s));
                     ready.store(true, Ordering::SeqCst);
@@ -1588,7 +1448,7 @@ impl BangumiArchiveService {
 
         // 0. 打开任务未完成（启动/热重载后数秒内）：跳过本次检查。
         //    此时本地索引已在打开流程中，全量重建既无必要，也会与打开任务竞争
-        //    同一批文件（Windows 下覆盖 mmap 中的 subject.jsonlines 报 os error 1224）。
+        //    同一批文件（Windows 下解压覆盖被打开的 archive_index.db 需 rename 重试）。
         //    打开失败/空库（opened 后仍未就绪）不在此列——继续走全量下载重建以自愈。
         if self.get().is_none() && !self.opened.load(Ordering::SeqCst) {
             emit(
@@ -1652,9 +1512,8 @@ impl BangumiArchiveService {
         }
 
         // 3. 下载 → 解压 → 重建（进度事件流；失败保留旧库，provider 不失效）。
-        //    重建前先释放旧 store 的 mmap：Windows 下目标文件被用户映射时覆盖写入报
-        //    os error 1224（ERROR_USER_MAPPED_FILE）；出槽置未就绪后，在途搜索短暂持有
-        //    Arc 的窗口由解压写入的短重试兜底（见 create_extracted_file）。
+        //    重建前先出槽置未就绪；在途搜索短暂持有旧 store Arc 的窗口由
+        //    解压写入的短重试兜底（见 create_extracted_file）。
         {
             let mut guard = self.store.write().unwrap();
             if guard.is_some() {
@@ -1671,7 +1530,6 @@ impl BangumiArchiveService {
             &relations_path,
             &persons_path,
             &subject_persons_path,
-            self.idle_release_secs,
             &meta,
             emit_ref,
         )
@@ -1785,9 +1643,9 @@ async fn download_zip_with_retry(
     .await
 }
 
-/// 覆盖写归档解压目标文件（短重试）：Windows 下目标被旧 store 的 mmap 占用时
-/// `File::create` 报 ERROR_USER_MAPPED_FILE（os error 1224）；最多 5 次 × 递增 200ms
-/// 等待在途搜索释放 Arc。await 重试安全：do_update 整体跑在 spawn_blocking 线程
+/// 覆盖写归档解压目标文件（短重试）：Windows 下目标被在途读者占用时
+/// `File::create` 可能失败；最多 5 次 × 递增 200ms
+/// 等待在途搜索释放句柄。await 重试安全：do_update 整体跑在 spawn_blocking 线程
 /// （block_on）上，future 无需 Send；`entry` 借用 `archive` 跨 await 仅影响 auto trait，
 /// 不影响正确性。仅在 create 阶段重试（entry 流未被消费，重试不产生坏数据）。
 async fn create_extracted_file(target: &Path, name: &str) -> Result<std::fs::File, ProviderError> {
@@ -1819,13 +1677,12 @@ async fn build_db_then_swap(
     relations_path: &Path,
     persons_path: &Path,
     subject_persons_path: &Path,
-    idle_release_secs: u64,
     meta_updated_at: &str,
 ) -> Result<(BangumiArchiveStore, (usize, usize, usize, usize)), ProviderError> {
     let tmp_path = db_path.with_extension("db.tmp");
     // 上次崩溃/失败可能残留 .tmp：先清理
     let _ = std::fs::remove_file(&tmp_path);
-    let tmp_store = BangumiArchiveStore::open(&tmp_path, subjects_path, idle_release_secs)
+    let tmp_store = BangumiArchiveStore::open(&tmp_path)
         .map_err(|e| ProviderError::message(format!("archive open: {e}")))?;
     tmp_store
         .init_schema()
@@ -1857,7 +1714,7 @@ async fn build_db_then_swap(
             db_path.display()
         )));
     }
-    let store = BangumiArchiveStore::open(db_path, subjects_path, idle_release_secs)
+    let store = BangumiArchiveStore::open(db_path)
         .map_err(|e| ProviderError::message(format!("archive open after swap: {e}")))?;
     Ok((store, counts))
 }
@@ -1872,7 +1729,6 @@ async fn download_and_rebuild(
     relations_path: &Path,
     persons_path: &Path,
     subject_persons_path: &Path,
-    idle_release_secs: u64,
     meta: &LatestMeta,
     emit: Option<&(dyn Fn(DownloadProgress) + Send + Sync)>,
 ) -> Result<Arc<BangumiArchiveStore>, ProviderError> {
@@ -1990,14 +1846,36 @@ async fn download_and_rebuild(
         relations_path,
         persons_path,
         subject_persons_path,
-        idle_release_secs,
         &meta.updated_at.clone().unwrap_or_default(),
     )
     .await?;
     tracing::info!(
         "bangumi archive rebuilt: {subj} subjects, {rel} relations, {persons} persons, {sp} subject-persons"
     );
+    // 主数据已完整入库（tmp 库构建成功并原子替换）——解压出的 jsonlines（~1GB）
+    // 是纯冗余：zip 缓存仍在，下次更新/重建可重新解压。
+    remove_extracted_jsonlines(dir);
     Ok(Arc::new(new_store))
+}
+
+/// 构建成功后删除解压出的 jsonlines（主数据已完整入库，仅省磁盘用）。
+/// 删除失败不致命（残留文件不影响功能，下次构建前会覆盖写）。
+fn remove_extracted_jsonlines(dir: &Path) {
+    for name in [
+        "subject.jsonlines",
+        "subject-relations.jsonlines",
+        "person.jsonlines",
+        "subject-persons.jsonlines",
+    ] {
+        let path = dir.join(name);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("bangumi archive: remove {} failed: {e}", path.display());
+            } else {
+                tracing::debug!("bangumi archive: removed {}", path.display());
+            }
+        }
+    }
 }
 
 async fn fetch_latest_meta(http_client: &reqwest::Client) -> Result<LatestMeta, ProviderError> {
@@ -2121,7 +1999,7 @@ mod tests {
         let sp = dir.join("subject-persons.jsonlines");
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
-        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
         store.init_schema().unwrap();
         let (subj, rel, _, _) = store.build(&subjects, &relations, &persons, &sp).unwrap();
         assert_eq!(subj, 3);
@@ -2171,7 +2049,7 @@ mod tests {
         let sp = dir.join("subject-persons.jsonlines");
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
-        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
         store.init_schema().unwrap();
         store.build(&subjects, &relations, &persons, &sp).unwrap();
         // FTS 未命中 → 空（旧行为会 LIKE 全表扫回退）
@@ -2200,7 +2078,7 @@ mod tests {
         let sp = dir.join("subject-persons.jsonlines");
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
-        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
         store.init_schema().unwrap();
         let (subj, rel, _, _) = store.build(&subjects, &relations, &persons, &sp).unwrap();
         assert_eq!(subj, 2);
@@ -2295,7 +2173,7 @@ mod tests {
                 r#"{"person_id":1954,"subject_id":268279,"position":2005,"appear_eps":""}"#,
             ],
         );
-        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
         if let Err(e) = store.init_schema() {
             panic!("init_schema failed: {e}");
         }
@@ -2319,10 +2197,76 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 回归：v5 trigram 旧库 → init_schema 迁移（drop + 分析重建）后 FTS 可用。
+    /// 回归：外部内容 FTS（content='subjects'）的无 MATCH 查询直通 content 表，
+    /// rebuild_fts 旧游标用 MAX(rowid) FROM subjects_fts 会一批后跳到全表末尾，
+    /// 仅索引首批 50_000 行。此处造 50_001+ 行验证全量索引（id 大者必须可搜）。
     #[test]
-    fn archive_fts_v6_migration_from_trigram() {
-        let dir = tmp_dir("v6migrate");
+    fn archive_fts_rebuild_covers_all_batches() {
+        let dir = tmp_dir("ftsbatches");
+        let subjects = dir.join("subject.jsonlines");
+        let relations = dir.join("subject-relations.jsonlines");
+        let persons = dir.join("person.jsonlines");
+        let sp = dir.join("subject-persons.jsonlines");
+        // 50_001 行：id 1..=50_001，仅最大 id 的行带唯一可检索中文名
+        let mut content = String::new();
+        for id in 1..=50_001i64 {
+            if id == 50_001 {
+                content.push_str(
+                    r#"{"id":50001,"type":1,"name":"BatchMarker","name_cn":"批次尾行标记","series":true}"#,
+                );
+            } else {
+                content.push_str(&format!(
+                    r#"{{"id":{id},"type":1,"name":"Row{id}","series":true}}"#
+                ));
+            }
+            content.push('\n');
+        }
+        std::fs::write(&subjects, content).unwrap();
+        std::fs::write(&relations, "").unwrap();
+        std::fs::write(&persons, "").unwrap();
+        std::fs::write(&sp, "").unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
+        store.init_schema().unwrap();
+        store.build(&subjects, &relations, &persons, &sp).unwrap();
+        // 最大 id（第二批）必须命中——旧游标 bug 下 FTS 只有首批 50_000 行
+        let hits = store.search("批次尾行标记", 10);
+        assert!(
+            hits.iter().any(|v| v["id"] == 50001),
+            "FTS must index rows beyond the first 50k batch"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// remove_extracted_jsonlines：仅删除 4 个归档 jsonlines，其余文件不动；
+    /// 缺失的文件不报错。
+    #[test]
+    fn remove_extracted_jsonlines_only_targets_archive_files() {
+        let dir = tmp_dir("rmjson");
+        for name in [
+            "subject.jsonlines",
+            "subject-relations.jsonlines",
+            "person.jsonlines",
+            "subject-persons.jsonlines",
+        ] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+        }
+        std::fs::write(dir.join("archive-latest.zip"), "zip").unwrap();
+        std::fs::write(dir.join("archive_index.db"), "db").unwrap();
+        // person.jsonlines 缺失场景不报错（先删掉再调用）
+        std::fs::remove_file(dir.join("person.jsonlines")).unwrap();
+        remove_extracted_jsonlines(&dir);
+        assert!(!dir.join("subject.jsonlines").exists());
+        assert!(!dir.join("subject-relations.jsonlines").exists());
+        assert!(!dir.join("subject-persons.jsonlines").exists());
+        assert!(dir.join("archive-latest.zip").exists(), "zip 缓存须保留");
+        assert!(dir.join("archive_index.db").exists(), "db 须保留");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    /// 回归：v7 及更早的 legacy 库（subjects_idx + row_offset）→ init_schema
+    /// drop 旧表，build 从本地 jsonlines 重建（v8 主数据入库）后搜索可用。
+    #[test]
+    fn archive_v8_migration_from_legacy_subjects_idx() {
+        let dir = tmp_dir("v8migrate");
         let subjects = dir.join("subject.jsonlines");
         let relations = dir.join("subject-relations.jsonlines");
         write_subjects(
@@ -2337,50 +2281,41 @@ mod tests {
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
         let db = dir.join("archive_index.db");
-        // 第一步：按 v5 旧 schema 建库（trigram FTS + 直通原始标题）
+        // 第一步：按 legacy 旧 schema 建库（subjects_idx + row_offset，无 json 列）
         {
-            let store = BangumiArchiveStore::open(&db, &subjects, 0).unwrap();
-            store.init_schema().unwrap();
-            store.build(&subjects, &relations, &persons, &sp).unwrap();
+            let store = BangumiArchiveStore::open(&db).unwrap();
             let c = store.conn.lock().unwrap();
             c.execute_batch(
-                "DROP TABLE subjects_fts;
-                 CREATE VIRTUAL TABLE subjects_fts USING fts5(
-                     name, name_cn, aliases,
-                     content='subjects_idx', content_rowid='id', tokenize='trigram');
-                 INSERT INTO subjects_fts(rowid, name, name_cn, aliases)
-                 SELECT id, name, name_cn, aliases FROM subjects_idx;
-                 DELETE FROM archive_update WHERE key='fts_version';",
+                "CREATE TABLE subjects_idx (
+                     id INTEGER PRIMARY KEY, type INTEGER, name TEXT, name_cn TEXT,
+                     aliases TEXT, row_offset INTEGER NOT NULL);
+                 INSERT INTO subjects_idx VALUES (305429, 1, '葬送のフリーレン', '葬送的芙莉莲', '', 0);
+                 CREATE TABLE relations_idx (subject_id INTEGER, relation_type TEXT, related_subject_id INTEGER);
+                 CREATE TABLE archive_update (key TEXT PRIMARY KEY, value TEXT);",
             )
             .unwrap();
         }
-        // 第二步：重开（等价升级后的启动），init_schema 应迁移并本地重建 FTS
+        // 第二步：重开（等价升级后的启动），init_schema 应 drop 旧表 → 库未就绪，
+        // build 从 jsonlines 重建（对齐服务启动的本地自愈路径）。
+        // validate 要求 relations 非空 → 补一条关联数据。
+        write_subjects(
+            &relations,
+            &[r#"{"subject_id":305429,"relation_type":"单行本","related_subject_id":305429}"#],
+        );
         {
-            let store = BangumiArchiveStore::open(&db, &subjects, 0).unwrap();
+            let store = BangumiArchiveStore::open(&db).unwrap();
             store.init_schema().unwrap();
-            let c = store.conn.lock().unwrap();
-            let ddl: String = c
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='subjects_fts'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(ddl.contains("unicode61"), "migrated to unicode61: {ddl}");
-            let n: i64 = c
-                .query_row(
-                    "SELECT COUNT(*) FROM subjects_fts WHERE subjects_fts MATCH '\"葬送\"'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(-1);
-            assert_eq!(n, 1, "rebuilt FTS index must contain bigram term 葬送");
-            drop(c);
+            assert!(!store.validate(), "legacy 主数据被 drop 后未重建前应未就绪");
+            store.build(&subjects, &relations, &persons, &sp).unwrap();
+            assert!(store.validate(), "build 后应就绪");
             let hits = store.search("葬送的芙莉莲系列", 10);
             assert!(
                 hits.iter().any(|v| v["id"] == 305429),
                 "decorated query must hit after migration"
             );
+            // 主数据确实在库内（v8：json 列），不再依赖外部 jsonlines 偏移
+            let v = store.get_by_id(305429).expect("row");
+            assert_eq!(v["name_cn"], "葬送的芙莉莲");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2401,7 +2336,7 @@ mod tests {
         let sp = dir.join("subject-persons.jsonlines");
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
-        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
         store.init_schema().unwrap();
         store.build(&subjects, &relations, &persons, &sp).unwrap();
 
@@ -2445,7 +2380,7 @@ mod tests {
         let sp = dir.join("subject-persons.jsonlines");
         std::fs::write(&persons, "").unwrap();
         std::fs::write(&sp, "").unwrap();
-        let store = BangumiArchiveStore::open(&dir.join("archive_index.db"), &subjects, 0).unwrap();
+        let store = BangumiArchiveStore::open(&dir.join("archive_index.db")).unwrap();
         store.init_schema().unwrap();
         store.build(&subjects, &relations, &persons, &sp).unwrap();
 
@@ -2525,7 +2460,6 @@ mod tests {
                 &relations,
                 &persons,
                 &sp,
-                0,
                 "2026-10-01",
             ))
             .expect("build+swap should replace corrupt db");
@@ -2539,7 +2473,7 @@ mod tests {
             Some("2026-10-01")
         );
         drop(store);
-        let reopened = BangumiArchiveStore::open(&db, &subjects, 0).expect("reopen ok");
+        let reopened = BangumiArchiveStore::open(&db).expect("reopen ok");
         assert!(reopened.validate());
         drop(reopened);
         std::fs::remove_dir_all(&dir).ok();

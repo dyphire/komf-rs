@@ -38,8 +38,7 @@ async fn main() {
     // [0] 直接打开离线 store，验证 412571 在离线库中的原始数据
     println!("== [0] 离线库原始数据（BangumiArchiveStore::open 直查）==");
     let db = Path::new(ARCHIVE_DIR).join("archive_index.db");
-    let subjects = Path::new(ARCHIVE_DIR).join("subject.jsonlines");
-    match komf_core::providers::bangumi_archive::BangumiArchiveStore::open(&db, &subjects, 0) {
+    match komf_core::providers::bangumi_archive::BangumiArchiveStore::open(&db) {
         Ok(store) => {
             match store.get_by_id(412571) {
                 Some(v) => {

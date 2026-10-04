@@ -49,7 +49,6 @@ percent-encoding = "2"
 tokio-tungstenite = { version = "0.24", features = ["connect"] }
 
 mimalloc = "0.1"
-memmap2 = "0.9"
 komf-api-models = { path = "crates/komf-api-models" }
 komf-core = { path = "crates/komf-core" }
 komf-mediaserver = { path = "crates/komf-mediaserver" }

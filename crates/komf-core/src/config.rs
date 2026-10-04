@@ -191,22 +191,21 @@ impl Default for BangumiConfig {
 }
 
 /// bangumi/Archive 离线数据源配置（BangumiKomga bangumi_archive 移植）：
-/// enabled 时后台下载 Archive（约 418MB zip）→ 构建 SQLite 索引（FTS5 预分词分析链）
-/// + mmap 数据源；搜索/元数据优先离线，未就绪或未命中回退在线 API。
+/// enabled 时后台下载 Archive（约 418MB zip）→ 构建 SQLite 单库（FTS5 预分词
+/// 分析链 + 主数据 json 列）；搜索/元数据优先离线，未就绪或未命中回退在线 API。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BangumiArchiveConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// 数据目录（archive_index.db + subject*.jsonlines）；缺省 workDir/bangumi-archive。
+    /// 数据目录（archive_index.db）；缺省 workDir/bangumi-archive。
     #[serde(default)]
     pub dir: Option<String>,
     /// 更新间隔（小时）；0 = 不检查更新（仅首次构建）。
     #[serde(default = "default_archive_update_interval")]
     pub update_interval_hours: u64,
-    /// 空闲释放 mmap 热页（秒）：距上次查询超过该时长后对 subject.jsonlines 的
-    /// mmap 执行 MADV_DONTNEED 释放页缓存（下次查询按需重读），降低常驻内存。
-    /// 默认 60；0 = 禁用。仅 Linux 生效（unix madvise）。
+    /// 已废弃（v8 起主数据直接入库，读全走 SQLite page cache，由 cache_size 钳制，
+    /// 不再需要 mmap 空闲释放）。保留字段以兼容既有 application.yml。
     #[serde(default = "default_archive_idle_release")]
     pub idle_release_secs: Option<u64>,
 }

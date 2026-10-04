@@ -508,7 +508,10 @@ impl MangaDexMetadataMapper {
             .and_then(|r| r.attributes.as_ref())
             .and_then(|a| a.file_name.clone())
             .map(|f| {
-                format!("https://uploads.mangadex.org/covers/{}/{f}.512.jpg", manga.id)
+                format!(
+                    "https://uploads.mangadex.org/covers/{}/{f}.512.jpg",
+                    manga.id
+                )
             });
         SeriesSearchResult {
             url: Some(format!("https://mangadex.org/title/{}", manga.id)),
