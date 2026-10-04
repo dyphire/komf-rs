@@ -9,11 +9,13 @@
 //!
 //! 查询能力：
 //! - gid 精准（PRIMARY KEY，O(1)）+ 标签联查 → GalleryRow；
-//! - 标题搜索：附属 FTS5 预分词索引库 `e-hentai-fts.db`
+//! - 标题搜索：主库内嵌 FTS5 预分词索引表 `gallery_fts`
 //!   （unicode61 + Lucene 分析链：t2s/全半角/小写/折叠 + CJK bigram/unigram；
-//!   372 万行构建 ~150s、1.4GB；查询毫秒级，简繁交叉命中 + 装饰后缀渐进回退），
-//!   构建/重建由 meta 记录主库 len+mtime + fts_version 自动触发；未就绪/纯符号查询
-//!   时降级主库 LIKE 扫描。短查询（<3 字符）走 FTS 前缀匹配，不再触发 LIKE
+//!   contentless + detail=full——不存原文但保留位置，支持 ORDER BY rank（bm25）；
+//!   372 万行构建 ~150s；查询毫秒级，简繁交叉命中 + 装饰后缀渐进回退），
+//!   更新流程在 tmp 库内一并构建后单次 rename（数据与索引原子替换，无降级窗口）；
+//!   由 meta 记录 fts_version 自动触发重建；未就绪/纯符号查询时降级主库 LIKE 扫描。
+//!   短查询（<3 字符）走 FTS 前缀匹配，不再触发 LIKE
 //!
 //! 未就绪 / 构建中 / 未命中 → 调用方回退在线 gdata（与 bangumi archive 模式一致）。
 
@@ -31,11 +33,12 @@ use crate::providers::ProviderError;
 pub(crate) const DEFAULT_EHENTAI_ARCHIVE_URL: &str =
     "https://github.com/URenko/e-hentai-db/releases/download/nightly/e-hentai.db.zstd";
 
-/// FTS 索引库文件名（与主库同目录）。
-const FTS_DB_FILE: &str = "e-hentai-fts.db";
+/// 旧版独立 FTS 库文件名（v6 起 FTS 并入主库，遗留文件在迁移重建成功后删除）。
+const LEGACY_FTS_DB_FILE: &str = "e-hentai-fts.db";
 
-/// FTS 索引格式版本：DDL/存储格式变更时递增（如 detail=none / contentless），meta 版本不符自动重建。
-const FTS_VERSION: u32 = 5;
+/// FTS 索引格式版本：DDL/存储格式变更时递增，meta 版本不符自动重建。
+/// 6 = FTS 并入主库（单文件）+ detail=full（支持 rank；SQLite 仅 full 有非零 bm25）。
+const FTS_VERSION: u32 = 6;
 
 /// 单条 gallery 的完整行（含标签联查结果）。
 #[derive(Debug, Clone)]
@@ -255,6 +258,59 @@ impl EHentaiArchiveStore {
         out
     }
 
+    /// FTS 索引表存在且非空（gallery_fts rowid 即 gid）。
+    pub fn has_fts(&self) -> bool {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT rowid FROM gallery_fts LIMIT 1", [], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// 查询侧分析链 token 渐进前缀 AND：先全量 AND，未命中逐层丢尾部 token 重试
+    /// （komga 系列名常带归档标题没有的后缀：卷数/系列/话数）。
+    /// 短查询（<3 字符）自动改走 FTS 前缀匹配（"tok" *）：召回更宽，且不再降级
+    /// 主库 LIKE 全表扫（372 万行 × 2 列，单次秒级）。
+    /// 索引为 contentless（不存原文）+ detail=full，ORDER BY rank（bm25）可用。
+    /// token 为空（纯符号查询）或无 FTS 表时返回 None，调用方降级 LIKE。
+    pub fn search_gids(&self, query: &str, limit: usize) -> Option<Vec<i32>> {
+        let tokens = crate::util::search_analyze(query);
+        if tokens.is_empty() {
+            return None;
+        }
+        let tokens = &tokens[..tokens.len().min(50)];
+        // 短查询（1~2 字符）：精确 token AND 召回过窄，改前缀匹配扩大召回
+        // （"愛" → 命中 愛/愛さ/愛される... 开头的所有词项）。
+        let prefix = query.chars().count() < 3;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid FROM gallery_fts WHERE gallery_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+            )
+            .ok()?;
+        // 渐进前缀 AND：全量未命中逐层丢尾部 token 重试，不低于 droppable_floor
+        //（拉丁整词子句永不放宽、前缀至少两 token，避免单词查询冲爆候选）
+        let floor = if tokens.len() <= 1 {
+            1
+        } else {
+            crate::util::droppable_floor(tokens)
+        };
+        for n in (floor..=tokens.len()).rev() {
+            let match_expr = fts_fragments_and_expr(&tokens[..n], prefix);
+            let gids: Vec<i32> = stmt
+                .query_map(rusqlite::params![match_expr, limit as i64], |r| {
+                    r.get::<_, i32>(0)
+                })
+                .ok()?
+                .filter_map(|r| r.ok())
+                .collect();
+            if !gids.is_empty() {
+                return Some(gids);
+            }
+        }
+        Some(Vec::new())
+    }
+
     /// 周期强制释放：每 idle 秒无条件 `PRAGMA shrink_memory` 归还未使用页面缓存
     /// （CAS 防并发；供周期任务调用）。与旧"空闲释放"的关键区别：不再要求
     /// "距上次查询 ≥ idle"——密集查询持续刷新 last_used 时旧逻辑永不释放。
@@ -291,85 +347,12 @@ impl EHentaiArchiveStore {
 // FTS5 预分词索引（unicode61 + Lucene 分析链）
 // ---------------------------------------------------------------------------
 
-/// 只读 FTS5 索引句柄（标题 token 匹配，毫秒级）。
-pub(crate) struct EHentaiFtsStore {
-    conn: Mutex<rusqlite::Connection>,
-}
-
-impl EHentaiFtsStore {
-    pub fn open(fts_path: &Path) -> Result<Self, ProviderError> {
-        use rusqlite::OpenFlags;
-        let conn = rusqlite::Connection::open_with_flags(
-            fts_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|e| ProviderError::message(format!("ehentai fts open failed: {e}")))?;
-        conn.pragma_update(None, "query_only", "ON")
-            .map_err(|e| ProviderError::message(format!("ehentai fts pragma failed: {e}")))?;
-        conn.pragma_update(None, "cache_size", -32000)
-            .map_err(|e| ProviderError::message(format!("ehentai fts pragma failed: {e}")))?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    /// FTS 索引有效（表存在且非空；contentless 下 count(*) 依赖内容列，改用 LIMIT 1）。
-    pub fn validate(&self) -> bool {
-        self.conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT rowid FROM gallery_fts LIMIT 1", [], |_| Ok(()))
-            .is_ok()
-    }
-
-    /// 查询侧分析链 token 渐进前缀 AND：先全量 AND，未命中逐层丢尾部 token 重试
-    /// （komga 系列名常带归档标题没有的后缀：卷数/系列/话数）。
-    /// 短查询（<3 字符）自动改走 FTS 前缀匹配（"tok" *）：召回更宽，且不再降级
-    /// 主库 LIKE 全表扫（372 万行 × 2 列，单次秒级）。
-    /// 索引为 detail=none（无位置）+ contentless（不存原文），单 token AND 查询正常。
-    /// token 为空（纯符号查询）返回 None，调用方降级 LIKE（FTS 未就绪场景）。
-    pub fn search_gids(&self, query: &str, limit: usize) -> Option<Vec<i32>> {
-        let tokens = crate::util::search_analyze(query);
-        if tokens.is_empty() {
-            return None;
-        }
-        let tokens = &tokens[..tokens.len().min(50)];
-        // 短查询（1~2 字符）：精确 token AND 召回过窄，改前缀匹配扩大召回
-        // （"愛" → 命中 愛/愛さ/愛される... 开头的所有词项）。
-        let prefix = query.chars().count() < 3;
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT rowid FROM gallery_fts WHERE gallery_fts MATCH ?1 LIMIT ?2")
-            .ok()?;
-        // 渐进前缀 AND：全量未命中逐层丢尾部 token 重试，不低于 droppable_floor
-        //（拉丁整词子句永不放宽、前缀至少两 token，避免单词查询冲爆候选）
-        let floor = if tokens.len() <= 1 {
-            1
-        } else {
-            crate::util::droppable_floor(tokens)
-        };
-        for n in (floor..=tokens.len()).rev() {
-            let match_expr = fts_fragments_and_expr(&tokens[..n], prefix);
-            let gids: Vec<i32> = stmt
-                .query_map(rusqlite::params![match_expr, limit as i64], |r| {
-                    r.get::<_, i32>(0)
-                })
-                .ok()?
-                .filter_map(|r| r.ok())
-                .collect();
-            if !gids.is_empty() {
-                return Some(gids);
-            }
-        }
-        Some(Vec::new())
-    }
-}
-
-/// FTS5 AND 表达式（ehentai 专用）：索引为 detail=none，FTS5 禁止多 token
-/// phrase——分析链产出的 token 若含 unicode61 分隔符（"3.0"、"re:zero" 中的
-/// `.`/`:`）会被引号短语语法整体报错。因此按 unicode61 的 token 字符集
-/// （L*/N*，is_alphanumeric 近似）把每个 token 切成单 token 片段再 AND。
-/// `prefix=true`（短查询）时每个片段改用 FTS5 前缀匹配（"frag" *），扩大召回。
+/// FTS5 AND 表达式（ehentai 专用）：索引无位置数据（detail=column），FTS5
+/// 禁止多 token phrase——分析链产出的 token 若含 unicode61 分隔符（"3.0"、
+/// "re:zero" 中的 `.`/`:`）会被引号短语语法整体报错。因此按 unicode61 的
+/// token 字符集（L*/N*，is_alphanumeric 近似）把每个 token 切成单 token
+/// 片段再 AND。`prefix=true`（短查询）时每个片段改用 FTS5 前缀匹配
+/// （"frag" *），扩大召回。
 fn fts_fragments_and_expr(tokens: &[String], prefix: bool) -> String {
     tokens
         .iter()
@@ -391,34 +374,30 @@ fn fts_fragments_and_expr(tokens: &[String], prefix: bool) -> String {
         .join(" AND ")
 }
 
-/// 从主库构建 FTS5 索引（写 .tmp 后 rename；分批按 gid 范围插入）。
+/// 在已打开的目标库连接内（重新）构建 FTS5 索引表 `gallery_fts`。
 /// unicode61 + 预分词：写入前经 Lucene 链分析（t2s/全半角/小写/折叠，
 /// 索引侧 unigram+bigram+ngram），查询侧同链 token AND（见 search_gids）。
-fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
-    let tmp = fts_path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let conn = rusqlite::Connection::open(&tmp)
-        .map_err(|e| ProviderError::message(format!("ehentai fts create failed: {e}")))?;
+/// content=''：不存 title/title_jpn 原文（gid 放 rowid），只存倒排；
+/// detail=full：保留位置数据（bm25/rank 必需，SQLite 仅 full 支持非零 rank）。
+/// 调用场景：① 更新流程在 tmp 库内构建（连同主库一起 rename，原子替换、
+/// 无降级窗口）；② 启动迁移/版本不符时在现库内原地重建。
+/// 分批按 gid 范围插入（分批事务 + 分析产物仅本批驻留内存）。
+pub(crate) fn build_fts(conn: &rusqlite::Connection) -> Result<(), ProviderError> {
+    // 同名重建（而非 delete-all + 重插）：DDL/分词器变更时最干净；旧 FTS 文件
+    // 在迁移场景直接随 DROP 消失。FTS5 外部内容表才有 delete-all 缺陷，本表
+    // contentless，普通 DROP 安全。
+    conn.execute_batch("DROP TABLE IF EXISTS gallery_fts;")
+        .map_err(|e| ProviderError::message(format!("ehentai fts drop failed: {e}")))?;
     conn.execute_batch(
-        // detail=none：AND 查询不需要位置信息，去掉位置数据显著缩小倒排。
+        // detail=full：保留位置数据——bm25/rank 依赖位置计算词频（实测 SQLite
+        // 3.50 下 detail=column/none 的 contentless 表 rank 恒为 0，仅 full 生效）。
         // content=''：不存 title/title_jpn 原文（gid 放 rowid），只存倒排——
-        // 原文在主库已有，FTS 只负责命中 gid，体积进一步减半。
-        "CREATE VIRTUAL TABLE gallery_fts USING fts5(title, title_jpn, tokenize='unicode61', detail=none, content='');",
+        // 原文在主库已有，FTS 只负责命中 gid，体积增量可控。
+        "CREATE VIRTUAL TABLE gallery_fts USING fts5(title, title_jpn, tokenize='unicode61', detail=full, content='');",
     )
     .map_err(|e| ProviderError::message(format!("ehentai fts create table failed: {e}")))?;
-    // 只读 URI 打开主库（避免 ATTACH 以读写模式打开产生 WAL/-shm 残留）
-    let db_uri = format!(
-        "file:{}?mode=ro",
-        db_path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .replace('?', "%3f")
-            .replace('#', "%23")
-    );
-    conn.execute_batch(&format!("ATTACH DATABASE '{db_uri}' AS src;"))
-        .map_err(|e| ProviderError::message(format!("ehentai fts attach failed: {e}")))?;
     let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM src.gallery", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM gallery", [], |r| r.get(0))
         .map_err(|e| ProviderError::message(format!("ehentai fts count failed: {e}")))?;
     if total == 0 {
         return Err(ProviderError::message("ehentai fts: source gallery empty"));
@@ -430,14 +409,14 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
     let mut last_gid: i64 = -1;
     let mut done: i64 = 0;
     while done < total {
-        let batch_result = (|| -> Result<i64, ProviderError> {
+        let batch_result = (|| -> Result<(i64, i64), ProviderError> {
             conn.execute_batch("BEGIN")
                 .map_err(|e| ProviderError::message(format!("ehentai fts begin failed: {e}")))?;
-            let result = (|| -> Result<i64, ProviderError> {
+            let result = (|| -> Result<(i64, i64), ProviderError> {
                 let rows: Vec<(i64, String, Option<String>)> = {
                     let mut stmt = conn
                         .prepare(
-                            "SELECT gid, title, title_jpn FROM src.gallery \
+                            "SELECT gid, title, title_jpn FROM gallery \
                              WHERE gid > ?1 ORDER BY gid LIMIT ?2",
                         )
                         .map_err(|e| {
@@ -452,6 +431,9 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
                         })?;
                     mapped.filter_map(|r| r.ok()).collect()
                 };
+                // keyset 游标取本批（gallery 按 gid 升序）最大 gid——不能用
+                // MAX(rowid) FROM gallery_fts（contentless FTS 不支持该查询）。
+                let page_last = rows.last().map(|r| r.0).unwrap_or(last_gid);
                 let mut ins = conn
                     .prepare("INSERT INTO gallery_fts(rowid, title, title_jpn) VALUES (?1,?2,?3)")
                     .map_err(|e| {
@@ -466,14 +448,14 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
                         ProviderError::message(format!("ehentai fts insert failed: {e}"))
                     })?;
                 }
-                Ok(rows.len() as i64)
+                Ok((rows.len() as i64, page_last))
             })();
             match result {
-                Ok(n) => {
+                Ok(v) => {
                     conn.execute_batch("COMMIT").map_err(|e| {
                         ProviderError::message(format!("ehentai fts commit failed: {e}"))
                     })?;
-                    Ok(n)
+                    Ok(v)
                 }
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
@@ -481,27 +463,16 @@ fn build_fts(db_path: &Path, fts_path: &Path) -> Result<(), ProviderError> {
                 }
             }
         })();
-        let n = batch_result?;
+        let (n, page_last) = batch_result?;
         if n == 0 {
             break;
         }
         done += n;
-        last_gid = conn
-            .query_row(
-                "SELECT COALESCE(MAX(rowid), -1) FROM gallery_fts",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(|e| ProviderError::message(format!("ehentai fts progress failed: {e}")))?;
+        last_gid = page_last;
         if done % (BATCH * 4) == 0 || done >= total {
             tracing::info!("ehentai fts index progress {done}/{total}");
         }
     }
-    conn.execute_batch("DETACH DATABASE src;")
-        .map_err(|e| ProviderError::message(format!("ehentai fts detach failed: {e}")))?;
-    drop(conn);
-    std::fs::rename(&tmp, fts_path)
-        .map_err(|e| ProviderError::message(format!("ehentai fts rename failed: {e}")))?;
     tracing::info!("ehentai fts index ready ({done} rows)");
     Ok(())
 }
@@ -792,10 +763,11 @@ async fn download_with_retry(
 #[derive(Clone)]
 pub struct EHentaiArchiveService {
     store: Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>>,
-    fts: Arc<RwLock<Option<Arc<EHentaiFtsStore>>>>,
     ready: Arc<AtomicBool>,
-    /// 打开现有 db/fts 的启动任务是否已完成（无论成败）。周期更新循环等待该标志，
-    /// 避免打开/构建任务与更新流程竞争同一 db 文件。
+    /// 主库内嵌 FTS 索引（gallery_fts）是否可用；false 时搜索降级 LIKE。
+    fts_ready: Arc<AtomicBool>,
+    /// 打开现有 db 的启动任务是否已完成（无论成败）。周期更新循环等待该标志，
+    /// 避免打开任务与更新流程竞争同一 db 文件。
     opened: Arc<AtomicBool>,
     /// 周期自动更新循环是否已启动（防重复 spawn）。
     auto_update_started: Arc<AtomicBool>,
@@ -820,8 +792,8 @@ impl EHentaiArchiveService {
         work_dir: Option<&Path>,
     ) -> Arc<Self> {
         let store: Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>> = Arc::new(RwLock::new(None));
-        let fts: Arc<RwLock<Option<Arc<EHentaiFtsStore>>>> = Arc::new(RwLock::new(None));
         let ready = Arc::new(AtomicBool::new(false));
+        let fts_ready = Arc::new(AtomicBool::new(false));
         let opened = Arc::new(AtomicBool::new(false));
         let db_path = config
             .db_file
@@ -844,8 +816,8 @@ impl EHentaiArchiveService {
             .unwrap_or_else(|_| http_client.clone());
         let svc = Arc::new(Self {
             store: store.clone(),
-            fts: fts.clone(),
             ready: ready.clone(),
+            fts_ready: fts_ready.clone(),
             opened: opened.clone(),
             auto_update_started: Arc::new(AtomicBool::new(false)),
             http_client: http_client.clone(),
@@ -883,6 +855,12 @@ impl EHentaiArchiveService {
             for tmp in [
                 db_path.with_extension("db.tmp"),
                 db_path.with_extension("db.zstd.tmp"),
+                // 旧版独立 FTS 库的构建残留（v6 起 FTS 并入主库，该文件已无用）
+                db_path
+                    .parent()
+                    .map(|d| d.join(LEGACY_FTS_DB_FILE))
+                    .unwrap_or_else(|| PathBuf::from(LEGACY_FTS_DB_FILE))
+                    .with_extension("db.tmp"),
             ] {
                 if tmp.exists() {
                     if let Err(e) = std::fs::remove_file(&tmp) {
@@ -892,19 +870,86 @@ impl EHentaiArchiveService {
                     }
                 }
             }
-            // 尝试打开现有 db（无条件：状态徽标/手动更新需要就绪）
+            // 尝试打开现有 db（无条件：状态徽标/手动更新需要就绪）。
+            // FTS 就绪与否不阻塞 ready——未就绪时搜索降级 LIKE（spawn 内迁移/重建）。
+            let mut fts_ok = false;
             if let Ok(s) = EHentaiArchiveStore::open(&db_path, idle_secs) {
                 if s.validate() {
+                    fts_ok = s.has_fts() && meta_read(&meta).fts_version == Some(FTS_VERSION);
                     *store.write().unwrap() = Some(Arc::new(s));
                     ready.store(true, Ordering::SeqCst);
                     tracing::info!("ehentai archive ready (existing db)");
-                    // opened 由 ensure_fts 置位：推迟到 FTS 判定/构建完成后，
-                    // 防构建期 ATTACH 主库与 auto-update 的 rename 撞车
-                    ensure_fts(&store, &fts, &db_path, &meta, &opened);
-                    return;
                 }
             }
             opened.store(true, Ordering::SeqCst);
+            if !fts_ok {
+                // FTS 缺失/格式过旧（含旧版独立 fts 文件布局）→ 后台原地重建：
+                // 主库单独开一个可写连接（读 store 的只读连接不冲突），
+                // 成功后置 fts_ready、写 meta、删遗留的独立 fts 文件。
+                // 搜索在重建完成前降级 LIKE（v6 起 FTS 在库内，与主库同生命周期，
+                // 不再有 ATTACH/rename 撞车问题）。
+                let db_path2 = db_path.clone();
+                let meta2 = meta.clone();
+                let fts_ready2 = fts_ready.clone();
+                tokio::spawn(async move {
+                    let db_path3 = db_path2.clone();
+                    let built = crate::util::heavy_pool::spawn_heavy(move || {
+                        let conn = rusqlite::Connection::open(&db_path3).map_err(|e| {
+                            ProviderError::message(format!("ehentai fts open rw: {e}"))
+                        })?;
+                        conn.busy_timeout(std::time::Duration::from_secs(30))
+                            .map_err(|e| {
+                                ProviderError::message(format!("ehentai fts busy: {e}"))
+                            })?;
+                        build_fts(&conn)
+                    })
+                    .await;
+                    match built {
+                        Ok(Ok(())) => {
+                            fts_ready2.store(true, Ordering::SeqCst);
+                            let stamp = file_stamp(&db_path2);
+                            let m = meta_read(&meta2);
+                            meta_write(&meta2, m.asset_stamp.as_deref(), stamp, Some(FTS_VERSION));
+                            // WAL 归并：迁移写在独立 rw 连接上，读 store 的长连接
+                            // 阻止 close 自动 checkpoint——显式截断，避免 200MB+
+                            // -wal 残留（旧库通常是 WAL 模式）。
+                            if let Ok(c) = rusqlite::Connection::open(&db_path2) {
+                                let _ = c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+                            }
+                            // 迁移成功：删除旧版独立 FTS 库（已无读者）
+                            if let Some(dir) = db_path2.parent() {
+                                for f in [dir.join(LEGACY_FTS_DB_FILE)] {
+                                    if f.exists() {
+                                        if let Err(e) = std::fs::remove_file(&f) {
+                                            tracing::warn!(
+                                                "ehentai archive: remove legacy {}: {e}",
+                                                f.display()
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                "ehentai archive: removed legacy {}",
+                                                f.display()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            tracing::info!("ehentai fts index ready (rebuilt)");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                "ehentai fts build failed: {e}; search falls back to LIKE/online"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("ehentai fts build task panicked/join failed: {e}");
+                        }
+                    }
+                });
+            } else {
+                fts_ready.store(true, Ordering::SeqCst);
+                tracing::info!("ehentai fts ready (existing index)");
+            }
         });
         svc
     }
@@ -956,16 +1001,10 @@ impl EHentaiArchiveService {
             return Vec::new();
         };
         // ① FTS 路径（索引就绪；短查询在 search_gids 内自动改前缀匹配，不再走 LIKE）
-        let gids: Vec<i32> = {
-            let fts_hit: Option<Vec<i32>> = {
-                let guard = self.fts.read().unwrap();
-                guard
-                    .as_ref()
-                    .and_then(|f| f.search_gids(query, limit.saturating_mul(4).max(50)))
-            };
-            match fts_hit {
+        let gids: Vec<i32> = if self.fts_ready.load(Ordering::SeqCst) {
+            match store.search_gids(query, limit.saturating_mul(4).max(50)) {
                 Some(gids) => gids,
-                // FTS 未就绪/纯符号查询（无有效 token）→ 降级主库 LIKE 全表扫
+                // 纯符号查询（无有效 token）→ 降级主库 LIKE 全表扫
                 None => store.like_search_gids(
                     query,
                     limit.saturating_mul(4).max(50),
@@ -973,6 +1012,14 @@ impl EHentaiArchiveService {
                     uploader_filter,
                 ),
             }
+        } else {
+            // FTS 未就绪（迁移/重建中）→ 降级主库 LIKE 全表扫
+            store.like_search_gids(
+                query,
+                limit.saturating_mul(4).max(50),
+                category_filter,
+                uploader_filter,
+            )
         };
         if gids.is_empty() {
             return Vec::new();
@@ -1141,8 +1188,22 @@ impl EHentaiArchiveService {
         )
         .await
         .map_err(|e| format!("ehentai archive download: {e}"))?;
-        // 4. commit（释放旧连接 → rename → 重开）→ meta → FTS
+        // 4. 在 tmp 库内一并构建 FTS 索引 → commit（rename 原子替换数据+索引）：
+        //    单次 rename 后新库完整可用，无"主库新/索引旧"的降级窗口
+        //    （旧版为 commit 后再花 ~150s 重建独立 fts 文件，期间搜索降级 LIKE）。
+        //    FTS 构建失败 → 本次更新失败，保留旧库（数据与索引永不脱节）。
         let db_tmp = self.db_path.with_extension("db.tmp");
+        {
+            let db_tmp_c = db_tmp.clone();
+            crate::util::heavy_pool::spawn_heavy(move || {
+                let conn = rusqlite::Connection::open(&db_tmp_c)
+                    .map_err(|e| ProviderError::message(format!("ehentai fts open tmp: {e}")))?;
+                build_fts(&conn)
+            })
+            .await
+            .map_err(|e| format!("ehentai archive fts build: {e}"))?
+            .map_err(|e| format!("ehentai archive fts build: {e}"))?;
+        }
         let mut current: Option<Arc<EHentaiArchiveStore>> = None;
         if !commit_archive(
             &self.store,
@@ -1156,95 +1217,12 @@ impl EHentaiArchiveService {
         {
             return Err("ehentai archive commit failed (rename/validate)".to_string());
         }
-        meta_write(&self.meta, Some(&remote), None, None);
+        self.fts_ready.store(true, Ordering::SeqCst);
+        meta_write(&self.meta, Some(&remote), None, Some(FTS_VERSION));
         tracing::info!("ehentai archive updated");
-        ensure_fts(
-            &self.store,
-            &self.fts,
-            &self.db_path,
-            &self.meta,
-            &self.opened,
-        );
         emit(sender, DownloadProgress::FinishedEvent);
         Ok(())
     }
-}
-
-/// 检查 FTS 索引是否与主库匹配（meta 记录 len+mtime），不匹配则后台重建。
-/// `opened` 置位由本函数负责：推迟到「判定无需构建」或「后台构建完成（成败均可，
-/// 未启用 FTS 时服务仍可用，搜索降级 LIKE）」之后——避免启动构建期（ATTACH 主库
-/// 只读 ~150s）auto-update 立即 do_update → commit_archive rename 覆盖被 ATTACH
-/// 打开的主库（Windows 下 rename 必失败 → 报错重试循环撞车）。
-fn ensure_fts(
-    store: &Arc<RwLock<Option<Arc<EHentaiArchiveStore>>>>,
-    fts: &Arc<RwLock<Option<Arc<EHentaiFtsStore>>>>,
-    db_path: &Path,
-    meta: &Path,
-    opened: &Arc<AtomicBool>,
-) {
-    let fts_path = db_path
-        .parent()
-        .map(|d| d.join(FTS_DB_FILE))
-        .unwrap_or_else(|| PathBuf::from(FTS_DB_FILE));
-    let Some(stamp) = file_stamp(db_path) else {
-        opened.store(true, Ordering::SeqCst);
-        return;
-    };
-    let m = meta_read(meta);
-    let fts_ok = m.fts_version == Some(FTS_VERSION)
-        && m.fts_built_for == Some(stamp)
-        && EHentaiFtsStore::open(&fts_path)
-            .map(|f| f.validate())
-            .unwrap_or(false);
-    if fts_ok {
-        if let Ok(f) = EHentaiFtsStore::open(&fts_path) {
-            *fts.write().unwrap() = Some(Arc::new(f));
-            tracing::info!("ehentai fts ready (existing index)");
-            opened.store(true, Ordering::SeqCst);
-            return;
-        }
-    }
-    // 需要（重新）构建：后台任务，构建中搜索降级 LIKE；
-    // build_fts 为同步重 IO（372 万行 ~150s），跑在 spawn_blocking 上不占用 worker
-    let fts_path2 = fts_path.clone();
-    let db_path2 = db_path.to_path_buf();
-    let meta2 = meta.to_path_buf();
-    let store2 = store.clone();
-    let fts2 = fts.clone();
-    let opened2 = opened.clone();
-    tokio::spawn(async move {
-        let _ = std::fs::create_dir_all(db_path2.parent().unwrap_or(Path::new(".")));
-        let fts_path3 = fts_path2.clone();
-        let db_path3 = db_path2.clone();
-        let built =
-            crate::util::heavy_pool::spawn_heavy(move || build_fts(&db_path3, &fts_path3)).await;
-        match built {
-            Ok(Ok(())) => match EHentaiFtsStore::open(&fts_path2) {
-                Ok(f) if f.validate() => {
-                    *fts2.write().unwrap() = Some(Arc::new(f));
-                    let stamp = file_stamp(&db_path2);
-                    let m = meta_read(&meta2);
-                    meta_write(&meta2, m.asset_stamp.as_deref(), stamp, Some(FTS_VERSION));
-                    tracing::info!("ehentai fts index ready (rebuilt)");
-                }
-                _ => {
-                    tracing::warn!("ehentai fts built but failed to open");
-                    let _ = std::fs::remove_file(&fts_path2);
-                }
-            },
-            Ok(Err(e)) => {
-                tracing::warn!("ehentai fts build failed: {e}; search falls back to LIKE/online");
-                let _ = std::fs::remove_file(fts_path2.with_extension("tmp"));
-                let _ = std::fs::remove_file(&fts_path2);
-            }
-            Err(e) => {
-                tracing::warn!("ehentai fts build task panicked/join failed: {e}");
-            }
-        }
-        // 构建结束（成败均可；失败时搜索降级 LIKE/在线，服务仍可用）→ 放行 auto-update
-        opened2.store(true, Ordering::SeqCst);
-        let _ = store2; // store 保持可用（LIKE 降级）
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,13 +1388,14 @@ mod tests {
     #[test]
     fn fts_build_and_search() {
         let db = test_db_path("fts_db");
-        let fts = test_db_path("fts_idx");
         let _ = std::fs::remove_file(&db);
-        let _ = std::fs::remove_file(&fts);
         build_test_db(&db);
-        build_fts(&db, &fts).expect("build fts");
-        let store = EHentaiFtsStore::open(&fts).expect("open fts");
-        assert!(store.validate());
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            build_fts(&conn).expect("build fts");
+        }
+        let store = EHentaiArchiveStore::open(&db, 0).expect("open");
+        assert!(store.has_fts());
         // 分析链 token AND 匹配（中/日文）
         let gids = store.search_gids("愛される資", 50).expect("hit");
         assert_eq!(gids, vec![222]);
@@ -1445,12 +1424,91 @@ mod tests {
         // 不存在
         let gids = store.search_gids("不存在的东西", 50).expect("ok");
         assert!(gids.is_empty());
-        // 回归：含 unicode61 分隔符的 token（"3.0"）在 detail=none 下不得触发
-        // phrase 报错——切成片段 AND 后应命中标题 "…本3.0" 的条目
+        // 回归：含 unicode61 分隔符的 token（"3.0"）切成片段 AND 后应命中
+        // 标题 "…本3.0" 的条目
         let gids = store.search_gids("本3.0", 50).expect("hit");
         assert_eq!(gids, vec![333]);
         let _ = std::fs::remove_file(&db);
-        let _ = std::fs::remove_file(&fts);
+    }
+
+    /// rank 支持：detail=column 保留 docsize，ORDER BY rank 可用（多命中按
+    /// bm25 相关度排序而非报错/退化为 rowid 序）。语料保证词项在少数文档中出现
+    /// （idf > 0），两条命中标题等长（token 数相同，长度归一不干扰）、仅词频不同。
+    #[test]
+    fn fts_rank_ordering_supported() {
+        let db = test_db_path("fts_rank");
+        let _ = std::fs::remove_file(&db);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gallery (
+                 gid INTEGER PRIMARY KEY, token TEXT NOT NULL,
+                 title TEXT NOT NULL, title_jpn TEXT NOT NULL DEFAULT '',
+                 category TEXT NOT NULL, thumb TEXT NOT NULL, uploader TEXT,
+                 posted INTEGER NOT NULL, filecount INTEGER NOT NULL,
+                 filesize INTEGER NOT NULL, expunged INTEGER NOT NULL,
+                 removed INTEGER NOT NULL DEFAULT 0, replaced INTEGER NOT NULL DEFAULT 0,
+                 rating TEXT NOT NULL, torrentcount INTEGER NOT NULL,
+                 root_gid INTEGER DEFAULT NULL, bytorrent INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .unwrap();
+        // 3 条无关填充（词项 "資格" 只出现在 2/5 文档 → idf > 0）
+        for (gid, title) in [
+            (1, "无关条目甲"),
+            (2, "无关条目乙"),
+            (3, "无关条目丙"),
+            // 等长 6 字符（token 数相同）、"資格" 词频 1 vs 3
+            (444, "資格一二三四"),
+            (555, "資格資格資格"),
+        ] {
+            conn.execute(
+                "INSERT INTO gallery (gid, token, title, category, thumb,
+                    posted, filecount, filesize, expunged, rating, torrentcount)
+                 VALUES (?1, 'tok', ?2, 'Manga', '', 1, 1, 1, 0, '1.0', 0)",
+                rusqlite::params![gid, title],
+            )
+            .unwrap();
+        }
+        build_fts(&conn).expect("build fts");
+        drop(conn);
+        let store = EHentaiArchiveStore::open(&db, 0).expect("open");
+        let gids = store.search_gids("資格", 50).expect("hit");
+        assert_eq!(gids.len(), 2, "only the two contenders hit, got {gids:?}");
+        // 词频高者排前：555（資格×3）应排在 444（資格×1）之前
+        assert_eq!(gids[0], 555, "rank ordering expected, got {gids:?}");
+        assert_eq!(gids[1], 444);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 迁移回归：旧版独立 fts 文件布局的库（主库无 gallery_fts）→ 库内 build_fts
+    /// 重建后 has_fts/search 可用（对齐启动迁移路径）。
+    #[test]
+    fn fts_in_db_migration_rebuild() {
+        let db = test_db_path("fts_migrate");
+        let legacy_fts = test_db_path("fts_migrate_legacyfts");
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(&legacy_fts);
+        build_test_db(&db);
+        // 模拟旧版：独立 fts 文件存在、主库无 gallery_fts
+        {
+            let conn = rusqlite::Connection::open(&legacy_fts).unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE gallery_fts USING fts5(title, tokenize='unicode61',
+                     detail=none, content='');",
+            )
+            .unwrap();
+        }
+        assert!(!EHentaiArchiveStore::open(&db, 0).unwrap().has_fts());
+        // 迁移 = 主库内原地重建
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            build_fts(&conn).expect("rebuild in main db");
+        }
+        let store = EHentaiArchiveStore::open(&db, 0).unwrap();
+        assert!(store.has_fts());
+        assert_eq!(store.search_gids("愛される資", 50).expect("hit"), vec![222]);
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(&legacy_fts);
     }
 
     #[test]
