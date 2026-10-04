@@ -102,11 +102,71 @@ impl Default for EventListenerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+/// 元数据更新配置。YAML 中 `library` 条目为**在 `default` 上的部分覆盖**：
+/// 未写字段继承 default 节的值（而非硬编码默认值），与 WebUI PATCH 的合并语义一致。
+/// 实现：反序列化时先把每个库级条目与 default 的序列化值深合并，再按完整结构解析。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetadataUpdateConfig {
     pub default: MetadataProcessingConfig,
     pub library: std::collections::HashMap<String, MetadataProcessingConfig>,
+}
+
+impl<'de> Deserialize<'de> for MetadataUpdateConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(default, rename_all = "camelCase")]
+        struct Helper {
+            default: MetadataProcessingConfig,
+            library: std::collections::HashMap<String, serde_yaml::Value>,
+        }
+        impl Default for Helper {
+            fn default() -> Self {
+                Self {
+                    default: MetadataProcessingConfig::default(),
+                    library: Default::default(),
+                }
+            }
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let mut library = std::collections::HashMap::with_capacity(helper.library.len());
+        for (library_id, value) in helper.library {
+            // default 序列化为 YAML 值作为合并底：库级条目显式给出的键覆盖之，
+            // 未给出的键保留 default 的值；序列化无 skip 字段，底是完整的。
+            let mut merged =
+                serde_yaml::to_value(&helper.default).map_err(serde::de::Error::custom)?;
+            deep_merge_yaml(&mut merged, value);
+            let config =
+                MetadataProcessingConfig::deserialize(merged).map_err(serde::de::Error::custom)?;
+            library.insert(library_id, config);
+        }
+        Ok(Self {
+            default: helper.default,
+            library,
+        })
+    }
+}
+
+/// 深合并 overlay 到 base：两边都是 mapping 时按键递归合并（overlay 优先），
+/// 其余情况（标量/序列/null）整体替换——序列不拼接（如 cleanupRegex 显式给出即替换）。
+fn deep_merge_yaml(base: &mut serde_yaml::Value, overlay: serde_yaml::Value) {
+    match (base, overlay) {
+        (serde_yaml::Value::Mapping(base_map), serde_yaml::Value::Mapping(overlay_map)) => {
+            for (key, value) in overlay_map {
+                match base_map.get_mut(&key) {
+                    Some(existing) => deep_merge_yaml(existing, value),
+                    None => {
+                        base_map.insert(key, value);
+                    }
+                }
+            }
+        }
+        (slot, value) => *slot = value,
+    }
 }
 
 impl Default for MetadataUpdateConfig {
@@ -368,5 +428,122 @@ impl Default for DatabaseConfig {
         Self {
             file: "./database.sqlite".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 库级条目未给出的字段继承 default 节（而非硬编码默认值）。
+    #[test]
+    fn library_entry_inherits_default() {
+        let yaml = r#"
+default:
+  aggregate: true
+  postProcessing:
+    linksSkipEnabled: false
+    linksMatchEnabled: false
+    seriesTitleLanguage: zh
+library:
+  lib-a:
+    aggregate: false
+"#;
+        let config: MetadataUpdateConfig = serde_yaml::from_str(yaml).unwrap();
+        let lib = &config.library["lib-a"];
+        // 显式覆盖生效
+        assert!(!lib.aggregate);
+        // 未写字段继承 default
+        assert!(!lib.post_processing.links_skip_enabled);
+        assert!(!lib.post_processing.links_match_enabled);
+        assert_eq!(
+            lib.post_processing.series_title_language.as_deref(),
+            Some("zh")
+        );
+        // default 本身不受影响
+        assert!(config.default.aggregate);
+    }
+
+    /// 库级条目显式给出的值优先于 default。
+    #[test]
+    fn library_entry_explicit_value_wins() {
+        let yaml = r#"
+default:
+  postProcessing:
+    linksSkipEnabled: false
+library:
+  lib-a:
+    postProcessing:
+      linksSkipEnabled: true
+"#;
+        let config: MetadataUpdateConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.library["lib-a"].post_processing.links_skip_enabled);
+    }
+
+    /// 嵌套 map 递归合并：库级只给 postProcessing 的一个键，其余键继承 default。
+    #[test]
+    fn library_entry_nested_partial_merge() {
+        let yaml = r#"
+default:
+  postProcessing:
+    seriesTitle: true
+    seriesTitleLanguage: zh
+    orderBooks: true
+library:
+  lib-a:
+    postProcessing:
+      orderBooks: false
+"#;
+        let config: MetadataUpdateConfig = serde_yaml::from_str(yaml).unwrap();
+        let pp = &config.library["lib-a"].post_processing;
+        assert!(pp.series_title);
+        assert_eq!(pp.series_title_language.as_deref(), Some("zh"));
+        assert!(!pp.order_books);
+    }
+
+    /// 序列整体替换而非拼接：库级显式给出的列表替换 default 的列表。
+    #[test]
+    fn library_entry_sequence_replaces() {
+        let yaml = r#"
+default:
+  searchTitleExtraction:
+    cleanupRegex:
+      - 'default-pattern'
+library:
+  lib-a:
+    searchTitleExtraction:
+      cleanupRegex:
+        - 'lib-pattern'
+"#;
+        let config: MetadataUpdateConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.library["lib-a"]
+                .search_title_extraction
+                .cleanup_regex,
+            vec!["lib-pattern".to_string()]
+        );
+    }
+
+    /// 空 library / 缺省 metadataUpdate 段：与旧行为一致。
+    #[test]
+    fn empty_library_and_missing_section() {
+        let config: MetadataUpdateConfig = serde_yaml::from_str("default: {}").unwrap();
+        assert!(config.library.is_empty());
+        assert_eq!(config.default.library_type, MediaType::Manga);
+        // metadataUpdate 段整体缺失时由外层 serde(default) 回退 Default
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct Outer {
+            metadata_update: MetadataUpdateConfig,
+        }
+        impl Default for Outer {
+            fn default() -> Self {
+                Self {
+                    metadata_update: MetadataUpdateConfig::default(),
+                }
+            }
+        }
+        let outer: Outer = serde_yaml::from_str("{}").unwrap();
+        assert!(outer.metadata_update.library.is_empty());
     }
 }
