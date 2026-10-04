@@ -1280,6 +1280,17 @@ impl BangumiArchiveService {
         crate::util::heavy_pool::spawn_heavy(move || {
             let _ = std::fs::create_dir_all(&dir);
             let db_path = dir.join("archive_index.db");
+            // 清理上次"构建完成 → rename 原子替换"之间崩溃/被杀残留的临时库
+            // （v8 起 db.tmp 可达 1GB+）。正常路径 build_db_then_swap 开头会清，
+            // 但 up-to-date 跳过时不会执行；启动时刻 tmp 绝不可能是"正在使用"。
+            let tmp_db = db_path.with_extension("db.tmp");
+            if tmp_db.exists() {
+                if let Err(e) = std::fs::remove_file(&tmp_db) {
+                    tracing::warn!("bangumi archive: remove stale {}: {e}", tmp_db.display());
+                } else {
+                    tracing::info!("bangumi archive: removed stale {}", tmp_db.display());
+                }
+            }
             let subjects_path = dir.join("subject.jsonlines");
             let relations_path = dir.join("subject-relations.jsonlines");
             let persons_path = dir.join("person.jsonlines");

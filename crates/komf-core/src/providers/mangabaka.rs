@@ -2580,14 +2580,26 @@ pub struct MangaBakaDbDownloader {
 impl MangaBakaDbDownloader {
     pub fn new(work_dir: impl Into<PathBuf>, http: reqwest::Client) -> Self {
         let work_dir = work_dir.into();
-        Self {
+        let downloader = Self {
             database_file: work_dir.join("mangabaka.sqlite"),
             database_archive: work_dir.join("mangabaka.tar.gz"),
             work_dir,
             http,
             download_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             progress: Arc::new(std::sync::Mutex::new(None)),
+        };
+        // 清理上次"解压完成 → rename 原子替换"之间崩溃/被杀残留的临时库。
+        // 下载任务结束时的兜底清理（launch_download）在进程被杀时不执行；
+        // 构造时刻（应用启动）该文件绝不可能是"正在使用"。
+        let tmp = PathBuf::from(format!("{}.tmp", downloader.database_file.display()));
+        if tmp.exists() {
+            if let Err(e) = std::fs::remove_file(&tmp) {
+                tracing::warn!("MangaBaka: remove stale {}: {e}", tmp.display());
+            } else {
+                tracing::info!("MangaBaka: removed stale {}", tmp.display());
+            }
         }
+        downloader
     }
 
     pub fn database_file(&self) -> PathBuf {

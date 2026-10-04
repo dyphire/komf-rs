@@ -1416,12 +1416,30 @@ pub struct BookWalkerDbDownloader {
 impl BookWalkerDbDownloader {
     pub fn new(work_dir: impl Into<PathBuf>, http: reqwest::Client) -> Self {
         let work_dir = work_dir.into();
-        Self {
+        let downloader = Self {
             database_file: work_dir.join("bkwk-db.sqlite"),
             work_dir,
             http,
             download_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             progress: Arc::new(std::sync::Mutex::new(None)),
+        };
+        // 清理上次"解压完成 → rename 原子替换"之间崩溃/被杀残留的临时库。
+        // 下载任务结束时的兜底清理（launch_download）在进程被杀时不执行，
+        // 且 up-to-date 跳过时整段下载流程不会运行；构造时刻（应用启动）该
+        // 文件绝不可能是"正在使用"。
+        downloader.remove_stale_tmp();
+        downloader
+    }
+
+    /// 删除残留的 `{database_file}.tmp`（存在即删，失败仅告警）。
+    fn remove_stale_tmp(&self) {
+        let tmp = PathBuf::from(format!("{}.tmp", self.database_file.display()));
+        if tmp.exists() {
+            if let Err(e) = std::fs::remove_file(&tmp) {
+                tracing::warn!("BookWalker: remove stale {}: {e}", tmp.display());
+            } else {
+                tracing::info!("BookWalker: removed stale {}", tmp.display());
+            }
         }
     }
 

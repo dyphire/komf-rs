@@ -876,6 +876,22 @@ impl EHentaiArchiveService {
             if let Some(dir) = db_path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
+            // 清理上次"下载完成 → commit rename"之间崩溃/被杀残留的临时文件
+            // （db.tmp 可达数 GB）。正常路径下 commit_archive 会 rename 走它，
+            // download_and_extract 开头也会清；但 up-to-date 跳过时两者都不执行，
+            // 而启动时刻这些文件绝不可能是"正在使用"（更新流程尚未开始）。
+            for tmp in [
+                db_path.with_extension("db.tmp"),
+                db_path.with_extension("db.zstd.tmp"),
+            ] {
+                if tmp.exists() {
+                    if let Err(e) = std::fs::remove_file(&tmp) {
+                        tracing::warn!("ehentai archive: remove stale {}: {e}", tmp.display());
+                    } else {
+                        tracing::info!("ehentai archive: removed stale {}", tmp.display());
+                    }
+                }
+            }
             // 尝试打开现有 db（无条件：状态徽标/手动更新需要就绪）
             if let Ok(s) = EHentaiArchiveStore::open(&db_path, idle_secs) {
                 if s.validate() {
