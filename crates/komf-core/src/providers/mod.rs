@@ -31,6 +31,7 @@ use std::sync::Arc;
 pub(crate) fn client_with_default_headers(headers: reqwest::header::HeaderMap) -> reqwest::Client {
     reqwest::Client::builder()
         .default_headers(headers)
+        .connect_timeout(std::time::Duration::from_secs(60))
         .build()
         .expect("failed to build http client")
 }
