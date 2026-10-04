@@ -784,6 +784,8 @@ impl MetadataService {
     /// 对应 `matchSeriesMetadata`。返回 jobId，错误通过 job 事件/状态体现。
     /// Rust 扩展：匹配成功（更新了元数据）→ 自动从失败收藏夹移除。
     /// 后台执行（对齐 Kotlin launchJob），理由同 identify_series_metadata。
+    /// 单系列入口：不判断 linksSkipEnabled（apply_links_skip=false，手动操作不被
+    /// 自动跳过拦截）；linksMatchEnabled 链接直用照常。
     pub async fn match_series_metadata(
         self: &Arc<Self>,
         series_id: &MediaServerSeriesId,
@@ -797,7 +799,7 @@ impl MetadataService {
             async move {
                 let _lock = service.series_match_lock(&series_id).lock_owned().await;
                 let result = service
-                    .match_series_metadata_inner(&tx, &series_id, true)
+                    .match_series_metadata_inner(&tx, &series_id, false)
                     .await;
                 if result
                     .as_ref()
@@ -849,6 +851,8 @@ impl MetadataService {
 
     /// 库级扫描（Auto-Identify Library）用：注册 job 并执行匹配，但**不**做失败收藏夹
     /// 移除（由 match_library_metadata 用本地缓存统一维护）。返回匹配结果。
+    /// 库扫描入口：linksSkipEnabled 优先于 linksMatchEnabled（已链接系列直接跳过，
+    /// 不做链接直用刷新）。
     async fn match_series_metadata_outcome(&self, series_id: &MediaServerSeriesId) -> MatchOutcome {
         // per-series 互斥：库扫描与 SSE 自动匹配/identify 并发命中同系列时串行执行。
         let _guard = self.series_match_lock(series_id).lock_owned().await;
@@ -923,11 +927,23 @@ impl MetadataService {
             Some(manual)
         } else {
             // Rust 扩展（用户需求）：系列 links 已包含任一 provider 识别特征（label/域名）。
-            // linksMatchEnabled 优先于 linksSkipEnabled：启用链接直用时不再判断跳过
-            // （Identify/Auto-Identify 预期：有链接就直接按链接更新）。
+            // 优先级（用户既定）：
+            // - 库级扫描（Auto-Identify Library，apply_links_skip=true）：
+            //   linksSkipEnabled 优先于 linksMatchEnabled——已链接系列直接跳过，
+            //   不做链接直用刷新；
+            // - 单系列（Identify/Auto-Identify Series）与 SSE 事件触发
+            //   （apply_links_skip=false）：不判断 linksSkipEnabled（手动/事件操作
+            //   不被自动跳过拦截），linksMatchEnabled 链接直用照常。
             // oneshot 单本系列：书籍级链接参与已匹配判定（聚合优先，books 回退）
             let combined_links = series_links_including_books(&series, &books);
             let links_match = links_indicate_matched(&combined_links);
+            if links_match && self.links_skip_enabled && apply_links_skip {
+                tracing::info!(
+                    "series {series_title} {} already matched (provider link present), skipping",
+                    series.id.0
+                );
+                return Ok(MatchOutcome::Skipped);
+            }
             let from_link: Option<SeriesAndBookMetadata> = if links_match
                 && self.links_match_enabled
             {
@@ -937,31 +953,10 @@ impl MetadataService {
                         matched_provider = Some(provider);
                         Some(metadata)
                     }
-                    // 有 provider 特征但无可用直用链接：回退按 skip 配置决定
-                    // （SSE 触发 apply_links_skip=false → 不跳过，继续搜索）
-                    LinksFetchOutcome::NoCandidates => {
-                        if self.links_skip_enabled && apply_links_skip {
-                            tracing::info!(
-                                "series {series_title} {} already matched (provider link present), skipping",
-                                series.id.0
-                            );
-                            return Ok(MatchOutcome::Skipped);
-                        }
-                        None
-                    }
-                    // 有候选但全部失败：搜索兜底
-                    LinksFetchOutcome::AllFailed => None,
+                    // 有 provider 特征但无可用直用链接 / 全部拉取失败：搜索兜底
+                    LinksFetchOutcome::NoCandidates | LinksFetchOutcome::AllFailed => None,
                 }
             } else {
-                // 链接直用未启用：按 skip 配置决定（Kotlin 无此行为，Rust 扩展）
-                // （SSE 触发 apply_links_skip=false → 不跳过，继续搜索）
-                if links_match && self.links_skip_enabled && apply_links_skip {
-                    tracing::info!(
-                        "series {series_title} {} already matched (provider link present), skipping",
-                        series.id.0
-                    );
-                    return Ok(MatchOutcome::Skipped);
-                }
                 None
             };
             if let Some(metadata) = from_link {
