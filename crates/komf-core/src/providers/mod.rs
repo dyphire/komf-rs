@@ -469,18 +469,20 @@ impl SeriesTitleLanguages {
 
 /// 全局封面写入开关生效值（`metadataProcessing.seriesCovers` / `bookCovers`）。
 /// provider 的 `seriesMetadata.thumbnail` / `bookMetadata.thumbnail` 需与其取「与」：
-/// 全局关闭时 provider 不再下载封面字节（对齐 Kotlin ProvidersModule 构造时行为），
-/// 避免「下载完被 updater 丢弃」的浪费。上传侧仍由 MetadataUpdater 独立把关。
+/// 全局关闭时 provider 不再下载封面字节，避免「下载完被 updater 丢弃」的浪费。
+/// 上传侧仍由 MetadataUpdater 独立把关。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverFetchSwitches {
     pub series: bool,
     pub books: bool,
 }
 
-/// default + 库级覆盖（与 `SeriesTitleLanguages` 同源：取 komga.metadataUpdate 生效值；
-/// 库级未单独配置 libraryProviders 容器时，其 provider 实例共享 default 容器，
-/// 此时库级封面开关不影响下载——与上游 Kotlin 行为一致）。
+/// default + 库级覆盖（与 `SeriesTitleLanguages` 同源：取 komga.metadataUpdate 生效值）。
 /// 不提供 Default：开关语义必须显式给出，避免「隐式默认全关」误伤封面下载。
+///
+/// 只配 metadataUpdate 库级封面开关、未配 `libraryProviders` 的库：生效值与 default
+/// 不同时由 `with_oauth` 派生专属容器（见 `ProviderBuildSettings`），库级配置严格
+/// 覆盖 default；生效值与 default 一致则共享 default 容器（零额外实例）。
 #[derive(Debug, Clone)]
 pub struct CoverFetchConfig {
     pub default: CoverFetchSwitches,
@@ -494,6 +496,29 @@ impl CoverFetchConfig {
             .and_then(|id| self.libraries.get(id))
             .copied()
             .unwrap_or(self.default)
+    }
+}
+
+/// 构造时烧入 provider 的 per-library 全局量生效值（metadataUpdate 中影响
+/// provider 行为、且只能在构造时传入的两项）：
+/// - 封面开关（`CoverFetchConfig`）：控制封面字节下载；
+/// - 主标题语言（`SeriesTitleLanguages`）：MangaDex 标题语言 / MangaBaka 主标题选择 /
+///   bangumi 作者/出版社中文名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderBuildSettings {
+    covers: Option<CoverFetchSwitches>,
+    title_language: Option<String>,
+}
+
+/// 指定容器（None = default 容器）的生效构建设置。
+fn library_build_settings(
+    cover_fetch: Option<&CoverFetchConfig>,
+    title_languages: &SeriesTitleLanguages,
+    library_id: Option<&str>,
+) -> ProviderBuildSettings {
+    ProviderBuildSettings {
+        covers: cover_fetch.map(|c| c.for_library(library_id)),
+        title_language: title_languages.for_library(library_id),
     }
 }
 
@@ -560,7 +585,7 @@ impl ProvidersModule {
             bangumi_archive.clone(),
             ehentai_archive.clone(),
         );
-        let library_providers = config
+        let mut library_providers = config
             .library_providers
             .iter()
             .map(|(library_id, library_config)| {
@@ -583,6 +608,47 @@ impl ProvidersModule {
                 )
             })
             .collect::<std::collections::HashMap<_, _>>();
+
+        // 只配 metadataUpdate 库级项（封面开关/主标题语言——构造时烧入 provider 的
+        // 全局量）而未配 libraryProviders 的库：生效值与 default 不同时按 defaultProviders
+        // 配置派生专属容器，使库级 metadataUpdate 严格覆盖 default（下载行为不再由
+        // default 开关决定）；生效值与 default 一致则共享 default 容器，零额外实例。
+        let default_settings =
+            library_build_settings(cover_fetch.as_ref(), &series_title_languages, None);
+        let mut derived_candidates: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        if let Some(cf) = &cover_fetch {
+            derived_candidates.extend(cf.libraries.keys().cloned());
+        }
+        derived_candidates.extend(series_title_languages.libraries.keys().cloned());
+        for library_id in derived_candidates {
+            if library_providers.contains_key(&library_id) {
+                continue; // 显式 libraryProviders 容器：构造时已是库级生效值
+            }
+            let settings = library_build_settings(
+                cover_fetch.as_ref(),
+                &series_title_languages,
+                Some(&library_id),
+            );
+            if settings == default_settings {
+                continue; // 与 default 一致：共享 default 容器即可
+            }
+            library_providers.insert(
+                library_id.clone(),
+                create_metadata_providers(
+                    &config.default_providers,
+                    default_name_matcher,
+                    config,
+                    &http_client,
+                    database_work_dir,
+                    oauth_manager.clone(),
+                    settings.title_language,
+                    settings.covers,
+                    bangumi_archive.clone(),
+                    ehentai_archive.clone(),
+                ),
+            );
+        }
 
         Self {
             metadata_providers: MetadataProviders::new(default_providers)
@@ -949,6 +1015,96 @@ mod tests {
             CoverFetchSwitches {
                 series: false,
                 books: true
+            }
+        );
+    }
+
+    /// 回归：派生容器判定——库级生效设置（封面开关/主标题语言）与 default 不同
+    /// 才需要派生；缺失条目/显式 None 回退 default 视为「一致」，不派生。
+    #[test]
+    fn library_build_settings_derives_only_on_effective_difference() {
+        let covers = CoverFetchConfig {
+            default: CoverFetchSwitches {
+                series: false,
+                books: false,
+            },
+            libraries: [
+                (
+                    "lib-covers".to_string(),
+                    CoverFetchSwitches {
+                        series: true,
+                        books: true,
+                    },
+                ),
+                // 与 default 显式相同：不派生
+                (
+                    "lib-same".to_string(),
+                    CoverFetchSwitches {
+                        series: false,
+                        books: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut langs_libs = std::collections::HashMap::new();
+        langs_libs.insert("lib-lang".to_string(), Some("zh".to_string()));
+        // 显式 None：回退 default → 不派生
+        langs_libs.insert("lib-lang-none".to_string(), None);
+        let langs = SeriesTitleLanguages {
+            default: Some("en".to_string()),
+            libraries: langs_libs,
+        };
+
+        let default_settings = library_build_settings(Some(&covers), &langs, None);
+        // default 容器设置
+        assert_eq!(
+            default_settings,
+            ProviderBuildSettings {
+                covers: Some(CoverFetchSwitches {
+                    series: false,
+                    books: false
+                }),
+                title_language: Some("en".to_string()),
+            }
+        );
+        // 库级封面开关不同 → 派生（covers 用库级，title_language 同 default）
+        let s = library_build_settings(Some(&covers), &langs, Some("lib-covers"));
+        assert_ne!(s, default_settings);
+        assert_eq!(
+            s.covers,
+            Some(CoverFetchSwitches {
+                series: true,
+                books: true
+            })
+        );
+        assert_eq!(s.title_language.as_deref(), Some("en"));
+        // 库级主标题语言不同 → 派生
+        let s = library_build_settings(Some(&covers), &langs, Some("lib-lang"));
+        assert_ne!(s, default_settings);
+        assert_eq!(s.title_language.as_deref(), Some("zh"));
+        // 与 default 一致的库（显式相同开关 / 显式 None 语言）→ 不派生
+        assert_eq!(
+            library_build_settings(Some(&covers), &langs, Some("lib-same")),
+            default_settings
+        );
+        assert_eq!(
+            library_build_settings(Some(&covers), &langs, Some("lib-lang-none")),
+            default_settings
+        );
+        // 完全未知的库 → 不派生
+        assert_eq!(
+            library_build_settings(Some(&covers), &langs, Some("lib-missing")),
+            default_settings
+        );
+        // 不传封面配置（None）：covers 分量恒 None，仍可按语言差异派生
+        let s = library_build_settings(None, &langs, Some("lib-lang"));
+        assert_eq!(
+            s,
+            ProviderBuildSettings {
+                covers: None,
+                title_language: Some("zh".to_string()),
             }
         );
     }
