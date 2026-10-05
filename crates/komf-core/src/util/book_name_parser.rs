@@ -7,16 +7,32 @@ use regex::Regex;
 static VOLUME_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         Regex::new(r"(?i)(?:^|,?\s)\(?volume\s(?<volumeStart>[0-9]+)(,?\s?[0-9]+,)+(?<volumeEnd>\s?[0-9]+)\)?").unwrap(),
-        Regex::new(r"(?i)(?:^|,?\s)\(?([vtT]|vols\.\s|vol\.\s|volume\s)(?<volumeStart>[0-9]+([.x#][0-9]+)?)(?<volumeEnd>-[0-9]+([.x#][0-9]+)?)?\)?").unwrap(),
+        // vol./vols./volume 前缀后的空格为可选：Komga/kmrs 扫描器普遍产出 "Vol.01"
+        // 这类无空格书名（且 bangumi 单行本关联名 "違国日記 (1)" 可解析），
+        // 若此处要求空格，associate_book_metadata 卷号匹配会全部失败。
+        Regex::new(r"(?i)(?:^|,?\s)\(?([vtT]|vols\.\s?|vol\.\s?|volume\s?)(?<volumeStart>[0-9]+([.x#][0-9]+)?)(?<volumeEnd>-[0-9]+([.x#][0-9]+)?)?\)?").unwrap(),
         Regex::new(r".*第\s*(?<volumeStart>\d+)\s*-?\s*(?<volumeEnd>\d+)?\s*[巻卷册冊集]").unwrap(),
+        // 无「第」前缀的 "5巻"/"12卷"/"1-3冊" 结尾形态。放在「第」正则之后：
+        // get_volumes 首条命中即返回，走到这里已保证「第N巻」形态被前一条消费，
+        // `[^\d第-]` 边界避免匹配 "12巻" 中的部分数字（取最后一组完整数字），
+        // 并排除 "-" 使 "1-3冊" 的范围组不被拆散（greedy 回溯下 "-" 会成为合法边界）。
+        Regex::new(r"(?:^|.*[^\d第-])(?<volumeStart>\d+(?:\.\d+)?)\s*-?\s*(?<volumeEnd>\d+(?:\.\d+)?)?\s*[巻卷册冊集]\s*$").unwrap(),
+        // "巻5"/"巻05"/"巻1-2" 前置形态（巻/卷/册/冊/集 后直接跟结尾数字）。
+        // `[^\d]` 边界同理防止 "12巻5" 误解析。
+        Regex::new(r"(?:^|.*[^\d])(?:[巻卷册冊集])\s*(?<volumeStart>\d+(?:\.\d+)?)\s*-?\s*(?<volumeEnd>\d+(?:\.\d+)?)?\s*$").unwrap(),
         Regex::new(r".*年(?:[0-9]+月)?(?:[0-9]+日)?(?<volumeStart>\d+)-?(?<volumeEnd>\d+)?号").unwrap(),
     ]
 });
 
 static CHAPTER_REGEXES: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new(r"(?i)(?:^|\s?)(c|ch\.\s|chapter\s|ep\.\s)(?<start>[0-9]+([.x#][0-9]+)?)(?<end>-[0-9]+([.x#][0-9]+)?)?").unwrap(),
-        Regex::new(r".*第\s*(?<start>\d+(?:\.\d+)?)\s*-?\s*(?<end>\d+(?:\.\d+)?)?\s*[話话章节]").unwrap(),
+        // 前缀空格为可选并补 chap.：Komga/kmrs 扫描器普遍产出 "Chap.001"/"ch.12"
+        // 这类无空格（且无 chap 前缀支持）的章节命名。
+        Regex::new(r"(?i)(?:^|\s?)(c|ch\.\s?|chap\.\s?|chapter\s?|ep\.\s?)(?<start>[0-9]+([.x#][0-9]+)?)(?<end>-[0-9]+([.x#][0-9]+)?)?").unwrap(),
+        Regex::new(r".*第\s*(?<start>\d+(?:\.\d+)?)\s*-?\s*(?<end>\d+(?:\.\d+)?)?\s*[話话章节回]").unwrap(),
+        // 无「第」前缀的 "001-100话"/"5話" 结尾形态。放在「第」正则之后：
+        // 「第N話」优先；`[^\d第-]` 边界避免 "12話" 拆出部分数字、"1-3话" 拆散范围。
+        Regex::new(r"(?:^|.*[^\d第-])(?<start>\d+(?:\.\d+)?)\s*-?\s*(?<end>\d+(?:\.\d+)?)?\s*[話话章节回]\s*$").unwrap(),
     ]
 });
 
@@ -114,6 +130,124 @@ impl BookNameParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 章节前缀空格可选并支持 chap.："Chap.001" / "ch.12" / "ep.3" / "chapter5"。
+    #[test]
+    fn parses_chapter_prefix_without_space() {
+        assert_eq!(
+            BookNameParser::get_chapters("Chap.001"),
+            Some(BookRange::single(1.0))
+        );
+        assert_eq!(
+            BookNameParser::get_chapters("Some Series ch.12"),
+            Some(BookRange::single(12.0))
+        );
+        assert_eq!(
+            BookNameParser::get_chapters("Some Series ep.3"),
+            Some(BookRange::single(3.0))
+        );
+        assert_eq!(
+            BookNameParser::get_chapters("Some Series chapter5"),
+            Some(BookRange::single(5.0))
+        );
+    }
+
+    /// 无「第」前缀的章节后缀："001-100话" / "5話" / "1-3章"（含全角数字）。
+    #[test]
+    fn parses_chapter_suffix_without_dai() {
+        for (name, expected) in [
+            ("[王牌御史] 001-100话", BookRange::new(1.0, 100.0)),
+            ("标题 5話", BookRange::single(5.0)),
+            ("５话", BookRange::single(5.0)),
+            ("标题 1-3章", BookRange::new(1.0, 3.0)),
+        ] {
+            assert_eq!(
+                BookNameParser::get_chapters(name),
+                Some(expected),
+                "name: {name}"
+            );
+        }
+        // 「第N話」仍走原有正则，不受新规则影响
+        assert_eq!(
+            BookNameParser::get_chapters("第10話"),
+            Some(BookRange::single(10.0))
+        );
+        // 边界：不以話/章结尾的章节名不误解析
+        assert_eq!(BookNameParser::get_chapters("12話5"), None);
+    }
+
+    /// 无「第」前缀的 CJK 卷号：「数字+巻卷册冊集」结尾与「巻卷册冊集+数字」结尾两种形态。
+    #[test]
+    fn parses_cjk_volume_without_dai() {
+        // 数字 + 巻/卷/册/冊/集 结尾（无「第」）
+        for (name, expected) in [
+            ("ワンピース 5巻", BookRange::single(5.0)),
+            ("标题 12卷", BookRange::single(12.0)),
+            ("标题 5册", BookRange::single(5.0)),
+            ("标题 1-3冊", BookRange::new(1.0, 3.0)),
+            ("标题 2集", BookRange::single(2.0)),
+            ("5巻", BookRange::single(5.0)),
+            ("５巻", BookRange::single(5.0)),
+        ] {
+            assert_eq!(
+                BookNameParser::get_volumes(name),
+                Some(expected),
+                "name: {name}"
+            );
+        }
+        // 巻/卷/册/冊/集 + 数字 结尾（前置形态）
+        for (name, expected) in [
+            ("巻5", BookRange::single(5.0)),
+            ("标题巻05", BookRange::single(5.0)),
+            ("标题 卷1-2", BookRange::new(1.0, 2.0)),
+            ("全冊3", BookRange::single(3.0)),
+        ] {
+            assert_eq!(
+                BookNameParser::get_volumes(name),
+                Some(expected),
+                "name: {name}"
+            );
+        }
+        // 「第N巻」仍走原有正则，不受新规则影响
+        assert_eq!(
+            BookNameParser::get_volumes("第5巻"),
+            Some(BookRange::single(5.0))
+        );
+        // 边界：「12巻5」不以前置形态误解析（避免吃掉更大数字的一部分）
+        assert_eq!(BookNameParser::get_volumes("12巻5"), None);
+    }
+
+    /// vol./vols./volume 前缀后的空格为可选（"Vol.01" / "vols.1-2" / "volume2"）：
+    /// Komga/kmrs 扫描器普遍产出 "他国日记 Vol.01" 这类无空格书名，旧正则要求
+    /// 空格导致 get_volumes 返回 None → associate_book_metadata 卷号匹配全部失败
+    /// （bangumi 单行本侧 "違国日記 (1)" 解析正常，两侧不对称）。
+    #[test]
+    fn parses_volume_prefix_without_space() {
+        assert_eq!(
+            BookNameParser::get_volumes("他国日记 Vol.01"),
+            Some(BookRange::single(1.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("ARMS神臂 愛藏版 Vol.03"),
+            Some(BookRange::single(3.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("Vol.01 仰望巨人的少女"),
+            Some(BookRange::single(1.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("My Series Vol.1-2"),
+            Some(BookRange::new(1.0, 2.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("My Series vols.1-2"),
+            Some(BookRange::new(1.0, 2.0))
+        );
+        assert_eq!(
+            BookNameParser::get_volumes("My Series volume2"),
+            Some(BookRange::single(2.0))
+        );
+    }
 
     #[test]
     fn parses_volumes() {
