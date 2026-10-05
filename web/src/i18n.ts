@@ -216,8 +216,6 @@ const dict: Record<string, { zh: string; en: string }> = {
   // ---- 元数据表单字段（汉化；en 保留原键名便于对照配置） ----
   'f.libraryType': { zh: '库类型', en: 'Library type' },
   'f.aggregate': { zh: '聚合(多源合并)', en: 'Aggregate (merge sources)' },
-  'f.aggregateGenres': { zh: '聚合服务器原始体裁', en: 'Aggregate server genres (aggregateGenres)' },
-  'f.aggregateTags': { zh: '聚合服务器原始标签', en: 'Aggregate server tags (aggregateTags)' },
   'f.mergeTags': { zh: '合并标签', en: 'Merge tags' },
   'f.mergeGenres': { zh: '合并类型', en: 'Merge genres' },
   'f.seriesCovers': { zh: '系列封面', en: 'Series covers' },

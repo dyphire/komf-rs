@@ -502,8 +502,6 @@ function MetadataUpdateForm(props: {
       <div className="grid">
         <Field label={t('f.libraryType')}><select value={mu.libraryType ?? 'MANGA'} onChange={(e) => upd([s, ...b, 'libraryType'], e.target.value)}>{['MANGA', 'NOVEL', 'COMIC', 'WEBTOON'].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
         <SwitchField label={t('f.aggregate')} value={mu.aggregate} onChange={(v) => upd([s, ...b, 'aggregate'], v)} />
-        <SwitchField label={t('f.aggregateGenres')} value={mu.aggregateGenres} onChange={(v) => upd([s, ...b, 'aggregateGenres'], v)} />
-        <SwitchField label={t('f.aggregateTags')} value={mu.aggregateTags} onChange={(v) => upd([s, ...b, 'aggregateTags'], v)} />
         <SwitchField label={t('f.mergeTags')} value={mu.mergeTags} onChange={(v) => upd([s, ...b, 'mergeTags'], v)} />
         <SwitchField label={t('f.mergeGenres')} value={mu.mergeGenres} onChange={(v) => upd([s, ...b, 'mergeGenres'], v)} />
         <SwitchField label={t('f.seriesCovers')} value={mu.seriesCovers} onChange={(v) => upd([s, ...b, 'seriesCovers'], v)} />

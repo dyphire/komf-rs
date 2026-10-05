@@ -25,10 +25,8 @@ komga:
     default:
       libraryType: MANGA            # 库媒体类型：MANGA / NOVEL / COMIC / WEBTOON
       aggregate: false              # 多 provider 聚合（主 provider 之外再拉取并合并其余）
-      aggregateGenres: false        # 聚合时并入服务器系列已有 genres（并集，避免被覆盖）
-      aggregateTags: false          # 聚合时并入服务器系列/书籍已有 tags（并集，避免被覆盖）
-      mergeTags: false              # 聚合时合并 tags
-      mergeGenres: false            # 聚合时合并 genres
+      mergeTags: false              # 聚合时合并 tags（并同时并入服务器系列/书籍已有 tags，避免被覆盖）
+      mergeGenres: false            # 聚合时合并 genres（并同时并入服务器系列已有 genres，避免被覆盖）
       bookCovers: false             # 更新书籍封面（关闭时 provider 也不再下载书籍封面字节）
       seriesCovers: false           # 更新系列封面（关闭时 provider 也不再下载系列封面字节）
       overrideExistingCovers: true  # 已存在封面也覆盖
@@ -108,8 +106,6 @@ stump:                                # Stump 媒体服务器（Rust 扩展）
     default:
       libraryType: MANGA
       aggregate: false
-      aggregateGenres: false
-      aggregateTags: false
       mergeTags: false
       mergeGenres: false
       bookCovers: false
@@ -187,8 +183,6 @@ kavita:
     default:
       libraryType: MANGA
       aggregate: false
-      aggregateGenres: false
-      aggregateTags: false
       mergeTags: false
       mergeGenres: false
       bookCovers: false

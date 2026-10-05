@@ -171,8 +171,6 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
     MetadataProcessingConfigDto {
         library_type: Some(to_media_type_dto(config.library_type)),
         aggregate: Some(config.aggregate),
-        aggregate_genres: Some(config.aggregate_genres),
-        aggregate_tags: Some(config.aggregate_tags),
         merge_tags: Some(config.merge_tags),
         merge_genres: Some(config.merge_genres),
         book_covers: Some(config.book_covers),
@@ -1029,8 +1027,6 @@ fn from_processing_dto(
             .map(from_media_type_dto)
             .unwrap_or(base.library_type),
         aggregate: dto.aggregate.unwrap_or(base.aggregate),
-        aggregate_genres: dto.aggregate_genres.unwrap_or(base.aggregate_genres),
-        aggregate_tags: dto.aggregate_tags.unwrap_or(base.aggregate_tags),
         merge_tags: dto.merge_tags.unwrap_or(base.merge_tags),
         merge_genres: dto.merge_genres.unwrap_or(base.merge_genres),
         book_covers: dto.book_covers.unwrap_or(base.book_covers),

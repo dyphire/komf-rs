@@ -156,7 +156,7 @@ Any metadata update option or provider can be scoped to a specific library by it
 
 ## Metadata aggregation
 
-By default, metadata is fetched from the first positive match in configured providers, in priority order. With `aggregate: true`, metadata from all providers is aggregated: a field is only taken from another provider if the previous one did not provide it. With `aggregateGenres: true` / `aggregateTags: true` (aggregate mode only), the series'/books' existing genres/tags on the media server are also merged into the aggregated result, so provider data does not wipe them.
+By default, metadata is fetched from the first positive match in configured providers, in priority order. With `aggregate: true`, metadata from all providers is aggregated: a field is only taken from another provider if the previous one did not provide it. With `mergeGenres: true` / `mergeTags: true` (aggregate mode only), the series'/books' existing genres/tags on the media server are also merged into the aggregated result, so provider data does not wipe them.
 
 ## Notifications
 

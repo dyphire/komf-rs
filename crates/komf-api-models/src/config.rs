@@ -92,10 +92,6 @@ pub struct MetadataUpdateConfigDto {
 pub struct MetadataProcessingConfigDto {
     pub library_type: Option<KomfMediaType>,
     pub aggregate: Option<bool>,
-    /// Rust 扩展：aggregate=true 时合并服务器系列原始 genres（默认 false）。
-    pub aggregate_genres: Option<bool>,
-    /// Rust 扩展：aggregate=true 时合并服务器系列/书籍原始 tags（默认 false）。
-    pub aggregate_tags: Option<bool>,
     pub merge_tags: Option<bool>,
     pub merge_genres: Option<bool>,
     pub book_covers: Option<bool>,

@@ -46,10 +46,6 @@ pub struct MetadataService {
     media_server_client: Arc<dyn MediaServerClient>,
     metadata_providers: Arc<komf_core::providers::MetadataProviders>,
     aggregate_metadata: bool,
-    /// Rust 扩展：aggregate=true 时把服务器系列原始 genres 并入聚合结果。
-    aggregate_genres: bool,
-    /// Rust 扩展：aggregate=true 时把服务器系列/书籍原始 tags 并入聚合结果。
-    aggregate_tags: bool,
     metadata_merger: MetadataMerger,
     metadata_update_service: Arc<MetadataUpdater>,
     series_match_repository: Arc<KomfJobsRepository>,
@@ -79,8 +75,6 @@ impl MetadataService {
         media_server_client: Arc<dyn MediaServerClient>,
         metadata_providers: Arc<komf_core::providers::MetadataProviders>,
         aggregate_metadata: bool,
-        aggregate_genres: bool,
-        aggregate_tags: bool,
         metadata_merger: MetadataMerger,
         metadata_update_service: Arc<MetadataUpdater>,
         series_match_repository: Arc<KomfJobsRepository>,
@@ -108,8 +102,6 @@ impl MetadataService {
             media_server_client,
             metadata_providers,
             aggregate_metadata,
-            aggregate_genres,
-            aggregate_tags,
             metadata_merger,
             metadata_update_service,
             series_match_repository,
@@ -1469,7 +1461,8 @@ impl MetadataService {
     /// Rust 扩展：aggregate=true 时，将媒体服务器上该系列/书籍当前的原始
     /// genres/tags（聚合拉取前刚从服务器读取的状态）合并进聚合结果（并集去重
     /// 排序），避免 provider 聚合数据整体覆盖服务器已有体裁/标签。受
-    /// aggregateGenres / aggregateTags 开关独立控制；非聚合模式不生效。
+    /// mergeGenres / mergeTags 开关控制（与 provider 间合并共用同一开关）；
+    /// 非聚合模式不生效。
     /// 书籍无 genres，仅合并 tags；只合并在 provider 结果中存在元数据的书籍，
     /// 不为 provider 未覆盖的书籍新建元数据。
     fn merge_server_genres_tags(
@@ -1481,11 +1474,11 @@ impl MetadataService {
         if !self.aggregate_metadata {
             return metadata;
         }
-        if self.aggregate_genres {
+        if self.metadata_merger.merge_genres {
             metadata.series_metadata.genres =
                 merge_unique_sorted(&metadata.series_metadata.genres, &series.metadata.genres);
         }
-        if self.aggregate_tags {
+        if self.metadata_merger.merge_tags {
             metadata.series_metadata.tags =
                 merge_unique_sorted(&metadata.series_metadata.tags, &series.metadata.tags);
             for book in books {
@@ -3255,12 +3248,12 @@ mod job_lifecycle_tests {
         test_service_with(client, false, false, false)
     }
 
-    /// 带聚合开关的测试 service（merge_server_genres_tags 回归用）。
+    /// 带聚合/合并开关的测试 service（merge_server_genres_tags 回归用）。
     fn test_service_with(
         client: Arc<dyn MediaServerClient>,
         aggregate_metadata: bool,
-        aggregate_genres: bool,
-        aggregate_tags: bool,
+        merge_tags: bool,
+        merge_genres: bool,
     ) -> Arc<MetadataService> {
         let dir = std::env::temp_dir().join(format!(
             "komf-svc-lifecycle-{}-{}",
@@ -3311,9 +3304,7 @@ mod job_lifecycle_tests {
             client,
             providers,
             aggregate_metadata,
-            aggregate_genres,
-            aggregate_tags,
-            MetadataMerger::new(false, false),
+            MetadataMerger::new(merge_tags, merge_genres),
             updater,
             repo,
             "komga",
@@ -3386,8 +3377,8 @@ mod job_lifecycle_tests {
         assert_eq!(record.status, MetadataJobStatus::Failed);
     }
 
-    /// 回归：aggregateGenres/aggregateTags 开启时，服务器系列/书籍原始 genres/tags
-    /// 以并集去重排序并入聚合结果；非聚合模式或开关关闭时不生效；provider 未覆盖
+    /// 回归：聚合模式下 mergeGenres/mergeTags 开启时，服务器系列/书籍原始 genres/tags
+    /// 以并集去重排序并入聚合结果；非聚合模式或合并关闭时不生效；provider 未覆盖
     /// 的书籍不为它新建元数据。
     #[test]
     fn merge_server_genres_tags_respects_switches() {
@@ -3453,8 +3444,8 @@ mod job_lifecycle_tests {
         assert_eq!(book_tags, &vec!["provider book tag", "seed tag"]);
         assert!(merged.book_metadata[&MediaServerBookId("c".into())].is_none());
 
-        // 仅 genres 开：tags（系列/书籍）不变
-        let service = test_service_with(Arc::new(BlockingClient::default()), true, true, false);
+        // 仅 mergeGenres 开：tags（系列/书籍）不变
+        let service = test_service_with(Arc::new(BlockingClient::default()), true, false, true);
         let merged = service.merge_server_genres_tags(&series, &[book.clone()], metadata.clone());
         assert_eq!(merged.series_metadata.tags, vec!["provider tag"]);
         assert_eq!(
@@ -3465,7 +3456,13 @@ mod job_lifecycle_tests {
             vec!["provider book tag"]
         );
 
-        // 开关开但非聚合模式：完全不生效
+        // 合并关闭：服务器原始 genres/tags 不并入
+        let service = test_service_with(Arc::new(BlockingClient::default()), true, false, false);
+        let merged = service.merge_server_genres_tags(&series, &[book.clone()], metadata.clone());
+        assert_eq!(merged.series_metadata.genres, vec!["Fantasy", "Action"]);
+        assert_eq!(merged.series_metadata.tags, vec!["provider tag"]);
+
+        // 合并开但非聚合模式：完全不生效
         let service = test_service_with(Arc::new(BlockingClient::default()), false, true, true);
         let merged = service.merge_server_genres_tags(&series, &[book.clone()], metadata.clone());
         assert_eq!(merged.series_metadata.genres, vec!["Fantasy", "Action"]);
