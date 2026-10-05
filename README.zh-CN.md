@@ -156,7 +156,7 @@ docker run -d --name komf ghcr.io/dyphire/komf-rs:latest \
 
 ## 元数据聚合
 
-默认按配置的 provider 优先级，从第一个正匹配处抓取元数据。设置 `aggregate: true` 时聚合所有 provider 的元数据：某字段仅在前一个 provider 未提供时才从下一个 provider 获取。
+默认按配置的 provider 优先级，从第一个正匹配处抓取元数据。设置 `aggregate: true` 时聚合所有 provider 的元数据：某字段仅在前一个 provider 未提供时才从下一个 provider 获取。设置 `aggregateGenres: true` / `aggregateTags: true`（仅聚合模式生效）时，还会将媒体服务器上该系列/书籍已有的 genres/tags 并入聚合结果（并集去重），避免 provider 数据覆盖服务器已有体裁/标签。
 
 ## 通知
 

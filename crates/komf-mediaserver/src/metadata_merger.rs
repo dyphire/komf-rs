@@ -163,7 +163,7 @@ impl MetadataMerger {
 }
 
 /// (old + new).toSet().sorted()。
-fn merge_unique_sorted(original: &[String], new: &[String]) -> Vec<String> {
+pub(crate) fn merge_unique_sorted(original: &[String], new: &[String]) -> Vec<String> {
     let mut result: Vec<String> = original.iter().chain(new.iter()).cloned().collect();
     result.sort();
     result.dedup();

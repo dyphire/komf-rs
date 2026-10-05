@@ -171,6 +171,8 @@ fn to_processing_dto(config: &MetadataProcessingConfig) -> MetadataProcessingCon
     MetadataProcessingConfigDto {
         library_type: Some(to_media_type_dto(config.library_type)),
         aggregate: Some(config.aggregate),
+        aggregate_genres: Some(config.aggregate_genres),
+        aggregate_tags: Some(config.aggregate_tags),
         merge_tags: Some(config.merge_tags),
         merge_genres: Some(config.merge_genres),
         book_covers: Some(config.book_covers),
@@ -605,7 +607,8 @@ fn default_series_metadata_config_dto() -> SeriesMetadataConfigDto {
         total_book_count: Some(true),
         authors: Some(true),
         release_date: Some(true),
-        thumbnail: Some(true),
+        // Rust 扩展：thumbnail 默认 false（与全局封面开关默认一致）。
+        thumbnail: Some(false),
         links: Some(true),
         books: Some(true),
         score: Some(false),
@@ -618,16 +621,18 @@ fn default_series_metadata_config_dto() -> SeriesMetadataConfigDto {
 
 fn default_book_metadata_config_dto() -> BookMetadataConfigDto {
     BookMetadataConfigDto {
-        title: Some(true),
+        // Rust 扩展：title/number/numberSort 默认 false（对齐保守更新策略）。
+        title: Some(false),
         summary: Some(true),
-        number: Some(true),
-        number_sort: Some(true),
+        number: Some(false),
+        number_sort: Some(false),
         release_date: Some(true),
         authors: Some(true),
         tags: Some(true),
         isbn: Some(true),
         links: Some(true),
-        thumbnail: Some(true),
+        // Rust 扩展：thumbnail 默认 false（与全局封面开关默认一致）。
+        thumbnail: Some(false),
     }
 }
 
@@ -1024,6 +1029,8 @@ fn from_processing_dto(
             .map(from_media_type_dto)
             .unwrap_or(base.library_type),
         aggregate: dto.aggregate.unwrap_or(base.aggregate),
+        aggregate_genres: dto.aggregate_genres.unwrap_or(base.aggregate_genres),
+        aggregate_tags: dto.aggregate_tags.unwrap_or(base.aggregate_tags),
         merge_tags: dto.merge_tags.unwrap_or(base.merge_tags),
         merge_genres: dto.merge_genres.unwrap_or(base.merge_genres),
         book_covers: dto.book_covers.unwrap_or(base.book_covers),

@@ -460,7 +460,8 @@ function ProviderList(props: {
                 <div className="row"><b>seriesMetadata</b><span className="badge">{t('badge.seriesMetaDefault')}</span></div>
                 <div className="checks">
                   {SERIES_FIELDS.map((f) => {
-                    const on = cur.seriesMetadata?.[f] ?? (f !== 'score' && f !== 'useOriginalPublisher');
+                    // score/useOriginalPublisher/thumbnail 后端默认 false，其余默认 true
+                    const on = cur.seriesMetadata?.[f] ?? !['score', 'useOriginalPublisher', 'thumbnail'].includes(f);
                     return (
                       <ToggleRow key={f} label={t('fld.' + f)} value={on} className={on ? '' : 'off'} onChange={(v) => upd([...base, 'seriesMetadata', f], v)} />
                     );
@@ -469,7 +470,8 @@ function ProviderList(props: {
                 <div className="row" style={{ marginTop: 6 }}><b>bookMetadata</b></div>
                 <div className="checks">
                   {BOOK_FIELDS.map((f) => {
-                    const on = cur.bookMetadata?.[f] ?? true;
+                    // title/number/numberSort/thumbnail 后端默认 false，其余默认 true
+                    const on = cur.bookMetadata?.[f] ?? !['title', 'number', 'numberSort', 'thumbnail'].includes(f);
                     return (
                       <ToggleRow key={f} label={t('fld.' + f)} value={on} className={on ? '' : 'off'} onChange={(v) => upd([...base, 'bookMetadata', f], v)} />
                     );
@@ -500,6 +502,8 @@ function MetadataUpdateForm(props: {
       <div className="grid">
         <Field label={t('f.libraryType')}><select value={mu.libraryType ?? 'MANGA'} onChange={(e) => upd([s, ...b, 'libraryType'], e.target.value)}>{['MANGA', 'NOVEL', 'COMIC', 'WEBTOON'].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
         <SwitchField label={t('f.aggregate')} value={mu.aggregate} onChange={(v) => upd([s, ...b, 'aggregate'], v)} />
+        <SwitchField label={t('f.aggregateGenres')} value={mu.aggregateGenres} onChange={(v) => upd([s, ...b, 'aggregateGenres'], v)} />
+        <SwitchField label={t('f.aggregateTags')} value={mu.aggregateTags} onChange={(v) => upd([s, ...b, 'aggregateTags'], v)} />
         <SwitchField label={t('f.mergeTags')} value={mu.mergeTags} onChange={(v) => upd([s, ...b, 'mergeTags'], v)} />
         <SwitchField label={t('f.mergeGenres')} value={mu.mergeGenres} onChange={(v) => upd([s, ...b, 'mergeGenres'], v)} />
         <SwitchField label={t('f.seriesCovers')} value={mu.seriesCovers} onChange={(v) => upd([s, ...b, 'seriesCovers'], v)} />
@@ -526,8 +530,8 @@ function MetadataUpdateForm(props: {
           <Field label={t('f.mylarOutputDir')}><TriText value={getPath(draft, [s, ...b, 'mylarOutputDir'])} onChange={(v) => upd([s, ...b, 'mylarOutputDir'], v)} placeholder={t('ph.mylarOutputDir')} /></Field>
           <Field label={t('f.failedMatchCollectionName')}><TriText value={getPath(draft, [s, ...b, 'failedMatchCollectionName'])} onChange={(v) => upd([s, ...b, 'failedMatchCollectionName'], v)} placeholder={t('ph.failedMatchCollection')} /></Field>
           <Field label={t('f.originalPublisherTagName')}><TriText value={getPath(draft, [s, ...b, 'postProcessing', 'originalPublisherTagName'])} onChange={(v) => upd([s, ...b, 'postProcessing', 'originalPublisherTagName'], v)} /></Field>
-          <SwitchField label={t('f.linksSkipEnabled')} value={mu.postProcessing?.linksSkipEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksSkipEnabled'], v)} />
-          <SwitchField label={t('f.linksMatchEnabled')} value={mu.postProcessing?.linksMatchEnabled} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksMatchEnabled'], v)} />
+          <SwitchField label={t('f.linksSkipEnabled')} value={mu.postProcessing?.linksSkipEnabled ?? true} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksSkipEnabled'], v)} />
+          <SwitchField label={t('f.linksMatchEnabled')} value={mu.postProcessing?.linksMatchEnabled ?? true} onChange={(v) => upd([s, ...b, 'postProcessing', 'linksMatchEnabled'], v)} />
         </div>
         <Field label={t('f.publisherTagNames')} hint={t('hint.langJaEn')}>
           <PairRows

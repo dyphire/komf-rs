@@ -183,6 +183,13 @@ impl Default for MetadataUpdateConfig {
 pub struct MetadataProcessingConfig {
     pub library_type: MediaType,
     pub aggregate: bool,
+    /// Rust 扩展：aggregate=true 时，将媒体服务器上该系列当前的原始 genres
+    /// 合并进聚合结果（并集去重排序），避免 provider 聚合数据整体覆盖服务器
+    /// 已有体裁。仅聚合模式生效；默认 false（行为不变）。
+    pub aggregate_genres: bool,
+    /// Rust 扩展：aggregate=true 时，将媒体服务器上该系列/书籍当前的原始 tags
+    /// 合并进聚合结果（并集去重排序）。仅聚合模式生效；默认 false（行为不变）。
+    pub aggregate_tags: bool,
     pub merge_tags: bool,
     pub merge_genres: bool,
     pub book_covers: bool,
@@ -323,6 +330,8 @@ impl Default for MetadataProcessingConfig {
         Self {
             library_type: MediaType::Manga,
             aggregate: false,
+            aggregate_genres: false,
+            aggregate_tags: false,
             merge_tags: false,
             merge_genres: false,
             book_covers: false,

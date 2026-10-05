@@ -380,6 +380,8 @@ impl MediaServerModule {
             media_server_client,
             metadata_providers,
             config.aggregate,
+            config.aggregate_genres,
+            config.aggregate_tags,
             MetadataMerger::new(config.merge_tags, config.merge_genres),
             metadata_update_service,
             repository,

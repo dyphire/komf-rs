@@ -5,7 +5,7 @@ use crate::jobs::{
     JobEventSender, KomfJobTracker, KomfJobsRepository, MetadataJobEvent, MetadataJobId,
     SeriesMatch,
 };
-use crate::metadata_merger::MetadataMerger;
+use crate::metadata_merger::{merge_unique_sorted, MetadataMerger};
 use crate::metadata_updater::MetadataUpdater;
 use crate::model::*;
 use komf_core::model::{
@@ -46,6 +46,10 @@ pub struct MetadataService {
     media_server_client: Arc<dyn MediaServerClient>,
     metadata_providers: Arc<komf_core::providers::MetadataProviders>,
     aggregate_metadata: bool,
+    /// Rust 扩展：aggregate=true 时把服务器系列原始 genres 并入聚合结果。
+    aggregate_genres: bool,
+    /// Rust 扩展：aggregate=true 时把服务器系列/书籍原始 tags 并入聚合结果。
+    aggregate_tags: bool,
     metadata_merger: MetadataMerger,
     metadata_update_service: Arc<MetadataUpdater>,
     series_match_repository: Arc<KomfJobsRepository>,
@@ -75,6 +79,8 @@ impl MetadataService {
         media_server_client: Arc<dyn MediaServerClient>,
         metadata_providers: Arc<komf_core::providers::MetadataProviders>,
         aggregate_metadata: bool,
+        aggregate_genres: bool,
+        aggregate_tags: bool,
         metadata_merger: MetadataMerger,
         metadata_update_service: Arc<MetadataUpdater>,
         series_match_repository: Arc<KomfJobsRepository>,
@@ -102,6 +108,8 @@ impl MetadataService {
             media_server_client,
             metadata_providers,
             aggregate_metadata,
+            aggregate_genres,
+            aggregate_tags,
             metadata_merger,
             metadata_update_service,
             series_match_repository,
@@ -327,6 +335,8 @@ impl MetadataService {
                 LinksFetchOutcome::Success(metadata, provider, provider_series_id) => {
                     // Rust 扩展：简繁转换应用于元数据更新（identify links 直用分支同样生效）
                     let metadata = self.apply_chinese_conversion(metadata);
+                    // Rust 扩展：聚合模式下并入服务器原始 genres/tags
+                    let metadata = self.merge_server_genres_tags(&series, &books, metadata);
                     let _ = tx.send(MetadataJobEvent::PostProcessingStart);
                     self.metadata_update_service
                         .update_metadata(&series, metadata, Some(provider))
@@ -547,6 +557,8 @@ impl MetadataService {
 
         // Rust 扩展：简繁转换应用于元数据更新（chineseConversion.update.enabled + fields）
         let metadata = self.apply_chinese_conversion(metadata);
+        // Rust 扩展：聚合模式下并入服务器原始 genres/tags
+        let metadata = self.merge_server_genres_tags(&series, &books, metadata);
         let _ = tx.send(MetadataJobEvent::PostProcessingStart);
         self.metadata_update_service
             .update_metadata(&series, metadata, Some(provider_name))
@@ -1100,6 +1112,8 @@ impl MetadataService {
 
         // Rust 扩展：简繁转换应用于元数据更新（chineseConversion.update.enabled + fields）
         let metadata = self.apply_chinese_conversion(metadata);
+        // Rust 扩展：聚合模式下并入服务器原始 genres/tags
+        let metadata = self.merge_server_genres_tags(&series, &books, metadata);
         let _ = tx.send(MetadataJobEvent::PostProcessingStart);
         self.metadata_update_service
             .update_metadata(&series, metadata, matched_provider)
@@ -1294,8 +1308,10 @@ impl MetadataService {
                         None
                     }
                 };
-                // 配置不上传书籍封面时封面 bytes 直接丢弃（provider 已随元数据一并拉取），
-                // 不进入系列级缓存/聚合合并——封面只在上传场景才需要驻留（内存优化）。
+                // 配置不上传书籍封面时封面 bytes 直接丢弃，不进入系列级缓存/聚合合并——
+                // 封面只在上传场景才需要驻留（内存优化）。provider 侧已在构造时按全局
+                // bookCovers 开关取「与」（全局关闭即不下载）；此处兜底防御多媒体
+                // 服务器配置不一致等场景下漏网的 thumbnail。
                 if !self.metadata_update_service.upload_book_covers() {
                     if let Some(m) = metadata.as_mut() {
                         m.thumbnail = None;
@@ -1448,6 +1464,38 @@ impl MetadataService {
             }
         }
         current
+    }
+
+    /// Rust 扩展：aggregate=true 时，将媒体服务器上该系列/书籍当前的原始
+    /// genres/tags（聚合拉取前刚从服务器读取的状态）合并进聚合结果（并集去重
+    /// 排序），避免 provider 聚合数据整体覆盖服务器已有体裁/标签。受
+    /// aggregateGenres / aggregateTags 开关独立控制；非聚合模式不生效。
+    /// 书籍无 genres，仅合并 tags；只合并在 provider 结果中存在元数据的书籍，
+    /// 不为 provider 未覆盖的书籍新建元数据。
+    fn merge_server_genres_tags(
+        &self,
+        series: &MediaServerSeries,
+        books: &[MediaServerBook],
+        mut metadata: SeriesAndBookMetadata,
+    ) -> SeriesAndBookMetadata {
+        if !self.aggregate_metadata {
+            return metadata;
+        }
+        if self.aggregate_genres {
+            metadata.series_metadata.genres =
+                merge_unique_sorted(&metadata.series_metadata.genres, &series.metadata.genres);
+        }
+        if self.aggregate_tags {
+            metadata.series_metadata.tags =
+                merge_unique_sorted(&metadata.series_metadata.tags, &series.metadata.tags);
+            for book in books {
+                if let Some(Some(book_metadata)) = metadata.book_metadata.get_mut(&book.id) {
+                    book_metadata.tags =
+                        merge_unique_sorted(&book_metadata.tags, &book.metadata.tags);
+                }
+            }
+        }
+        metadata
     }
 
     fn merge_metadata(
@@ -3204,6 +3252,16 @@ mod job_lifecycle_tests {
     }
 
     fn test_service(client: Arc<dyn MediaServerClient>) -> Arc<MetadataService> {
+        test_service_with(client, false, false, false)
+    }
+
+    /// 带聚合开关的测试 service（merge_server_genres_tags 回归用）。
+    fn test_service_with(
+        client: Arc<dyn MediaServerClient>,
+        aggregate_metadata: bool,
+        aggregate_genres: bool,
+        aggregate_tags: bool,
+    ) -> Arc<MetadataService> {
         let dir = std::env::temp_dir().join(format!(
             "komf-svc-lifecycle-{}-{}",
             std::process::id(),
@@ -3252,7 +3310,9 @@ mod job_lifecycle_tests {
         Arc::new(MetadataService::new(
             client,
             providers,
-            false,
+            aggregate_metadata,
+            aggregate_genres,
+            aggregate_tags,
             MetadataMerger::new(false, false),
             updater,
             repo,
@@ -3324,5 +3384,98 @@ mod job_lifecycle_tests {
             .unwrap()
             .unwrap();
         assert_eq!(record.status, MetadataJobStatus::Failed);
+    }
+
+    /// 回归：aggregateGenres/aggregateTags 开启时，服务器系列/书籍原始 genres/tags
+    /// 以并集去重排序并入聚合结果；非聚合模式或开关关闭时不生效；provider 未覆盖
+    /// 的书籍不为它新建元数据。
+    #[test]
+    fn merge_server_genres_tags_respects_switches() {
+        use crate::model::{
+            MediaServerBook, MediaServerBookId, MediaServerBookMetadata, MediaServerLibraryId,
+            MediaServerSeries, MediaServerSeriesId,
+        };
+        use komf_core::model::{BookMetadata, SeriesMetadata};
+
+        let mut series = MediaServerSeries {
+            id: MediaServerSeriesId("s".into()),
+            library_id: MediaServerLibraryId("l".into()),
+            name: "series".into(),
+            books_count: 2,
+            books_metadata_links: vec![],
+            metadata: MediaServerSeriesMetadata::default(),
+            url: String::new(),
+            deleted: false,
+            oneshot: false,
+        };
+        series.metadata.genres = vec!["Adventure".into(), "Fantasy".into()];
+        series.metadata.tags = vec!["op mc".into()];
+        let book = MediaServerBook {
+            id: MediaServerBookId("b".into()),
+            series_id: MediaServerSeriesId("s".into()),
+            library_id: Some(MediaServerLibraryId("l".into())),
+            series_title: "series".into(),
+            name: "vol1".into(),
+            url: String::new(),
+            file_name: String::new(),
+            number: 1,
+            oneshot: false,
+            metadata: MediaServerBookMetadata {
+                tags: vec!["seed tag".into()],
+                ..Default::default()
+            },
+            deleted: false,
+        };
+
+        let mut series_metadata = SeriesMetadata::default();
+        series_metadata.genres = vec!["Fantasy".into(), "Action".into()];
+        series_metadata.tags = vec!["provider tag".into()];
+        let mut provider_book = BookMetadata::default();
+        provider_book.tags = vec!["provider book tag".into()];
+        let mut book_metadata = std::collections::HashMap::new();
+        book_metadata.insert(MediaServerBookId("b".into()), Some(provider_book));
+        // provider 未覆盖的书籍：键存在但值为 None
+        book_metadata.insert(MediaServerBookId("c".into()), None);
+        let metadata = SeriesAndBookMetadata::new(series_metadata, book_metadata);
+
+        // 全开 + 聚合模式：系列 genres/tags 与书籍 tags 并集（排序去重），None 书籍不新建
+        let service = test_service_with(Arc::new(BlockingClient::default()), true, true, true);
+        let merged = service.merge_server_genres_tags(&series, &[book.clone()], metadata.clone());
+        assert_eq!(
+            merged.series_metadata.genres,
+            vec!["Action", "Adventure", "Fantasy"]
+        );
+        assert_eq!(merged.series_metadata.tags, vec!["op mc", "provider tag"]);
+        let book_tags = &merged.book_metadata[&MediaServerBookId("b".into())]
+            .as_ref()
+            .unwrap()
+            .tags;
+        assert_eq!(book_tags, &vec!["provider book tag", "seed tag"]);
+        assert!(merged.book_metadata[&MediaServerBookId("c".into())].is_none());
+
+        // 仅 genres 开：tags（系列/书籍）不变
+        let service = test_service_with(Arc::new(BlockingClient::default()), true, true, false);
+        let merged = service.merge_server_genres_tags(&series, &[book.clone()], metadata.clone());
+        assert_eq!(merged.series_metadata.tags, vec!["provider tag"]);
+        assert_eq!(
+            merged.book_metadata[&MediaServerBookId("b".into())]
+                .as_ref()
+                .unwrap()
+                .tags,
+            vec!["provider book tag"]
+        );
+
+        // 开关开但非聚合模式：完全不生效
+        let service = test_service_with(Arc::new(BlockingClient::default()), false, true, true);
+        let merged = service.merge_server_genres_tags(&series, &[book.clone()], metadata.clone());
+        assert_eq!(merged.series_metadata.genres, vec!["Fantasy", "Action"]);
+        assert_eq!(merged.series_metadata.tags, vec!["provider tag"]);
+        assert_eq!(
+            merged.book_metadata[&MediaServerBookId("b".into())]
+                .as_ref()
+                .unwrap()
+                .tags,
+            vec!["provider book tag"]
+        );
     }
 }

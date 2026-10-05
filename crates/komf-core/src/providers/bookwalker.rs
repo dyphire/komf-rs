@@ -1928,7 +1928,14 @@ mod tests {
     fn test_mapper() -> BookWalkerMetadataMapper {
         BookWalkerMetadataMapper::new(
             SeriesMetadataConfig::default(),
-            BookMetadataConfig::default(),
+            // 默认 title/number/numberSort 已改为 false；本用例验证 mapper 行为，
+            // 显式开启以覆盖 Kotlin mapper 对齐断言路径。
+            BookMetadataConfig {
+                title: true,
+                number: true,
+                number_sort: true,
+                ..Default::default()
+            },
             vec![AuthorRole::Writer],
             vec![AuthorRole::Penciller],
         )

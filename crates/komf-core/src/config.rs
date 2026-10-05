@@ -677,7 +677,9 @@ pub struct SeriesMetadataConfig {
     pub authors: bool,
     #[serde(default = "default_true")]
     pub release_date: bool,
-    #[serde(default = "default_true")]
+    /// Rust 扩展：默认 false（与全局 seriesCovers/bookCovers 默认一致）；
+    /// 需显式 `thumbnail: true` 才从 provider 下载封面字节。
+    #[serde(default)]
     pub thumbnail: bool,
     #[serde(default = "default_true")]
     pub books: bool,
@@ -710,7 +712,7 @@ impl Default for SeriesMetadataConfig {
             total_book_count: true,
             authors: true,
             release_date: true,
-            thumbnail: true,
+            thumbnail: false,
             books: true,
             links: true,
             score: false,
@@ -722,13 +724,17 @@ impl Default for SeriesMetadataConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookMetadataConfig {
-    #[serde(default = "default_true")]
+    /// Rust 扩展：默认 false（对齐「不主动改书籍标题/卷号」的保守更新策略）；
+    /// 需显式 `title: true` 才从 provider 写入书籍标题。
+    #[serde(default)]
     pub title: bool,
     #[serde(default = "default_true")]
     pub summary: bool,
-    #[serde(default = "default_true")]
+    /// Rust 扩展：默认 false；需显式 `number: true` 才从 provider 写入卷号。
+    #[serde(default)]
     pub number: bool,
-    #[serde(default = "default_true")]
+    /// Rust 扩展：默认 false；需显式 `numberSort: true` 才从 provider 写入卷排序。
+    #[serde(default)]
     pub number_sort: bool,
     #[serde(default = "default_true")]
     pub release_date: bool,
@@ -740,23 +746,24 @@ pub struct BookMetadataConfig {
     pub isbn: bool,
     #[serde(default = "default_true")]
     pub links: bool,
-    #[serde(default = "default_true")]
+    /// Rust 扩展：默认 false；需显式 `thumbnail: true` 才从 provider 下载卷封面字节。
+    #[serde(default)]
     pub thumbnail: bool,
 }
 
 impl Default for BookMetadataConfig {
     fn default() -> Self {
         Self {
-            title: true,
+            title: false,
             summary: true,
-            number: true,
-            number_sort: true,
+            number: false,
+            number_sort: false,
             release_date: true,
             authors: true,
             tags: true,
             isbn: true,
             links: true,
-            thumbnail: true,
+            thumbnail: false,
         }
     }
 }

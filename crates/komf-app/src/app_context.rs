@@ -107,12 +107,37 @@ fn build_state(
                 .collect(),
         }
     };
+    // 全局封面开关：provider 下载封面字节前与其取「与」——全局关闭即不下载
+    // （与 SeriesTitleLanguages 同源，取 komga.metadataUpdate 生效值）。
+    let cover_fetch = {
+        let mu = &config.komga.metadata_update;
+        komf_core::providers::CoverFetchConfig {
+            default: komf_core::providers::CoverFetchSwitches {
+                series: mu.default.series_covers,
+                books: mu.default.book_covers,
+            },
+            libraries: mu
+                .library
+                .iter()
+                .map(|(id, p)| {
+                    (
+                        id.clone(),
+                        komf_core::providers::CoverFetchSwitches {
+                            series: p.series_covers,
+                            books: p.book_covers,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    };
     let providers_module = ProvidersModule::with_oauth(
         &config.metadata_providers,
         http_client.clone(),
         Some(&work_dir),
         Some(oauth_manager.clone()),
         Some(series_title_languages),
+        Some(cover_fetch),
     );
     // bangumi/Archive、e-hentai-db 离线数据源句柄（archive 未启用 → None；/api/update-*-db 与 /config 用）。
     // 注意：需在 `media_server_module` 移动 `providers_module.metadata_providers` 之前取出。

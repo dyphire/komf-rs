@@ -467,22 +467,55 @@ impl SeriesTitleLanguages {
     }
 }
 
+/// 全局封面写入开关生效值（`metadataProcessing.seriesCovers` / `bookCovers`）。
+/// provider 的 `seriesMetadata.thumbnail` / `bookMetadata.thumbnail` 需与其取「与」：
+/// 全局关闭时 provider 不再下载封面字节（对齐 Kotlin ProvidersModule 构造时行为），
+/// 避免「下载完被 updater 丢弃」的浪费。上传侧仍由 MetadataUpdater 独立把关。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverFetchSwitches {
+    pub series: bool,
+    pub books: bool,
+}
+
+/// default + 库级覆盖（与 `SeriesTitleLanguages` 同源：取 komga.metadataUpdate 生效值；
+/// 库级未单独配置 libraryProviders 容器时，其 provider 实例共享 default 容器，
+/// 此时库级封面开关不影响下载——与上游 Kotlin 行为一致）。
+/// 不提供 Default：开关语义必须显式给出，避免「隐式默认全关」误伤封面下载。
+#[derive(Debug, Clone)]
+pub struct CoverFetchConfig {
+    pub default: CoverFetchSwitches,
+    pub libraries: std::collections::HashMap<String, CoverFetchSwitches>,
+}
+
+impl CoverFetchConfig {
+    /// 容器生效值：库级存在即用库级，否则回退 default。
+    pub fn for_library(&self, library_id: Option<&str>) -> CoverFetchSwitches {
+        library_id
+            .and_then(|id| self.libraries.get(id))
+            .copied()
+            .unwrap_or(self.default)
+    }
+}
+
 impl ProvidersModule {
     pub fn new(
         config: &MetadataProvidersConfig,
         http_client: reqwest::Client,
         database_work_dir: Option<&std::path::Path>,
     ) -> Self {
-        Self::with_oauth(config, http_client, database_work_dir, None, None)
+        // new() 不带封面开关：不做下载侧限制（保持 provider 配置原样）。
+        Self::with_oauth(config, http_client, database_work_dir, None, None, None)
     }
 
     /// 带 OAuth 的构造：`oauth_manager` 由 app 层创建（共享 http client 与 work_dir）。
+    /// `cover_fetch`：全局封面开关生效值（None = 不做下载侧限制，保持 provider 配置原样）。
     pub fn with_oauth(
         config: &MetadataProvidersConfig,
         http_client: reqwest::Client,
         database_work_dir: Option<&std::path::Path>,
         oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
         series_title_languages: Option<SeriesTitleLanguages>,
+        cover_fetch: Option<CoverFetchConfig>,
     ) -> Self {
         let default_name_matcher = config.name_matching_mode;
         let series_title_languages = series_title_languages.unwrap_or_default();
@@ -523,6 +556,7 @@ impl ProvidersModule {
             database_work_dir,
             oauth_manager.clone(),
             series_title_languages.for_library(None),
+            cover_fetch.as_ref().map(|c| c.for_library(None)),
             bangumi_archive.clone(),
             ehentai_archive.clone(),
         );
@@ -540,6 +574,9 @@ impl ProvidersModule {
                         database_work_dir,
                         oauth_manager.clone(),
                         series_title_languages.for_library(Some(library_id)),
+                        cover_fetch
+                            .as_ref()
+                            .map(|c| c.for_library(Some(library_id))),
                         bangumi_archive.clone(),
                         ehentai_archive.clone(),
                     ),
@@ -555,6 +592,36 @@ impl ProvidersModule {
     }
 }
 
+/// 全局封面开关与 provider 自身 thumbnail 开关取「与」：
+/// 全局 `seriesCovers`/`bookCovers` 关闭时对应下载直接禁用（series-only 的
+/// provider 只受 series 开关影响；无 bookMetadata 字段的不动）。
+fn apply_cover_switches(config: &mut ProvidersConfig, covers: CoverFetchSwitches) {
+    let series = covers.series;
+    let books = covers.books;
+    config.manga_updates.series_metadata.thumbnail &= series;
+    config.manga_updates.book_metadata.thumbnail &= books;
+    config.mal.series_metadata.thumbnail &= series;
+    config.mal.book_metadata.thumbnail &= books;
+    config.ani_list.series_metadata.thumbnail &= series;
+    config.manga_dex.series_metadata.thumbnail &= series;
+    config.manga_dex.book_metadata.thumbnail &= books;
+    config.bangumi.provider.series_metadata.thumbnail &= series;
+    config.bangumi.provider.book_metadata.thumbnail &= books;
+    config.comic_vine.series_metadata.thumbnail &= series;
+    config.comic_vine.book_metadata.thumbnail &= books;
+    config.manga_baka.series_metadata.thumbnail &= series;
+    config.book_walker.series_metadata.thumbnail &= series;
+    config.book_walker.book_metadata.thumbnail &= books;
+    config.yen_press.series_metadata.thumbnail &= series;
+    config.yen_press.book_metadata.thumbnail &= books;
+    config.viz.series_metadata.thumbnail &= series;
+    config.viz.book_metadata.thumbnail &= books;
+    config.webtoons.series_metadata.thumbnail &= series;
+    config.webtoons.book_metadata.thumbnail &= books;
+    config.e_hentai.series_metadata.thumbnail &= series;
+    config.e_hentai.book_metadata.thumbnail &= books;
+}
+
 fn create_metadata_providers(
     config: &ProvidersConfig,
     default_name_matcher: NameSimilarityMatcher,
@@ -563,12 +630,21 @@ fn create_metadata_providers(
     database_work_dir: Option<&std::path::Path>,
     oauth_manager: Option<Arc<crate::oauth::OAuthManager>>,
     series_title_language: Option<String>,
+    covers: Option<CoverFetchSwitches>,
     bangumi_archive: Option<Arc<bangumi_archive::BangumiArchiveService>>,
     ehentai_archive: Option<Arc<ehentai_archive::EHentaiArchiveService>>,
 ) -> MetadataProvidersContainer {
     let mut providers: Vec<RegisteredProvider> = Vec::new();
     // 离线数据源侧通道：provider 禁用但 archive 启用时仍启动（下载状态/手动更新独立于匹配）。
     let mut archives: Vec<OfflineArchive> = Vec::new();
+
+    // 全局封面开关（metadataProcessing.seriesCovers/bookCovers）关闭时不再下载封面：
+    // 与 provider 自身 thumbnail 开关取「与」。仅影响下载侧；上传侧由 updater 把关。
+    let mut effective = config.clone();
+    if let Some(covers) = covers {
+        apply_cover_switches(&mut effective, covers);
+    }
+    let config = &effective;
 
     // 对应 Kotlin CoreModule：mangabaka/mangabaka.sqlite、bookwalker/bkwk-db.sqlite
     let manga_baka_db = database_work_dir.map(|d| d.join("mangabaka").join("mangabaka.sqlite"));
@@ -834,5 +910,126 @@ mod tests {
         assert_eq!(langs.for_library(Some("lib-zh")).as_deref(), Some("zh"));
         assert_eq!(langs.for_library(None), None);
         assert_eq!(langs.for_library(Some("lib-missing")), None);
+    }
+
+    #[test]
+    fn cover_fetch_config_for_library_falls_back_to_default() {
+        let mut libs = std::collections::HashMap::new();
+        libs.insert(
+            "lib-a".to_string(),
+            CoverFetchSwitches {
+                series: true,
+                books: false,
+            },
+        );
+        let cfg = CoverFetchConfig {
+            default: CoverFetchSwitches {
+                series: false,
+                books: true,
+            },
+            libraries: libs,
+        };
+        assert_eq!(
+            cfg.for_library(None),
+            CoverFetchSwitches {
+                series: false,
+                books: true
+            }
+        );
+        assert_eq!(
+            cfg.for_library(Some("lib-a")),
+            CoverFetchSwitches {
+                series: true,
+                books: false
+            }
+        );
+        // 未配置条目回退 default
+        assert_eq!(
+            cfg.for_library(Some("lib-missing")),
+            CoverFetchSwitches {
+                series: false,
+                books: true
+            }
+        );
+    }
+
+    #[test]
+    fn apply_cover_switches_ands_provider_thumbnails() {
+        use crate::config::{BookMetadataConfig, ProvidersConfig, SeriesMetadataConfig};
+        // thumbnail 默认 false（新默认值）；本用例验证「与」语义，构造全部置 true 的 fixture。
+        fn config_with_thumbnails_on() -> ProvidersConfig {
+            let mut config = ProvidersConfig::default();
+            let series_on = {
+                let mut c = SeriesMetadataConfig::default();
+                c.thumbnail = true;
+                c
+            };
+            let books_on = {
+                let mut c = BookMetadataConfig::default();
+                c.thumbnail = true;
+                c
+            };
+            macro_rules! all_thumbnails_on {
+                ($($field:ident),*) => {$(
+                    config.$field.series_metadata = series_on.clone();
+                    config.$field.book_metadata = books_on.clone();
+                )*};
+            }
+            all_thumbnails_on!(
+                manga_updates,
+                mal,
+                manga_dex,
+                comic_vine,
+                book_walker,
+                yen_press,
+                viz,
+                webtoons
+            );
+            config.ani_list.series_metadata = series_on.clone();
+            config.manga_baka.series_metadata = series_on.clone();
+            config.bangumi.provider.series_metadata = series_on.clone();
+            config.bangumi.provider.book_metadata = books_on.clone();
+            config.e_hentai.series_metadata = series_on.clone();
+            config.e_hentai.book_metadata = books_on.clone();
+            config
+        }
+
+        // 全开：保持原样
+        let mut config = config_with_thumbnails_on();
+        apply_cover_switches(
+            &mut config,
+            CoverFetchSwitches {
+                series: true,
+                books: true,
+            },
+        );
+        assert!(config.manga_updates.series_metadata.thumbnail);
+        assert!(config.manga_updates.book_metadata.thumbnail);
+        // 全关：全部禁用（含 series-only 的 ani_list/manga_baka）
+        apply_cover_switches(
+            &mut config,
+            CoverFetchSwitches {
+                series: false,
+                books: false,
+            },
+        );
+        assert!(!config.manga_updates.series_metadata.thumbnail);
+        assert!(!config.manga_updates.book_metadata.thumbnail);
+        assert!(!config.ani_list.series_metadata.thumbnail);
+        assert!(!config.manga_baka.series_metadata.thumbnail);
+        assert!(!config.e_hentai.series_metadata.thumbnail);
+        // 只开 series：series 保留、book 关闭（「与」单向，需全新 fixture）
+        let mut config = config_with_thumbnails_on();
+        apply_cover_switches(
+            &mut config,
+            CoverFetchSwitches {
+                series: true,
+                books: false,
+            },
+        );
+        assert!(config.manga_dex.series_metadata.thumbnail);
+        assert!(!config.manga_dex.book_metadata.thumbnail);
+        assert!(config.yen_press.series_metadata.thumbnail);
+        assert!(!config.yen_press.book_metadata.thumbnail);
     }
 }
