@@ -681,16 +681,19 @@ impl BangumiMetadataMapper {
             })
             .collect();
 
-        // Kotlin: tags = sortedByDescending(count).take(15).filter(count>1).map(name).toSet()
-        let mut ranked: Vec<(i32, String)> = book
-            .tags
-            .iter()
-            .map(|t| (t.count, t.name.clone()))
-            .collect();
-        ranked.sort_by(|a, b| b.0.cmp(&a.0));
-        ranked.truncate(15);
-        ranked.retain(|(count, _)| *count > 1);
-        let tags: Vec<String> = ranked.into_iter().map(|(_, name)| name).collect();
+        // 与系列一致：白名单（内置+自定义）+ 非 statusTags → count 降序 → 动态阈值 →
+        // 不足 10 补前 10（Rust 扩展替代 Kotlin 的 take(15).filter(count>1)，书籍标签不过白名单
+        // 会把噪声/状态标签写入媒体服务器）
+        let tags: Vec<String> = if cfg.tags {
+            let raw: Vec<(String, i32)> = book
+                .tags
+                .iter()
+                .map(|t| (t.name.clone(), t.count))
+                .collect();
+            filter_bangumi_tags(&raw, &self.tag_whitelist)
+        } else {
+            Vec::new()
+        };
 
         let book_number = get_book_number(&book.name);
 
@@ -3029,6 +3032,33 @@ mod tests {
         assert_eq!(mk(Some("2019-07")), Some("2019-07-01".to_string()));
         assert_eq!(mk(Some("2019年7月25日")), Some("2019-07-25".to_string()));
         assert_eq!(mk(None), None);
+    }
+
+    /// 书籍标签与系列一致过白名单：非白名单标签（漫画/斗智）不写入
+    #[test]
+    fn book_tags_filtered_by_whitelist() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            load_bangumi_tag_whitelist(None),
+        );
+        let json = r#"{
+            "id": 182434, "name": "無能なナナ", "name_cn": null, "summary": null,
+            "date": null,
+            "tags": [
+                {"name": "漫画", "count": 197},
+                {"name": "超能力", "count": 112},
+                {"name": "推理", "count": 103},
+                {"name": "斗智", "count": 26}
+            ],
+            "infobox": []
+        }"#;
+        let subject: BangumiSubject = serde_json::from_str(json).unwrap();
+        let md = mapper.to_book_metadata(&subject, None);
+        // 白名单命中 超能力/推理（漫画/斗智 非白名单不引入）
+        assert_eq!(md.metadata.tags, vec!["超能力", "推理"]);
     }
 
     /// 繁简键变体：冊数/巻数/話數 等也能回退（archive 港台条目 infobox 键为繁体）。
