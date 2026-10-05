@@ -52,15 +52,32 @@ pub fn normalize_search_text(input: &str) -> String {
 /// 供除 ehentai 外的 provider 的搜索/匹配/tracker 入口使用
 /// （ehentai 在 provider 内部已有更完整的 parse_title/get_search_queries 处理）。
 ///
-/// 规则（仅当搜索词含多个 `[]` 段时生效）：
-/// 1. 去除全部 `()` / `[]` 段后仍有文本 → 该文本即实际搜索词
+/// 规则（《》提取无 `[]` 数量限制；其余规则仅当搜索词含多个 `[]` 段时生效；
+/// `（）` / `【】` 全角括号不做归一，直接作为独立括号段识别并排除）：
+/// 0. 含 `《》` 书名号 → 直接取其中内容（第一个非空）作为标题
+///    （如 `汉化组《正式标题》 [DL版] [123]` → `正式标题`）；
+/// 1. 去除全部 `()` / `<>` / `（）` / `【】` / `[]` 段后仍有文本 → 该文本即实际搜索词
 ///    （如 `(画集)[chin] 女騎士が転生したら ニートの召使いだった件 全編 [中国翻訳] [DL版] [3542432]`
 ///    → `女騎士が転生したら ニートの召使いだった件 全編`）；
-/// 2. 整名只由多个 `[]` 段组成 → 第一个 `[]` 内容不含 authorSeparator（正则）时取其内容，
-///    含 authorSeparator（作者列表段）时取第二个 `[]` 内容。
+/// 2. 去除 `()` / `<>` / `（）` / `【】` 段后整名只由多个 `[]` 段组成（开头允许这些
+///    括号的前导段，将被排除）→ 先循环剔除内容为媒体类型关键词（comic/comics/novel/novels/
+///    manga/mangas/webtoon/漫画/小说/轻小说/网文/卡通/条漫，忽略大小写与首尾空白）的
+///    前导 `[]` 段，再判断第一个 `[]` 内容：不含 authorSeparator（正则）时取其内容，
+///    含 authorSeparator（作者列表段）时取其后第一个 `[]` 内容。
 ///
-/// 不满足条件（无 `[]` 或仅一个 `[]`）返回 None，调用方沿用原搜索词。
+/// 不满足条件（无 `《》` 且无 `[]`，或仅一个 `[]`）返回 None，调用方沿用原搜索词。
 pub fn bracket_search_term(name: &str, author_separator: Option<&str>) -> Option<String> {
+    // 0. 《》书名号：取第一个非空 《...》 内容作为标题（须在 normalize_search_text
+    //    将 《》 映射为 <> 之前执行；本函数调用方均传原始名称）
+    if let Ok(re) = regex::Regex::new(r"《([^》]*)》") {
+        for caps in re.captures_iter(name) {
+            if let Some(title) = caps.get(1).map(|m| m.as_str().trim()) {
+                if !title.is_empty() {
+                    return Some(title.to_string());
+                }
+            }
+        }
+    }
     let groups: Vec<&str> = regex::Regex::new(r"\[([^\]]*)\]")
         .ok()?
         .captures_iter(name)
@@ -69,8 +86,8 @@ pub fn bracket_search_term(name: &str, author_separator: Option<&str>) -> Option
     if groups.len() < 2 {
         return None;
     }
-    // 1. 段外文本：`()` 与 `[]` 段全部去除后折叠空白
-    let without_brackets = regex::Regex::new(r"\([^)]*\)|\[[^\]]*\]")
+    // 1. 段外文本：`()` / `<>` / `（）` / `【】` / `[]` 段全部去除后折叠空白
+    let without_brackets = regex::Regex::new(r"\([^)]*\)|<[^>]*>|（[^）]*）|【[^】]*】|\[[^\]]*\]")
         .ok()?
         .replace_all(name, " ");
     let outside = without_brackets
@@ -80,16 +97,67 @@ pub fn bracket_search_term(name: &str, author_separator: Option<&str>) -> Option
     if !outside.is_empty() {
         return Some(outside);
     }
-    // 2. 整名只由 [] 段组成：第一个 [] 是否 authorSeparator（正则）命中
+    // 2. 整名只由括号段组成：循环剔除前导媒体类型关键词 [] 段（如 [漫画]、[Manga]）
+    let mut groups = groups.as_slice();
+    while !groups.is_empty() && is_media_type_keyword(groups[0]) {
+        groups = &groups[1..];
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    // 3. 第一个 [] 是否 authorSeparator（正则）命中
     let first_is_author_list = author_separator
         .and_then(|p| regex::Regex::new(p).ok())
         .map(|re| re.is_match(groups[0]))
         .unwrap_or(false);
     if first_is_author_list {
-        Some(groups[1].to_string())
+        groups.get(1).map(|s| s.to_string())
     } else {
         Some(groups[0].to_string())
     }
+}
+
+/// 媒体类型关键词（整名只由 [] 段组成时，前导命中段视为噪声剔除）。
+/// 比较时忽略 ASCII 大小写与首尾空白。
+const MEDIA_TYPE_KEYWORDS: &[&str] = &[
+    "comic",
+    "comics",
+    "novel",
+    "novels",
+    "manga",
+    "mangas",
+    "webtoon",
+    "hentai",
+    "漫画",
+    "漫畫",
+    "小说",
+    "小說",
+    "轻小说",
+    "輕小說",
+    "网文",
+    "網文",
+    "卡通",
+    "条漫",
+    "條漫",
+    "画集",
+    "畫集",
+    "同人",
+    "同人本",
+    "同人志",
+    "同人誌",
+    "一般向",
+    "成人向",
+    "限制级",
+    "限制級",
+    "全年龄",
+    "全年齡",
+];
+
+fn is_media_type_keyword(s: &str) -> bool {
+    let s = s.trim();
+    MEDIA_TYPE_KEYWORDS
+        .iter()
+        .any(|k| s.eq_ignore_ascii_case(k))
 }
 
 /// 去除拉丁字母的重音符号（对应 Kotlin `stripAccents`，基于 java.text.Normalizer NFD）。
@@ -222,6 +290,109 @@ mod tests {
                 None
             ),
             Some("默示录的四骑士".to_string())
+        );
+    }
+
+    #[test]
+    fn bracket_search_term_book_title_marks() {
+        // 含 《》 → 直接取其中内容作为标题（无 [] 数量限制）
+        assert_eq!(
+            bracket_search_term("汉化组《正式标题》 [DL版] [123]", Some("×")),
+            Some("正式标题".to_string())
+        );
+        // 无其他括号也可提取
+        assert_eq!(
+            bracket_search_term("汉化组《正式标题》", None),
+            Some("正式标题".to_string())
+        );
+        // 首个 《》 为空时取下一个非空
+        assert_eq!(
+            bracket_search_term("《》《标题》 [a] [b]", None),
+            Some("标题".to_string())
+        );
+        // 与其他噪声括号混合：《》 优先于 [] 解析
+        assert_eq!(
+            bracket_search_term(
+                "(画集)[chin]《女騎士が転生したら 全編》 [中国翻訳] [DL版]",
+                None
+            ),
+            Some("女騎士が転生したら 全編".to_string())
+        );
+        // 无 《》 或内容为空 → 不处理（沿用原搜索词）
+        assert_eq!(
+            bracket_search_term("女騎士が転生したら 全編", Some("×")),
+            None
+        );
+        assert_eq!(bracket_search_term("《》", None), None);
+    }
+
+    #[test]
+    fn bracket_search_term_media_type_keyword() {
+        // 第一个 [] 为媒体类型关键词 → 剔除后再解析
+        assert_eq!(
+            bracket_search_term("[漫画][默示录的四骑士][鈴木央]", Some("×")),
+            Some("默示录的四骑士".to_string())
+        );
+        // 关键词忽略大小写与首尾空白
+        assert_eq!(
+            bracket_search_term("[ Manga ][Title][Author]", Some("×")),
+            Some("Title".to_string())
+        );
+        assert_eq!(
+            bracket_search_term("[WEBTOON][Title]", None),
+            Some("Title".to_string())
+        );
+        // 剔除关键词后第一个 [] 命中 authorSeparator（作者列表段）→ 取其后第一个 [] 内容
+        assert_eq!(
+            bracket_search_term("[漫画][逢沢大介×東西][想要成为影之实力者！]", Some("×")),
+            Some("想要成为影之实力者！".to_string())
+        );
+        // 连续多个关键词段 → 全部剔除
+        assert_eq!(
+            bracket_search_term("[漫画][comic][Title]", None),
+            Some("Title".to_string())
+        );
+        // 关键词段全部剔除后无剩余 → 不处理（沿用原搜索词）
+        assert_eq!(bracket_search_term("[漫画][comic]", None), None);
+    }
+
+    #[test]
+    fn bracket_search_term_leading_bracket_prefix() {
+        // 开头允许 () / <> / （） / 【】 前导段：排除后按纯多个 [] 解析
+        assert_eq!(
+            bracket_search_term("(汉化组)[漫画][标题][作者]", Some("×")),
+            Some("标题".to_string())
+        );
+        assert_eq!(
+            bracket_search_term("<digital>[漫画][标题]", None),
+            Some("标题".to_string())
+        );
+        // 全角变体直接识别并排除（不做归一）：前导 （） / 【】 段视为噪声
+        assert_eq!(
+            bracket_search_term("（汉化组）[漫画][标题]", None),
+            Some("标题".to_string())
+        );
+        assert_eq!(
+            bracket_search_term("【汉化组】[漫画][标题]", None),
+            Some("标题".to_string())
+        );
+        // 段外文本中的 【】 段同样剔除
+        assert_eq!(
+            bracket_search_term("(画集)【chin】 标题 [中国翻訳] [DL版]", None),
+            Some("标题".to_string())
+        );
+        // 只由 【】 段组成（无 ASCII []）→ 不满足条件，不处理
+        assert_eq!(
+            bracket_search_term("【汉化组】【漫画】【标题】", None),
+            None
+        );
+        // 前导 () / <> + 第一个 [] 为作者列表段（authorSeparator 命中）→ 取其后第一个 [] 内容
+        assert_eq!(
+            bracket_search_term(
+                "(画集)<digital>[鈴木央×東西][女騎士が転生したら 全編][DL版]",
+                Some("×")
+            ),
+            Some("女騎士が転生したら 全編".to_string())
         );
     }
 
