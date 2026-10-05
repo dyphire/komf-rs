@@ -2386,11 +2386,11 @@ mod tests {
 
     #[test]
     fn no_default_regexes_except_symbol_normalize() {
-        // 未配置任何可选正则 → 仅 symbolNormalizeRegex 有默认值
+        // 未配置任何可选正则 → symbolNormalizeRegex 有默认值；authorSeparator 默认 "×"
         let c = cfg();
         assert_eq!(c.symbol_normalize_regex, "[:：•·․,，。'’?？!！~⁓～]");
         assert!(c.bracket_regex.is_none());
-        assert!(c.author_separator.is_none());
+        assert_eq!(c.author_separator.as_deref(), Some("×"));
         assert!(c.title_splitters.is_empty());
         assert!(c.char_mappings.is_empty());
         assert!(c.cleanup_regex.is_empty());

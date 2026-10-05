@@ -59,9 +59,9 @@ komga:
       searchTitleExtraction:
         enabled: false              # 括号式标题提取（对系列名生成额外搜索候选）
         bracketRegex: null          # 括号内容提取正则（如 "\[([^\[\]]+)\]"）
-        authorSeparator: null       # 作者识别分隔符正则（如 "×"）
+        authorSeparator: null       # 默认 "×"（作者识别分隔符正则；null=清空）
         titleSplitters: []          # 标题拆分符列表（支持正则，如 "_"）
-        symbolNormalizeRegex: '[:：•·․,，。''’?？!！~⁓～]' # 符号归一正则（匹配部分替换为空格）
+        symbolNormalizeRegex: '[:：•·․,，。\.．''’?？!！~⁓～-—]' # 符号归一正则（匹配部分替换为空格）
         charMappings: []            # 单字符映射表（如 [["／","/"]]，键支持正则）
         cleanupRegex: []            # 整名清洗链（按序替换为空）
       failedMatchCollectionName: null # Auto-Identify Library 匹配失败系列加入的收藏夹名（Rust 扩展）
@@ -139,9 +139,9 @@ stump:                                # Stump 媒体服务器（Rust 扩展）
       searchTitleExtraction:
         enabled: false
         bracketRegex: null
-        authorSeparator: null
+        authorSeparator: null       # 默认 "×"（null=清空）
         titleSplitters: []
-        symbolNormalizeRegex: '[:：•·․,，。''’?？!！~⁓～]'
+        symbolNormalizeRegex: '[:：•·․,，。\.．''’?？!！~⁓～-—]'
         charMappings: []
         cleanupRegex: []
       failedMatchCollectionName: null
@@ -218,9 +218,9 @@ kavita:
       searchTitleExtraction:
         enabled: false
         bracketRegex: null
-        authorSeparator: null
+        authorSeparator: null       # 默认 "×"（null=清空）
         titleSplitters: []
-        symbolNormalizeRegex: '[:：•·․,，。''’?？!！~⁓～]'
+        symbolNormalizeRegex: '[:：•·․,，。\.．''’?？!！~⁓～-—]'
         charMappings: []
         cleanupRegex: []
       failedMatchCollectionName: null

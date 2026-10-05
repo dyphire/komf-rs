@@ -230,7 +230,8 @@ pub struct SearchTitleExtractionConfig {
     pub enabled: bool,
     /// 括号内容提取正则（如 `\[([^\[\]]+)\]`）。不配置 → 不提取括号段
     pub bracket_regex: Option<String>,
-    /// 作者识别分隔符（**正则**，如 `×`、`[×xX]`）。括号段命中该正则 → 视为作者，拆开并排除出标题
+    /// 作者识别分隔符（**正则**，如 `×`、`[×xX]`）。括号段命中该正则 → 视为作者，拆开并排除出标题。
+    /// 默认 `×`；显式配置为 `null` 可清空（不启用作者识别）
     pub author_separator: Option<String>,
     /// 标题拆分符列表（如 `_`）。**支持正则**（如 `[_\-]`），编译失败退回字面量。提取出的标题段按每个分隔符拆分，每段一个候选
     pub title_splitters: Vec<String>,
@@ -249,7 +250,7 @@ impl Default for SearchTitleExtractionConfig {
             // 默认 false = 行为不变（仅保留原 remove_parentheses）；用户可显式开启。
             enabled: false,
             bracket_regex: None,
-            author_separator: None,
+            author_separator: Some("×".to_string()),
             title_splitters: Vec::new(),
             symbol_normalize_regex: default_symbol_normalize_regex(),
             char_mappings: Vec::new(),
