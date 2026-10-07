@@ -555,6 +555,13 @@ pub struct AniListConfig {
     pub tags_score_threshold: i32,
     #[serde(default = "default_tags_size_limit")]
     pub tags_size_limit: i32,
+    /// 标题语言优先级（english/romaji/native，越靠前越优先）。非空时系列主标题、
+    /// 搜索显示与 staff 姓名均按该优先级取语言版本，不再受登录态 userPreferred 限制；
+    /// 空（缺省）=保持原行为（登录时 userPreferred 生效，匿名 english 优先）。
+    /// 仅影响显示/写入，不参与匹配（staff 姓名映射：native→name.native，
+    /// romaji/english→name.full）。
+    #[serde(default)]
+    pub title_language_priority: Vec<String>,
 }
 
 fn default_tags_score_threshold() -> i32 {
@@ -577,6 +584,7 @@ impl Default for AniListConfig {
             artist_roles: default_artist_roles(),
             tags_score_threshold: default_tags_score_threshold(),
             tags_size_limit: default_tags_size_limit(),
+            title_language_priority: Vec::new(),
         }
     }
 }

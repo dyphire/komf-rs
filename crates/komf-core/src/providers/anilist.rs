@@ -30,7 +30,7 @@ query ($search: String, $type: MediaType, $perPage: Int, $formats: [MediaFormat!
       genres
       meanScore
       siteUrl
-      staff { edges { role node { name { full userPreferred } } } }
+      staff { edges { role node { name { full native userPreferred } } } }
       studios { edges { node { name } isMain } }
       tags { name rank }
     }
@@ -54,7 +54,7 @@ query ($id: Int) {
     genres
     meanScore
     siteUrl
-    staff { edges { role node { name { full userPreferred } } } }
+    staff { edges { role node { name { full native userPreferred } } } }
     studios { edges { node { name } isMain } }
     tags { name rank }
   }
@@ -173,8 +173,10 @@ pub struct AniListStaff {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AniListStaffName {
-    #[serde(default)]
     pub full: String,
+    /// 母语姓名（如日文原名）；部分条目缺省。
+    #[serde(default)]
+    pub native: Option<String>,
     /// 账号显示语言偏好下的姓名（如中文用户返回 native 名）；匿名默认 romaji。
     #[serde(default)]
     pub user_preferred: Option<String>,
@@ -339,6 +341,8 @@ pub struct AniListMetadataMapper {
     tags_score_threshold: i32,
     /// OAuth 登录态（登录时 userPreferred 生效；未登录保持原有 english 优先行为）。
     oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+    /// 标题语言优先级（english/romaji/native，小写归一）。非空时优先于 userPreferred。
+    title_language_priority: Vec<String>,
 }
 
 impl AniListMetadataMapper {
@@ -349,6 +353,7 @@ impl AniListMetadataMapper {
         tags_size_limit: i32,
         tags_score_threshold: i32,
         oauth: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
+        title_language_priority: Vec<String>,
     ) -> Self {
         Self {
             metadata_config,
@@ -357,11 +362,49 @@ impl AniListMetadataMapper {
             tags_size_limit: tags_size_limit.max(0) as usize,
             tags_score_threshold,
             oauth,
+            title_language_priority: title_language_priority
+                .iter()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .filter(|l| matches!(l.as_str(), "english" | "romaji" | "native"))
+                .collect(),
         }
     }
 
+    /// staff 姓名解析：titleLanguagePriority 非空时按配置语言顺序取——
+    /// native → name.native，romaji/english → name.full（AniList 人名无独立
+    /// english 版本，full 即拉丁转写）；优先级全不满足回落 full。
+    /// 未配置时保持原行为：userPreferred 优先（账号显示语言偏好），缺失回落 full。
+    fn staff_name(&self, name: &AniListStaffName) -> String {
+        if !self.title_language_priority.is_empty() {
+            for lang in &self.title_language_priority {
+                match lang.as_str() {
+                    "native" => {
+                        if let Some(n) = name.native.as_deref().filter(|s| !s.is_empty()) {
+                            return n.to_string();
+                        }
+                    }
+                    "romaji" | "english" => {
+                        if !name.full.is_empty() {
+                            return name.full.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return name.full.clone();
+        }
+        name.user_preferred
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| name.full.clone())
+    }
+
     /// 是否启用 userPreferred（仅 OAuth 登录后生效；匿名保持原有行为）。
+    /// titleLanguagePriority 非空时配置优先，userPreferred 完全不参与。
     fn prefer_user_preferred(&self) -> bool {
+        if !self.title_language_priority.is_empty() {
+            return false;
+        }
         self.oauth
             .as_ref()
             .map(|o| o.status(crate::oauth::OAuthProvider::Anilist).logged_in)
@@ -401,7 +444,12 @@ impl AniListMetadataMapper {
                 language: Some("ja".into()),
             });
         }
-        if self.prefer_user_preferred() {
+        if !self.title_language_priority.is_empty() {
+            // titleLanguagePriority：按配置语言顺序稳定重排（语言元数据不变，
+            // 后处理 seriesTitleLanguage / 备选标题排序不受影响）；未列出的语言
+            // 保持原相对顺序追加在后。
+            reorder_by_language_priority(&mut titles, &self.title_language_priority);
+        } else if self.prefer_user_preferred() {
             promote_user_preferred(&mut titles, media.title.user_preferred.as_deref());
         }
         // title 关闭仅表示不写入主标题（title 字段）；titles 列表的 type/language
@@ -431,7 +479,9 @@ impl AniListMetadataMapper {
         };
 
         let authors = if cfg.authors {
-            map_authors(media, &self.author_roles, &self.artist_roles)
+            map_authors(media, &self.author_roles, &self.artist_roles, &|n| {
+                self.staff_name(n)
+            })
         } else {
             Vec::new()
         };
@@ -499,10 +549,16 @@ impl AniListMetadataMapper {
     }
 
     pub fn to_series_search_result(&self, media: &AniListMedia) -> SeriesSearchResult {
-        // title = english ?: romaji ?: native；userPreferred 仅在
-        // OAuth 登录后优先（未登录保持原有 english 优先行为）。仅用于搜索结果显示，
+        // title 选择：titleLanguagePriority 非空时按配置语言顺序取首个可用版本
+        // （不再受登录态 userPreferred 限制）；否则 userPreferred 仅在 OAuth 登录后
+        // 优先（未登录保持原有 english 优先行为）。仅用于搜索结果显示，
         // 不影响匹配（匹配仍基于全量语言标题）。
-        let title = if self.prefer_user_preferred() {
+        let title = if !self.title_language_priority.is_empty() {
+            self.title_language_priority
+                .iter()
+                .find_map(|lang| title_for_language(media, lang))
+                .unwrap_or_default()
+        } else if self.prefer_user_preferred() {
             media
                 .title
                 .user_preferred
@@ -566,6 +622,41 @@ fn promote_user_preferred(titles: &mut Vec<SeriesTitle>, user_preferred: Option<
     }
 }
 
+/// 配置语言名（english/romaji/native，已小写归一）→ titles 语言标签（en/ja-ro/ja）。
+fn language_tag(lang: &str) -> &'static str {
+    match lang {
+        "english" => "en",
+        "romaji" => "ja-ro",
+        "native" => "ja",
+        _ => "",
+    }
+}
+
+/// 按 titleLanguagePriority 稳定重排 titles：优先级语言依次提前（保持各语言
+/// 内部原相对顺序），未列出的语言按原顺序追加在后。
+fn reorder_by_language_priority(titles: &mut Vec<SeriesTitle>, priority: &[String]) {
+    let mut out: Vec<SeriesTitle> = Vec::with_capacity(titles.len());
+    for lang in priority {
+        let tag = language_tag(lang);
+        let (hit, rest): (Vec<_>, Vec<_>) =
+            titles.drain(..).partition(|t| t.language.as_deref() == Some(tag));
+        out.extend(hit);
+        *titles = rest;
+    }
+    out.append(titles);
+    *titles = out;
+}
+
+/// 取指定语言（english/romaji/native）的标题文本。
+fn title_for_language(media: &AniListMedia, lang: &str) -> Option<String> {
+    match lang {
+        "english" => media.title.english.clone(),
+        "romaji" => media.title.romaji.clone(),
+        "native" => media.title.native.clone(),
+        _ => None,
+    }
+}
+
 fn strip_parenthesized(role: &str) -> String {
     // Kotlin extractNameAndRole: role.replace("\\([^)]*\\)".toRegex(), "")
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -609,11 +700,12 @@ fn map_status(status: &str) -> Option<SeriesStatus> {
 /// Kotlin AniListMetadataMapper.toSeriesMetadata 的作者展开：
 /// 角色去括号后必须在 allowedRoles 白名单；"Story & Art" → artistRoles + authorRoles 各映射一个；
 /// "Story"/"Original Story"/"Original Creator" → authorRoles；"Art"/"Illustration" → artistRoles。
-/// 姓名优先 userPreferred（账号显示语言偏好），缺失回落 full —— 仅影响写入/显示，不参与匹配。
+/// 姓名解析见 `AniListMetadataMapper::staff_name` —— 仅影响写入/显示，不参与匹配。
 fn map_authors(
     media: &AniListMedia,
     author_roles: &[AuthorRole],
     artist_roles: &[AuthorRole],
+    staff_name: &dyn Fn(&AniListStaffName) -> String,
 ) -> Vec<Author> {
     media
         .staff
@@ -625,12 +717,7 @@ fn map_authors(
             if !ALLOWED_ROLES.contains(&role.as_str()) {
                 return None;
             }
-            let name = edge
-                .node
-                .name
-                .user_preferred
-                .clone()
-                .unwrap_or_else(|| edge.node.name.full.clone());
+            let name = staff_name(&edge.node.name);
             let authors: Vec<Author> = match role.as_str() {
                 "Story & Art" => artist_roles
                     .iter()
@@ -720,6 +807,7 @@ pub fn create_provider(
             config.tags_size_limit,
             config.tags_score_threshold,
             oauth_manager.clone(),
+            config.title_language_priority.clone(),
         ),
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
@@ -904,6 +992,7 @@ mod tests {
             15,
             60,
             None,
+            Vec::new(),
         )
     }
 
@@ -917,6 +1006,19 @@ mod tests {
             15,
             60,
             Some(oauth),
+            Vec::new(),
+        )
+    }
+
+    fn mapper_with_priority(priority: Vec<&str>) -> AniListMetadataMapper {
+        AniListMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            15,
+            60,
+            None,
+            priority.iter().map(|s| s.to_string()).collect(),
         )
     }
 
@@ -955,6 +1057,7 @@ mod tests {
             15,
             60,
             None,
+            Vec::new(),
         );
         let out = mapper.to_series_metadata(&media, None);
         assert_eq!(out.metadata.titles.len(), 3);
@@ -1057,6 +1160,48 @@ mod tests {
         assert_eq!(names2, vec!["Dude"]);
     }
 
+    /// titleLanguagePriority 对 staff 姓名同样生效：native → name.native，
+    /// romaji/english → name.full；不再看 userPreferred。
+    #[test]
+    fn staff_name_follows_title_language_priority() {
+        let json = r#"{"id":1,"title":{"romaji":"x"},"staff":{"edges":[
+            {"role":"Story","node":{"name":{"full":"Eiichirou Oda","native":"尾田栄一郎","userPreferred":"Eiichirou Oda"}}},
+            {"role":"Art","node":{"name":{"full":"Dude","native":"デュード","userPreferred":"デュード"}}}
+        ]}}"#;
+        let media: AniListMedia = serde_json::from_str(json).unwrap();
+        // native 优先 → 两个作者都用 native 名（userPreferred 被忽略）
+        let out = mapper_with_priority(vec!["native", "romaji"]).to_series_metadata(&media, None);
+        let names: Vec<_> = out
+            .metadata
+            .authors
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["尾田栄一郎", "デュード"]);
+        // romaji 优先 → 用 full（拉丁转写）
+        let out = mapper_with_priority(vec!["romaji", "native"]).to_series_metadata(&media, None);
+        let names: Vec<_> = out
+            .metadata
+            .authors
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Eiichirou Oda", "Dude"]);
+        // native 缺失 → 回落 full
+        let json2 = r#"{"id":2,"title":{"romaji":"x"},"staff":{"edges":[
+            {"role":"Story","node":{"name":{"full":"Somebody","userPreferred":"Somebody"}}}
+        ]}}"#;
+        let media2: AniListMedia = serde_json::from_str(json2).unwrap();
+        let out2 = mapper_with_priority(vec!["native"]).to_series_metadata(&media2, None);
+        let names2: Vec<_> = out2
+            .metadata
+            .authors
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names2, vec!["Somebody"]);
+    }
+
     #[test]
     fn score_uses_mean_score_divided_by_ten() {
         let json = r#"{"id":1,"title":{"romaji":"x"},"meanScore":75}"#;
@@ -1071,9 +1216,50 @@ mod tests {
             15,
             60,
             None,
+            Vec::new(),
         );
         let out = mapper.to_series_metadata(&media, None);
         assert_eq!(out.metadata.score, Some(7.5));
+    }
+
+    /// titleLanguagePriority 非空：主标题按配置语言顺序重排（语言元数据不变、
+    /// 全量标题保留），且不再受登录态 userPreferred 限制（userPreferred 被忽略）。
+    #[test]
+    fn title_language_priority_overrides_user_preferred() {
+        let json = r#"{"id":1,"title":{"romaji":"ROMAJI","english":"English Title","native":"ネイティブ","userPreferred":"English Title"}}"#;
+        let media: AniListMedia = serde_json::from_str(json).unwrap();
+        let mapper = mapper_with_priority(vec!["native", "romaji", "english"]);
+        let out = mapper.to_series_metadata(&media, None);
+        let t: Vec<_> = out
+            .metadata
+            .titles
+            .iter()
+            .map(|t| (t.name.as_str(), t.r#type, t.language.as_deref()))
+            .collect();
+        assert_eq!(t[0], ("ネイティブ", Some(TitleType::Native), Some("ja")));
+        assert_eq!(t[1], ("ROMAJI", Some(TitleType::Romaji), Some("ja-ro")));
+        assert_eq!(
+            t[2],
+            ("English Title", Some(TitleType::Localized), Some("en"))
+        );
+        assert_eq!(out.metadata.title.as_ref().unwrap().name, "ネイティブ");
+        // 搜索显示同优先级；userPreferred（English Title）被忽略
+        assert_eq!(mapper.to_series_search_result(&media).title, "ネイティブ");
+    }
+
+    /// titleLanguagePriority 部分命中 + 非法值忽略：缺失的语言保持原顺序在后；
+    /// 配置值大小写/空白归一，未知值丢弃。
+    #[test]
+    fn title_language_priority_partial_hit_and_invalid_values() {
+        let json = r#"{"id":1,"title":{"romaji":"ROMAJI","native":"ネイティブ"}}"#;
+        let media: AniListMedia = serde_json::from_str(json).unwrap();
+        let mapper = mapper_with_priority(vec![" Native ", "bogus", "ENGLISH"]);
+        let out = mapper.to_series_metadata(&media, None);
+        let names: Vec<_> = out.metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        // native 提前；english 无值跳过；romaji 保持原位次在后
+        assert_eq!(names, vec!["ネイティブ", "ROMAJI"]);
+        assert_eq!(out.metadata.title.as_ref().unwrap().name, "ネイティブ");
+        assert_eq!(mapper.to_series_search_result(&media).title, "ネイティブ");
     }
 
     #[test]

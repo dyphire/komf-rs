@@ -439,6 +439,8 @@ pub struct AniListConfigDto {
     pub artist_roles: Option<Vec<KomfAuthorRole>>,
     pub tags_score_threshold: Option<i32>,
     pub tags_size_limit: Option<i32>,
+    /// 标题语言优先级（english/romaji/native）；非空时优先于登录态 userPreferred。
+    pub title_language_priority: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

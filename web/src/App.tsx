@@ -284,15 +284,24 @@ function PairRows(props: {
     </div>
   );
 }
-/** 逗号分隔列表：回写时按逗号切分、去空白、过滤空项 */
+/** 逗号分隔列表：输入期间保留原始字符串草稿（逗号/空格/未完成片段不被即时清洗），
+ * 失焦或回车时才按逗号切分、去空白、过滤空项回写数组 */
 function CommaField(props: { value: any; onChange: (v: string[]) => void; placeholder?: string; norm?: (x: string) => string }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (v: string) => {
+    setDraft(null);
+    props.onChange(v.split(',').map((x) => (props.norm ? props.norm(x) : x).trim()).filter(Boolean));
+  };
   return (
-    <Text
-      value={(props.value ?? []).join(',')}
+    <input
+      type="text"
+      value={draft ?? (props.value ?? []).join(',')}
       placeholder={props.placeholder}
-      onChange={(v) =>
-        props.onChange(v.split(',').map((x) => (props.norm ? props.norm(x) : x).trim()).filter(Boolean))
-      }
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={(e) => commit(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit((e.target as HTMLInputElement).value);
+      }}
     />
   );
 }
@@ -412,6 +421,7 @@ function ProviderList(props: {
                     <>
                       <Field label={t('f.tagsScoreThreshold')}><input type="number" value={cur.tagsScoreThreshold ?? 60} onChange={(e) => upd([...base, 'tagsScoreThreshold'], Number(e.target.value))} /></Field>
                       <Field label={t('f.tagsSizeLimit')}><input type="number" value={cur.tagsSizeLimit ?? 15} onChange={(e) => upd([...base, 'tagsSizeLimit'], Number(e.target.value))} /></Field>
+                      <Field label={t('f.titleLanguagePriority')}><CommaField value={cur.titleLanguagePriority} onChange={(v) => upd([...base, 'titleLanguagePriority'], v)} placeholder={t('ph.titleLanguagePriority')} /></Field>
                     </>
                   )}
                   {key === 'mangaBaka' && (

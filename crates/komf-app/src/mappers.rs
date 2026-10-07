@@ -522,6 +522,7 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             ),
             tags_score_threshold: Some(config.ani_list.tags_score_threshold),
             tags_size_limit: Some(config.ani_list.tags_size_limit),
+            title_language_priority: Some(config.ani_list.title_language_priority.clone()),
         }),
         mal: Some(to_provider_dto(&config.mal)),
         comic_vine: Some(to_provider_dto(&config.comic_vine)),
@@ -1521,6 +1522,10 @@ fn from_anilist_dto(
             .tags_score_threshold
             .unwrap_or(base.tags_score_threshold),
         tags_size_limit: dto.tags_size_limit.unwrap_or(base.tags_size_limit),
+        title_language_priority: dto
+            .title_language_priority
+            .clone()
+            .unwrap_or_else(|| base.title_language_priority.clone()),
     }
 }
 

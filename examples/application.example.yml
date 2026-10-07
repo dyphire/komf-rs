@@ -314,6 +314,11 @@ metadataProviders:
       enabled: false
       tagsScoreThreshold: 60        # 标签评分阈值（≥ 该值的标签才采用）
       tagsSizeLimit: 15             # 标签数量上限
+      titleLanguagePriority: []     # 标题语言优先级（english/romaji/native，越靠前越优先）；
+                                    # 非空时系列主标题/搜索显示/staff 姓名按该优先级取语言版本，
+                                    # 不再受登录态 userPreferred 限制；空（缺省）=登录后按账号
+                                    # userPreferred（staff 姓名：native→name.native，
+                                    # romaji/english→name.full）
     mal:
       priority: 20
       enabled: false                # 需 malClientId
