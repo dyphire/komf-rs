@@ -301,7 +301,7 @@ pub struct BangumiMetadataMapper {
     /// 简繁归一化判重（t2s/s2t 双向；none 时退化为精确判重）
     chinese_t2s: ChineseConverter,
     chinese_s2t: ChineseConverter,
-    /// seriesTitleLanguage 联动：非中文时作者/出版社不查 name_cn（用原名）
+    /// staffChineseNames 开关：false（缺省）时作者/出版社不查 name_cn（用原名）
     use_chinese_names: bool,
 }
 
@@ -323,7 +323,7 @@ impl BangumiMetadataMapper {
         )
     }
 
-    /// 指定是否查 name_cn（seriesTitleLanguage 联动；create_provider 按配置传入）
+    /// 指定是否查 name_cn（archive.staffChineseNames；create_provider 按配置传入）
     pub fn with_chinese_names(
         series_metadata_config: crate::config::SeriesMetadataConfig,
         book_metadata_config: crate::config::BookMetadataConfig,
@@ -1204,14 +1204,24 @@ fn media_type_platform(media_type: crate::model::MediaType) -> Option<&'static s
     }
 }
 
-/// person 显示名：use_chinese_names 时 name_cn 优先（非空），否则日文原名。
+/// person 显示名候选清理：与在线 infobox 作者清理（clean_author_names）同一套
+/// 规则（剥括号注记、分隔符拆分、trim、去空）；person 是单人实体，只取首个非空项。
+fn cleaned_person_name(raw: &str) -> Option<String> {
+    clean_author_names(raw).into_iter().next()
+}
+
+/// person 显示名：笔名（别名块「笔名|xxx」子项）最高优先；其后 use_chinese_names
+/// 时 name_cn 优先（非空），否则日文原名。所有候选统一过 cleaned_person_name。
 fn person_display_name(p: &PersonInfo, use_chinese_names: bool) -> String {
+    if let Some(pn) = p.pen_name.as_deref().and_then(cleaned_person_name) {
+        return pn;
+    }
     if use_chinese_names {
-        if let Some(cn) = p.name_cn.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(cn) = p.name_cn.as_deref().and_then(cleaned_person_name) {
             return cn.to_string();
         }
     }
-    p.name.clone()
+    cleaned_person_name(&p.name).unwrap_or_else(|| p.name.clone())
 }
 
 /// 出版社显示名：persons 中按 name 或 name_cn 匹配时用 name_cn 优先（离线扩展），
@@ -1480,6 +1490,10 @@ fn extract_authors(
     authors
 }
 
+/// bangumi 人名统一清理链：剥括号注记（《》【】()[]，如「（原作）」），
+/// 按 `/ ／ 、 _ → ・ : × & , ，` 拆分多值，trim + 去空。在线 infobox 作者与
+/// 离线 person 显示名（cleaned_person_name 取首个非空项）共用；出版社多值拆分
+/// 保持独立的 PUBLISHER_SPLIT_CHARS（对齐脚本行为，不剥括号注记）。
 fn clean_author_names(value: &str) -> Vec<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -1515,7 +1529,6 @@ pub fn create_provider(
     _work_dir: Option<&std::path::Path>,
     oauth_manager: Option<std::sync::Arc<crate::oauth::OAuthManager>>,
     archive: Option<std::sync::Arc<BangumiArchiveService>>,
-    series_title_language: Option<String>,
 ) -> Option<BangumiMetadataProvider> {
     let provider = &config.provider;
     if !provider.enabled {
@@ -1547,16 +1560,10 @@ pub fn create_provider(
     // bangumi/Archive 离线数据源：全局唯一实例由 `ProvidersModule::with_oauth` 创建并传入
     // （数据文件全局一份；库级容器共享同一服务。provider 禁用但 archive 启用时，服务经
     // `MetadataProvidersContainer` 侧通道注册，状态徽标 / 手动更新仍可用）。
-    // bangumi/Archive 离线数据源：全局唯一实例由 `ProvidersModule::with_oauth` 创建并传入
-    // （数据文件全局一份；库级容器共享同一服务。provider 禁用但 archive 启用时，服务经
-    // `MetadataProvidersContainer` 侧通道注册，状态徽标 / 手动更新仍可用）。
-    // seriesTitleLanguage 联动（ProvidersModule 传入的全局主标题语言，与 MangaDex
-    // 同源）：中文（zh/zh-hans/zh-tw/...）→ 作者/出版社查 name_cn；
-    // None 或非中文（ja/en/...）→ 用原名（不查 name_cn）。
-    let use_chinese_names = series_title_language
-        .as_deref()
-        .map(|l| l.to_ascii_lowercase().starts_with("zh"))
-        .unwrap_or(false);
+    // 作者/出版社中文名：archive.staffChineseNames 独立开关（缺省 false=日文原名，
+    // 不查 name_cn；true → 离线 person 实体 name_cn 优先）。与 seriesTitleLanguage
+    // 互不影响——系列标题语言由后处理阶段单独应用。
+    let use_chinese_names = config.archive.staff_chinese_names;
     Some(BangumiMetadataProvider {
         client: BangumiClient::new(client, oauth_manager),
         metadata_mapper: BangumiMetadataMapper::with_chinese_names(
@@ -2220,6 +2227,7 @@ mod tests {
                 person_id: 1,
                 name: "古屋庵".to_string(),
                 name_cn: Some("古屋庵".to_string()),
+                pen_name: None,
                 person_type: Some(1),
                 career: vec!["mangaka".to_string()],
                 position: Some(2002),
@@ -2230,6 +2238,7 @@ mod tests {
                 person_id: 2,
                 name: "るーすぼーい".to_string(),
                 name_cn: Some("螺丝".to_string()),
+                pen_name: None,
                 person_type: Some(1),
                 career: vec!["writer".to_string()],
                 position: Some(2007),
@@ -2257,6 +2266,7 @@ mod tests {
             person_id: 3,
             name: "藤本タツキ".to_string(),
             name_cn: Some("藤本树".to_string()),
+            pen_name: None,
             person_type: Some(1),
             career: vec!["mangaka".to_string()],
             position: Some(2001),
@@ -2612,6 +2622,7 @@ mod tests {
             person_id: pid,
             name: name.to_string(),
             name_cn: None,
+            pen_name: None,
             person_type: Some(1),
             career: Vec::new(),
             position: Some(pos),
@@ -3430,6 +3441,7 @@ mod tests {
                 person_id: 23155,
                 name: "藤本タツキ".to_string(),
                 name_cn: Some("藤本树".to_string()),
+                pen_name: None,
                 person_type: Some(1),
                 career: vec!["mangaka".to_string()],
                 position: Some(2001),
@@ -3440,6 +3452,7 @@ mod tests {
                 person_id: 588,
                 name: "白泉社".to_string(),
                 name_cn: Some("白泉社".to_string()),
+                pen_name: None,
                 person_type: Some(2),
                 career: Vec::new(),
                 position: Some(2004),
@@ -3450,6 +3463,7 @@ mod tests {
                 person_id: 7611,
                 name: "尖端出版".to_string(),
                 name_cn: Some("台湾尖端".to_string()),
+                pen_name: None,
                 person_type: Some(2),
                 career: Vec::new(),
                 position: Some(2004),
@@ -3517,6 +3531,7 @@ mod tests {
             person_id: 1954,
             name: "週刊少年ジャンプ".to_string(),
             name_cn: None,
+            pen_name: None,
             person_type: Some(2),
             career: Vec::new(),
             position: Some(2005),
@@ -3640,8 +3655,8 @@ mod tests {
         );
     }
 
-    /// seriesTitleLanguage 非中文（None/ja/en）→ 作者/出版社不查 name_cn（用原名）；
-    /// 中文（zh*）→ 查 name_cn。产品默认（None）为原名。
+    /// archive.staffChineseNames 开关：false（缺省）→ 作者/出版社不查 name_cn（用原名）；
+    /// true → 查 name_cn。与 seriesTitleLanguage 无关。
     #[test]
     fn offline_persons_original_names_when_language_not_chinese() {
         let subject: BangumiSubject = serde_json::from_str(
@@ -3653,6 +3668,7 @@ mod tests {
                 person_id: 10,
                 name: "尖端出版".to_string(),
                 name_cn: Some("台湾尖端".to_string()),
+                pen_name: None,
                 person_type: Some(2),
                 career: Vec::new(),
                 position: Some(2004),
@@ -3663,6 +3679,7 @@ mod tests {
                 person_id: 11,
                 name: "藤本タツキ".to_string(),
                 name_cn: Some("藤本树".to_string()),
+                pen_name: None,
                 person_type: Some(1),
                 career: vec!["mangaka".to_string()],
                 position: Some(2001),
@@ -3672,7 +3689,7 @@ mod tests {
         ];
         let cfg = crate::config::SeriesMetadataConfig::default();
         let book = crate::config::BookMetadataConfig::default();
-        // 非中文（默认 None）→ 原名
+        // 开关关闭（缺省 false）→ 原名
         let mapper_off = BangumiMetadataMapper::with_chinese_names(
             cfg.clone(),
             book.clone(),
@@ -3687,7 +3704,7 @@ mod tests {
             md_off.metadata.publisher.as_ref().map(|p| p.name.as_str()),
             Some("尖端出版")
         );
-        // 中文（zh*）→ name_cn
+        // 开关开启 → name_cn
         let mapper_cn = BangumiMetadataMapper::with_chinese_names(
             cfg,
             book,
@@ -3702,6 +3719,60 @@ mod tests {
             md_cn.metadata.publisher.as_ref().map(|p| p.name.as_str()),
             Some("台湾尖端")
         );
+    }
+
+    /// 笔名（别名块「笔名|xxx」子项）最高优先：无论 staffChineseNames 开关状态
+    /// 都优先于 name_cn / 原名；显示名统一过 cleaned_person_name（剥括号注记、
+    /// 分隔符拆分取首个非空）；无笔名时保持原优先级。
+    #[test]
+    fn offline_person_pen_name_takes_priority() {
+        let subject: BangumiSubject = serde_json::from_str(
+                r#"{"id":9,"name":"Z","name_cn":null,"summary":null,"tags":[],"infobox":[{"key":"作者","value":"藤本タツキ"},{"key":"出版社","value":"尖端出版"}]}"#,
+            )
+            .unwrap();
+        let persons = vec![
+            PersonInfo {
+                person_id: 11,
+                name: "藤本タツキ".to_string(),
+                name_cn: Some("藤本树".to_string()),
+                // 带括号注记的笔名 → 清理后为「藤本タツキ」，仍优先于 name_cn
+                pen_name: Some("藤本タツキ（笔名）".to_string()),
+                person_type: Some(1),
+                career: vec!["mangaka".to_string()],
+                position: Some(2001),
+                appear_eps: String::new(),
+                aliases: Vec::new(),
+            },
+            PersonInfo {
+                person_id: 10,
+                name: "尖端出版".to_string(),
+                name_cn: Some("台湾尖端".to_string()),
+                pen_name: None,
+                person_type: Some(2),
+                career: Vec::new(),
+                position: Some(2004),
+                appear_eps: String::new(),
+                aliases: Vec::new(),
+            },
+        ];
+        let cfg = crate::config::SeriesMetadataConfig::default();
+        let book = crate::config::BookMetadataConfig::default();
+        for use_cn in [false, true] {
+            let mapper = BangumiMetadataMapper::with_chinese_names(
+                cfg.clone(),
+                book.clone(),
+                vec![AuthorRole::Writer],
+                vec![AuthorRole::Penciller],
+                Vec::new(),
+                use_cn,
+            );
+            let md = mapper.to_series_metadata_persons(&subject, &[], None, &persons);
+            // 笔名优先于 name_cn（开关开）与原名（开关关），且括号注记被剥掉
+            assert_eq!(md.metadata.authors[0].name, "藤本タツキ");
+            // 无笔名的出版社 person 仍按开关走 name_cn / 原名
+            let publisher = md.metadata.publisher.as_ref().map(|p| p.name.as_str());
+            assert_eq!(publisher, if use_cn { Some("台湾尖端") } else { Some("尖端出版") });
+        }
     }
 
     /// 评分标签：score 配置开启且评分>0 时追加 "score:N"（Math.round）

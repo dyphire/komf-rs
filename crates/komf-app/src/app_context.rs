@@ -94,8 +94,9 @@ fn build_state(
     let work_dir = work_dir_from(config_path);
     let db_work_dir = work_dir.join("mangabaka");
 
-    // MangaDex 标题语言 / MangaBaka 主标题 / bangumi 作者出版社中文名共用的
-    // 主标题语言：取 komga.metadataUpdate 的值，库级 postProcessing 可覆盖全局。
+    // MangaDex 标题语言 / MangaBaka 主标题共用的主标题语言：
+    // 取 komga.metadataUpdate 的值，库级 postProcessing 可覆盖全局。
+    // （bangumi 作者/出版社中文名已由 archive.staffChineseNames 独立开关控制，不再共用。）
     let series_title_languages = {
         let mu = &config.komga.metadata_update;
         komf_core::providers::SeriesTitleLanguages {

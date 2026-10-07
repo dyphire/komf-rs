@@ -567,6 +567,7 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
                 dir: config.bangumi.archive.dir.clone(),
                 update_interval_hours: Some(config.bangumi.archive.update_interval_hours),
                 idle_release_secs: config.bangumi.archive.idle_release_secs,
+                staff_chinese_names: Some(config.bangumi.archive.staff_chinese_names),
             }),
         }),
         hentag: Some(default_provider_config_dto()),
@@ -1282,6 +1283,9 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
                     idle_release_secs: a
                         .idle_release_secs
                         .or(base.bangumi.archive.idle_release_secs),
+                    staff_chinese_names: a
+                        .staff_chinese_names
+                        .unwrap_or(base.bangumi.archive.staff_chinese_names),
                 })
                 .unwrap_or_else(|| base.bangumi.archive.clone()),
         },

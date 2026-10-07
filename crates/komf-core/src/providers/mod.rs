@@ -775,7 +775,6 @@ fn create_metadata_providers(
         database_work_dir,
         oauth_manager.clone(),
         bangumi_provider_archive,
-        series_title_language.clone(),
     ) {
         bangumi_got_archive = config.bangumi.archive.enabled;
         providers.push(RegisteredProvider {

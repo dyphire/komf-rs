@@ -428,6 +428,7 @@ function ProviderList(props: {
                       <Field label={t('f.archiveDir')}><TriText value={cur.archive?.dir} onChange={(v) => upd([...base, 'archive', 'dir'], v)} /></Field>
                       <Field label={t('f.archiveUpdateIntervalHours')}><input type="number" min="0" value={cur.archive?.updateIntervalHours ?? 168} onChange={(e) => upd([...base, 'archive', 'updateIntervalHours'], Number(e.target.value))} /></Field>
                       <Field label={t('f.archiveIdleReleaseSecs')}><input type="number" min="0" value={cur.archive?.idleReleaseSecs ?? 60} onChange={(e) => upd([...base, 'archive', 'idleReleaseSecs'], Number(e.target.value))} /></Field>
+                      <SwitchField label={t('f.staffChineseNames')} value={cur.archive?.staffChineseNames} onChange={(v) => upd([...base, 'archive', 'staffChineseNames'], v)} />
                     </>
                   )}
                   {key === 'bookWalker' && (

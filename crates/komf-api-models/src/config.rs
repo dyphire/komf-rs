@@ -418,6 +418,8 @@ pub struct BangumiArchiveConfigDto {
     pub dir: Option<String>,
     pub update_interval_hours: Option<u64>,
     pub idle_release_secs: Option<u64>,
+    /// 作者/出版社中文名开关（缺省 false=日文原名）；独立于 seriesTitleLanguage。
+    pub staff_chinese_names: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

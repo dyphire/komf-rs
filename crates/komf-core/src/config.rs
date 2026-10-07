@@ -166,9 +166,7 @@ where
 
 /// Bangumi 配置：平铺继承 ProviderConfig 通用字段（兼容既有 yaml），
 /// 另含 archive 离线数据源配置段。
-/// 作者/出版社中文名联动：不复读配置字段，由 ProvidersModule 传入的全局
-/// 主标题语言（komga.metadataUpdate.default.postProcessing.seriesTitleLanguage，
-/// 与 MangaDex 同源）在 create_provider 直接判定。
+/// 作者/出版社中文名（archive.staffChineseNames，缺省 false=日文原名）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BangumiConfig {
@@ -205,6 +203,10 @@ pub struct BangumiArchiveConfig {
     /// 不再需要 mmap 空闲释放）。保留字段以兼容既有 application.yml。
     #[serde(default = "default_archive_idle_release")]
     pub idle_release_secs: Option<u64>,
+    /// 作者/出版社中文名开关：true=离线 person 实体 name_cn 优先（作者/出版社写中文名）；
+    /// false（缺省）=用日文原名。仅影响 authors/publisher 显示名
+    #[serde(default)]
+    pub staff_chinese_names: bool,
 }
 
 fn default_archive_update_interval() -> u64 {
@@ -222,6 +224,7 @@ impl Default for BangumiArchiveConfig {
             dir: None,
             update_interval_hours: default_archive_update_interval(),
             idle_release_secs: default_archive_idle_release(),
+            staff_chinese_names: false,
         }
     }
 }

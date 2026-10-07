@@ -96,6 +96,7 @@ async fn main() {
                 dir: Some(ARCHIVE_DIR.to_string()),
                 update_interval_hours: 0,
                 idle_release_secs: None,
+                staff_chinese_names: false,
             },
             http.clone(),
             std::path::PathBuf::from(ARCHIVE_DIR),
@@ -113,6 +114,7 @@ async fn main() {
                 dir: Some(ARCHIVE_DIR.to_string()),
                 update_interval_hours: 0,
                 idle_release_secs: None,
+                staff_chinese_names: false,
             },
         },
         matcher,
@@ -121,7 +123,6 @@ async fn main() {
         None,
         None,
         archive,
-        Some("zh".to_string()),
     )
     .expect("provider create failed");
 

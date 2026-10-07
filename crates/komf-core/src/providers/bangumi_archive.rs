@@ -124,6 +124,8 @@ pub struct PersonInfo {
     pub person_id: u64,
     pub name: String,
     pub name_cn: Option<String>,
+    /// 笔名（别名块「笔名|xxx」子项的首个非空值）；显示名最高优先级。
+    pub pen_name: Option<String>,
     pub person_type: Option<i32>,
     pub career: Vec<String>,
     pub position: Option<i32>,
@@ -146,6 +148,50 @@ fn person_name_cn(infobox: Option<&str>) -> Option<String> {
         }
     }
     None
+}
+
+/// 遍历 person infobox「别名」块条目：多行/单行 `{ [item] [k|v] }` 块逐项输出
+/// (key, value)——`k|v` 子项 key=Some(k)，纯值条目 key=None；空值跳过。
+fn person_alias_entries(infobox: Option<&str>) -> Vec<(Option<String>, String)> {
+    let mut out: Vec<(Option<String>, String)> = Vec::new();
+    let Some(ib) = infobox else { return out };
+    let ib = ib.trim();
+    let mut lines = ib.split('\n').peekable();
+    while let Some(raw) = lines.next() {
+        let line = raw.trim().strip_prefix('|').unwrap_or(raw.trim());
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == "别名" || k.trim() == "別名" {
+                let mut block = v.trim().to_string();
+                // 多行别名块：{ [..] [..] } 直到 '}' 或下一个 '|'
+                if block.starts_with('{') {
+                    while !block.contains('}') {
+                        match lines.next() {
+                            Some(l) => block.push_str(l.trim()),
+                            None => break,
+                        }
+                    }
+                    for item in block.split('[').skip(1) {
+                        // 截断到行尾 / '}'（别名块可能尾随换行与 '}'）
+                        let item = item.trim();
+                        let item = item.split(['\r', '\n', '}']).next().unwrap_or(item).trim();
+                        let item = item.trim_end_matches(']').trim();
+                        let item = item.strip_suffix(']').unwrap_or(item).trim();
+                        if let Some((key, val)) = item.split_once('|') {
+                            let val = val.trim();
+                            if !val.is_empty() {
+                                out.push((Some(key.trim().to_string()), val.to_string()));
+                            }
+                        } else if !item.is_empty() {
+                            out.push((None, item.to_string()));
+                        }
+                    }
+                } else if !block.is_empty() && block != "{}" {
+                    out.push((None, block));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 从 person infobox「别名」块提取全部别名（含子条目 v；`、`/`,` 拆分；`(注音)` 拆出；
@@ -175,41 +221,24 @@ fn person_aliases(infobox: Option<&str>) -> Vec<String> {
     }
 
     let mut out: Vec<String> = Vec::new();
-    let Some(ib) = infobox else { return out };
-    let ib = ib.trim();
-    let mut lines = ib.split('\n').peekable();
-    while let Some(raw) = lines.next() {
-        let line = raw.trim().strip_prefix('|').unwrap_or(raw.trim());
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == "别名" {
-                let mut block = v.trim().to_string();
-                // 多行别名块：{ [..] [..] } 直到 '}' 或下一个 '|'
-                if block.starts_with('{') {
-                    while !block.contains('}') {
-                        match lines.next() {
-                            Some(l) => block.push_str(l.trim()),
-                            None => break,
-                        }
-                    }
-                    for item in block.split('[').skip(1) {
-                        // 截断到行尾 / '}'（别名块可能尾随换行与 '}'）
-                        let item = item.trim();
-                        let item = item.split(['\r', '\n', '}']).next().unwrap_or(item).trim();
-                        let item = item.trim_end_matches(']').trim();
-                        let item = item.strip_suffix(']').unwrap_or(item).trim();
-                        if let Some((_, val)) = item.split_once('|') {
-                            push_parts(&mut out, val);
-                        } else if !item.is_empty() {
-                            push_parts(&mut out, item);
-                        }
-                    }
-                } else if !block.is_empty() && block != "{}" {
-                    push_parts(&mut out, &block);
-                }
+    for (_key, val) in person_alias_entries(infobox) {
+        push_parts(&mut out, &val);
+    }
+    out
+}
+
+/// 从 person infobox「别名」块提取笔名：`笔名`/`筆名` 子项的首个非空值（整条原样
+/// 入库，`、`/`,` 拆分等多值清理统一在显示侧 clean_author_names 完成）。
+fn person_pen_name(infobox: Option<&str>) -> Option<String> {
+    for (key, val) in person_alias_entries(infobox) {
+        if key.as_deref() == Some("笔名") || key.as_deref() == Some("筆名") {
+            let val = val.trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
             }
         }
     }
-    out
+    None
 }
 
 impl ArchiveSubject {
@@ -430,9 +459,10 @@ const DDL_REL_INDEX: &str =
 const DDL_ARCHIVE_UPDATE: &str =
     "CREATE TABLE IF NOT EXISTS archive_update (key TEXT PRIMARY KEY, value TEXT)";
 const DDL_PERSONS: &str = "CREATE TABLE IF NOT EXISTS persons (
-    id     INTEGER PRIMARY KEY,
-    name   TEXT,
+    id      INTEGER PRIMARY KEY,
+    name    TEXT,
     name_cn TEXT,
+    pen_name TEXT,
     type   INTEGER,
     career TEXT,
     aliases TEXT
@@ -550,6 +580,20 @@ impl BangumiArchiveStore {
             c.execute_batch("ALTER TABLE persons ADD COLUMN aliases TEXT")
                 .map_err(|e| {
                     ProviderError::message(format!("archive schema migrate aliases: {e}"))
+                })?;
+        }
+        // persons 缺 pen_name 列（旧库）→ ALTER TABLE ADD COLUMN（不重建，下次 build 填充）
+        let has_p_pen_name = match c.prepare("PRAGMA table_info(persons)") {
+            Ok(mut st) => st
+                .query_map([], |r| r.get::<_, String>(1))
+                .map(|rows| rows.filter_map(|r| r.ok()).any(|n| n == "pen_name"))
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !has_p_pen_name {
+            c.execute_batch("ALTER TABLE persons ADD COLUMN pen_name TEXT")
+                .map_err(|e| {
+                    ProviderError::message(format!("archive schema migrate pen_name: {e}"))
                 })?;
         }
         c.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
@@ -845,7 +889,8 @@ impl BangumiArchiveStore {
             .map_err(|e| ProviderError::message(format!("archive persons open: {e}")))?;
         let reader = std::io::BufReader::new(file);
         let mut lines = reader.lines();
-        let mut batch: Vec<(u64, String, Option<String>, Option<i64>, String, String)> = Vec::new();
+        let mut batch: Vec<(u64, String, Option<String>, Option<String>, Option<i64>, String, String)> =
+            Vec::new();
         let mut count = 0usize;
         loop {
             let Some(line) = lines.next() else { break };
@@ -858,6 +903,7 @@ impl BangumiArchiveStore {
                 p.id,
                 p.name,
                 person_name_cn(p.infobox.as_deref()),
+                person_pen_name(p.infobox.as_deref()),
                 p.r#type.map(|t| t as i64),
                 career,
                 serde_json::to_string(&person_aliases(p.infobox.as_deref())).unwrap_or_default(),
@@ -876,13 +922,13 @@ impl BangumiArchiveStore {
 
     fn insert_person_batch(
         c: &rusqlite::Connection,
-        batch: &[(u64, String, Option<String>, Option<i64>, String, String)],
+        batch: &[(u64, String, Option<String>, Option<String>, Option<i64>, String, String)],
     ) -> Result<(), ProviderError> {
         for b in batch {
             c.execute(
-                "INSERT OR REPLACE INTO persons (id, name, name_cn, type, career, aliases)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
-                rusqlite::params![b.0 as i64, b.1, b.2, b.3, b.4, b.5],
+                "INSERT OR REPLACE INTO persons (id, name, name_cn, pen_name, type, career, aliases)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![b.0 as i64, b.1, b.2, b.3, b.4, b.5, b.6],
             )
             .map_err(|e| ProviderError::message(format!("archive persons insert: {e}")))?;
         }
@@ -1065,7 +1111,7 @@ impl BangumiArchiveStore {
     pub fn get_persons(&self, subject_id: u64) -> Vec<PersonInfo> {
         let c = self.conn.lock().unwrap();
         let mut stmt = match c.prepare(
-            "SELECT sp.person_id, p.name, p.name_cn, p.type, p.career, sp.position, sp.appear_eps, p.aliases
+            "SELECT sp.person_id, p.name, p.name_cn, p.pen_name, p.type, p.career, sp.position, sp.appear_eps, p.aliases
              FROM subject_persons sp
              JOIN persons p ON p.id = sp.person_id
              WHERE sp.subject_id = ?1
@@ -1079,12 +1125,13 @@ impl BangumiArchiveStore {
                 person_id: r.get::<_, i64>(0)? as u64,
                 name: r.get::<_, String>(1)?,
                 name_cn: r.get::<_, Option<String>>(2)?,
-                person_type: r.get::<_, Option<i64>>(3)?.map(|v| v as i32),
-                career: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-                position: r.get::<_, Option<i64>>(5)?.map(|v| v as i32),
-                appear_eps: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                pen_name: r.get::<_, Option<String>>(3)?,
+                person_type: r.get::<_, Option<i64>>(4)?.map(|v| v as i32),
+                career: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                position: r.get::<_, Option<i64>>(6)?.map(|v| v as i32),
+                appear_eps: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
                 aliases: r
-                    .get::<_, Option<String>>(7)?
+                    .get::<_, Option<String>>(8)?
                     .map(|a| serde_json::from_str(&a).unwrap_or_default())
                     .unwrap_or_default(),
             })
@@ -1098,19 +1145,20 @@ impl BangumiArchiveStore {
     pub fn get_person(&self, person_id: u64) -> Option<PersonInfo> {
         let c = self.conn.lock().unwrap();
         c.query_row(
-            "SELECT id, name, name_cn, type, career, aliases FROM persons WHERE id = ?1",
+            "SELECT id, name, name_cn, pen_name, type, career, aliases FROM persons WHERE id = ?1",
             [person_id as i64],
             |r| {
                 Ok(PersonInfo {
                     person_id: r.get::<_, i64>(0)? as u64,
                     name: r.get::<_, String>(1)?,
                     name_cn: r.get::<_, Option<String>>(2)?,
-                    person_type: r.get::<_, Option<i64>>(3)?.map(|v| v as i32),
-                    career: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                    pen_name: r.get::<_, Option<String>>(3)?,
+                    person_type: r.get::<_, Option<i64>>(4)?.map(|v| v as i32),
+                    career: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
                     position: None,
                     appear_eps: String::new(),
                     aliases: r
-                        .get::<_, Option<String>>(5)?
+                        .get::<_, Option<String>>(6)?
                         .map(|a| serde_json::from_str(&a).unwrap_or_default())
                         .unwrap_or_default(),
                 })
@@ -1964,6 +2012,33 @@ mod tests {
         // 空子条目跳过
         assert!(!a.contains(&String::new()));
         assert!(!a.iter().any(|x| x.trim().is_empty()));
+    }
+
+    /// 笔名提取：别名块「笔名|xxx」子项的首个非空值（整条原样入库，多值清理在显示侧
+    /// clean_author_names 完成）；无笔名/空值 → None。
+    #[test]
+    fn person_pen_name_parsed() {
+        let ib = "{{Infobox Crt\r\n|简体中文名= 博\r\n|别名={\r\n[笔名|藤本タツキ]\r\n[本名|藤本樹]\r\n}\r\n}}";
+        assert_eq!(
+            person_pen_name(Some(ib)),
+            Some("藤本タツキ".to_string())
+        );
+        // 多个笔名顿号连接 → 整条入库（拆分取首个在显示侧 clean_author_names）
+        let ib_multi = "{{Infobox Crt\r\n|别名={\r\n[笔名|三陽五郎、伊坂秀樹、葉月九ロウ]\r\n}\r\n}}";
+        assert_eq!(
+            person_pen_name(Some(ib_multi)),
+            Some("三陽五郎、伊坂秀樹、葉月九ロウ".to_string())
+        );
+        // 笔名为空 → 跳过该子项
+        let ib_empty = "{{Infobox Crt\r\n|别名={\r\n[笔名|]\r\n[昵称|ボーイ]\r\n}\r\n}}";
+        assert_eq!(person_pen_name(Some(ib_empty)), None);
+        // 单行块 / 无别名块 / None → None
+        assert_eq!(person_pen_name(Some("{{Infobox Crt\r\n|别名=ぼん\r\n}}")), None);
+        assert_eq!(person_pen_name(Some("{{Infobox Crt\r\n|性别= 女\r\n}}")), None);
+        assert_eq!(person_pen_name(None), None);
+        // 别名输出不受笔名子项影响（保持原行为，k|v 只收 v）
+        let ib = "{{Infobox Crt\r\n|别名={\r\n[笔名|藤本タツキ]\r\n}\r\n}}";
+        assert_eq!(person_aliases(Some(ib)), vec!["藤本タツキ".to_string()]);
     }
 
     use super::*;

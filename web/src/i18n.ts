@@ -269,6 +269,7 @@ const dict: Record<string, { zh: string; en: string }> = {
   'f.archiveIdleReleaseSecs': { zh: '空闲释放间隔(秒)', en: 'Idle release (secs)' },
   'f.archiveSearchCategoryFilter': { zh: '离线搜索分类白名单（逗号分隔）', en: 'Offline search category filter (comma-separated)' },
   'f.archiveSearchUploaderFilter': { zh: '离线搜索上传者白名单（逗号分隔）', en: 'Offline search uploader filter (comma-separated)' },
+  'f.staffChineseNames': { zh: '作者/出版社中文名', en: 'Chinese names for authors/publishers (staffChineseNames)' },
   'f.baseUri': { zh: '服务地址', en: 'baseUri (URL)' },
   'f.komgaUser': { zh: '用户名', en: 'komgaUser' },
   'f.username': { zh: '用户名', en: 'username' },
