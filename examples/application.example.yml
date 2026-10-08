@@ -343,9 +343,9 @@ metadataProviders:
                                     #   未就绪 / 未命中 → 自动回退在线 API；可关闭本段恢复纯在线
         dir: null                   #   数据目录（archive_index.db 等）；缺省 workDir/bangumi-archive
         updateIntervalHours: 168    #   更新检查间隔（小时）；0 = 仅首次构建不检查更新
-        idleReleaseSecs: 60         #   空闲释放 mmap 热页（秒）：距上次查询超过该时长即对 subject.jsonlines
-                                    #   的 mmap 执行 MADV_DONTNEED 释放页缓存（下次查询按需重读），
-                                    #   降低常驻内存（~100MB → 空闲时回落）；0 = 禁用（默认 60）。仅 Linux 生效
+        idleReleaseSecs: 60         #   页缓存空闲释放（秒）：距上次释放超过该时长即
+                                    #   PRAGMA shrink_memory 归还 SQLite 页缓存（对齐 ehentai
+                                    #   archive）；0 = 禁用（默认 60）
         staffChineseNames: false    #   作者/出版社中文名开关：true=离线 person 实体 name_cn 优先；
                                     #   false（缺省）=用日文原名。仅影响 authors/publisher 显示名
     webtoons:

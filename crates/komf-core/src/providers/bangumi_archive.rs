@@ -27,7 +27,7 @@ use komf_api_models::config::DownloadProgress;
 use serde::Deserialize;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Archive release 元数据（https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json）
@@ -508,10 +508,28 @@ fn map_relation_type(t: Option<String>) -> Option<String> {
 
 pub struct BangumiArchiveStore {
     conn: Mutex<rusqlite::Connection>,
+    /// 页缓存空闲释放：`release_periodic` 每 idle_release_ms 毫秒无条件
+    /// `PRAGMA shrink_memory` 归还 SQLite 页缓存（移植 ehentai archive 语义；
+    /// CAS 防并发；0 = 禁用，仅生产服务按需启用）。
+    last_release: AtomicU64,
+    idle_release_ms: u64,
+}
+
+/// 毫秒时间戳（ehentai_archive::now_ms 同款）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl BangumiArchiveStore {
     pub fn open(db_path: &Path) -> Result<Self, ProviderError> {
+        Self::open_with_idle(db_path, 0)
+    }
+
+    /// `idle_release_secs`：页缓存周期释放阈值（秒）；0 = 禁用。
+    pub fn open_with_idle(db_path: &Path, idle_release_secs: u64) -> Result<Self, ProviderError> {
         let conn = rusqlite::Connection::open(db_path)
             .map_err(|e| ProviderError::message(format!("archive sqlite open failed: {e}")))?;
         // 读写在应用层已串行（同一把 Mutex），WAL 无收益；改用 DELETE：单事务构建的
@@ -525,7 +543,36 @@ impl BangumiArchiveStore {
         .map_err(|e| ProviderError::message(format!("archive pragma failed: {e}")))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            last_release: AtomicU64::new(now_ms()),
+            idle_release_ms: idle_release_secs.saturating_mul(1000),
         })
+    }
+
+    /// 周期强制释放：距上次释放满 idle 毫秒即无条件 `PRAGMA shrink_memory`
+    /// 归还未使用页面缓存（CAS 防并发；供周期任务调用）。不判断"距上次查询"
+    /// ——密集查询期间同样周期性归还，下次查询按需重读（对齐 ehentai archive）。
+    pub fn release_periodic(&self) {
+        let idle = self.idle_release_ms;
+        if idle == 0 {
+            return;
+        }
+        let now = now_ms();
+        let last = self.last_release.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < idle {
+            return;
+        }
+        if self
+            .last_release
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let _ = self
+                .conn
+                .lock()
+                .unwrap()
+                .execute_batch("PRAGMA shrink_memory;");
+            tracing::debug!("bangumi archive: released sqlite page cache");
+        }
     }
 
     pub fn init_schema(&self) -> Result<(), ProviderError> {
@@ -1296,6 +1343,8 @@ pub struct BangumiArchiveService {
     auto_update_started: Arc<AtomicBool>,
     http_client: reqwest::Client,
     data_dir: PathBuf,
+    /// 页缓存空闲释放阈值（秒；0=禁用）。store 打开/重建时透传，周期任务按此调度。
+    idle_release_secs: u64,
     /// 更新互斥：下载/构建期间忽略新的触发（复用进行中的进度流）。
     download_in_progress: Arc<AtomicBool>,
     progress: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<DownloadProgress>>>>>,
@@ -1322,7 +1371,7 @@ impl BangumiArchiveService {
     /// 周期自动更新由编排方（app_context）统一调用 `start_auto_update` 启动，
     /// 服务本身不自行调度。
     pub fn start(
-        _config: &crate::config::BangumiArchiveConfig,
+        config: &crate::config::BangumiArchiveConfig,
         http_client: reqwest::Client,
         dir: PathBuf,
     ) -> Arc<Self> {
@@ -1337,6 +1386,10 @@ impl BangumiArchiveService {
                 return existing;
             }
         }
+        // idleReleaseSecs（缺省 60，0=禁用）：SQLite 页缓存周期释放阈值——
+        // 批量匹配把页缓存烘热后，按周期无条件 shrink_memory 归还（v8 语义；
+        // 替代 v7 及之前对 mmap jsonlines 的 MADV_DONTNEED 释放）。
+        let idle_secs = config.idle_release_secs.unwrap_or(60);
         let store: Arc<RwLock<Option<Arc<BangumiArchiveStore>>>> = Arc::new(RwLock::new(None));
         let ready = Arc::new(AtomicBool::new(false));
         let opened = Arc::new(AtomicBool::new(false));
@@ -1347,6 +1400,7 @@ impl BangumiArchiveService {
             auto_update_started: Arc::new(AtomicBool::new(false)),
             http_client: http_client.clone(),
             data_dir: dir.clone(),
+            idle_release_secs: idle_secs,
             download_in_progress: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(None)),
         });
@@ -1354,6 +1408,20 @@ impl BangumiArchiveService {
             .lock()
             .unwrap()
             .insert(key, Arc::downgrade(&svc));
+        // 后台页缓存释放：每 min(idle,60)s 检查一次，距上次释放满 idle 即
+        // shrink_memory 归还（对齐 ehentai archive 空闲释放语义）。
+        if idle_secs > 0 {
+            let svc_idle = svc.clone();
+            tokio::spawn(async move {
+                let tick = std::time::Duration::from_secs(idle_secs.min(60).max(1));
+                loop {
+                    tokio::time::sleep(tick).await;
+                    if let Some(s) = svc_idle.store.read().unwrap().as_ref() {
+                        s.release_periodic();
+                    }
+                }
+            });
+        }
         // 打开 + init_schema（v8 迁移可能 drop 旧表；FTS 本地重建是同步重 IO）
         // 跑在阻塞线程上，不占用 tokio worker。
         crate::util::heavy_pool::spawn_heavy(move || {
@@ -1374,7 +1442,7 @@ impl BangumiArchiveService {
             let relations_path = dir.join("subject-relations.jsonlines");
             let persons_path = dir.join("person.jsonlines");
             let subject_persons_path = dir.join("subject-persons.jsonlines");
-            if let Ok(s) = BangumiArchiveStore::open(&db_path) {
+            if let Ok(s) = BangumiArchiveStore::open_with_idle(&db_path, idle_secs) {
                 let _ = s.init_schema();
                 // v8 迁移/首次解压后：库未就绪但本地 jsonlines 齐全 → 直接后台重建
                 // （init_schema 已把旧表 drop 掉；do_update 在远程数据未更新时会
@@ -1621,6 +1689,7 @@ impl BangumiArchiveService {
             &persons_path,
             &subject_persons_path,
             &meta,
+            self.idle_release_secs,
             emit_ref,
         )
         .await
@@ -1768,6 +1837,7 @@ async fn build_db_then_swap(
     persons_path: &Path,
     subject_persons_path: &Path,
     meta_updated_at: &str,
+    idle_release_secs: u64,
 ) -> Result<(BangumiArchiveStore, (usize, usize, usize, usize)), ProviderError> {
     let tmp_path = db_path.with_extension("db.tmp");
     // 上次崩溃/失败可能残留 .tmp：先清理
@@ -1804,7 +1874,7 @@ async fn build_db_then_swap(
             db_path.display()
         )));
     }
-    let store = BangumiArchiveStore::open(db_path)
+    let store = BangumiArchiveStore::open_with_idle(db_path, idle_release_secs)
         .map_err(|e| ProviderError::message(format!("archive open after swap: {e}")))?;
     Ok((store, counts))
 }
@@ -1820,6 +1890,7 @@ async fn download_and_rebuild(
     persons_path: &Path,
     subject_persons_path: &Path,
     meta: &LatestMeta,
+    idle_release_secs: u64,
     emit: Option<&(dyn Fn(DownloadProgress) + Send + Sync)>,
 ) -> Result<Arc<BangumiArchiveStore>, ProviderError> {
     let url = meta
@@ -1937,6 +2008,7 @@ async fn download_and_rebuild(
         persons_path,
         subject_persons_path,
         &meta.updated_at.clone().unwrap_or_default(),
+        idle_release_secs,
     )
     .await?;
     tracing::info!(
@@ -2578,6 +2650,7 @@ mod tests {
                 &persons,
                 &sp,
                 "2026-10-01",
+                0,
             ))
             .expect("build+swap should replace corrupt db");
         assert_eq!(subj, 1);

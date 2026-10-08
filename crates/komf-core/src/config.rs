@@ -199,8 +199,9 @@ pub struct BangumiArchiveConfig {
     /// 更新间隔（小时）；0 = 不检查更新（仅首次构建）。
     #[serde(default = "default_archive_update_interval")]
     pub update_interval_hours: u64,
-    /// 已废弃（v8 起主数据直接入库，读全走 SQLite page cache，由 cache_size 钳制，
-    /// 不再需要 mmap 空闲释放）。保留字段以兼容既有 application.yml。
+    /// SQLite 页缓存空闲释放阈值（秒）：距上次释放超过该时长即 `PRAGMA shrink_memory`
+    /// 归还页缓存（v8 语义，替代 v7 对 mmap jsonlines 的 MADV_DONTNEED 释放）；
+    /// 0 = 禁用。缺省 60。
     #[serde(default = "default_archive_idle_release")]
     pub idle_release_secs: Option<u64>,
     /// 作者/出版社中文名开关：true=离线 person 实体 name_cn 优先（作者/出版社写中文名）；
