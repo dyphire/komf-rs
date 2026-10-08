@@ -21,17 +21,17 @@ impl MalTracker {
         Self { http, oauth }
     }
 
-    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除登录态。
-    fn note_unauthorized(&self) {
+    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除该用户的登录态。
+    fn note_unauthorized(&self, user_key: &str) {
         if let Some(manager) = &self.oauth {
-            manager.logout(OAuthProvider::Mal);
+            manager.logout(OAuthProvider::Mal, user_key);
         }
     }
 
     /// 带 Bearer 的 GET，解析为 JSON。遇 401 先强制刷新重试一次，刷新失败或
     /// 重试仍 401 才清登录态（四个 tracker 统一行为：401→强制刷新→重试一次→仍失败才登出）。
-    async fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
-        let mut token = self.token().await?;
+    async fn get_json(&self, user_key: &str, url: &str) -> Result<serde_json::Value, String> {
+        let mut token = self.token(user_key).await?;
         let mut response = self
             .http
             .get(url)
@@ -42,7 +42,7 @@ impl MalTracker {
         let mut status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let refreshed = match &self.oauth {
-                Some(manager) => manager.refresh_now(OAuthProvider::Mal).await,
+                Some(manager) => manager.refresh_now(OAuthProvider::Mal, user_key).await,
                 None => None,
             };
             if let Some(new_token) = refreshed {
@@ -57,7 +57,7 @@ impl MalTracker {
                 status = response.status();
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.note_unauthorized();
+                self.note_unauthorized(user_key);
             }
         }
         let body: serde_json::Value = response
@@ -75,12 +75,12 @@ impl MalTracker {
         Ok(body)
     }
 
-    async fn token(&self) -> Result<String, String> {
+    async fn token(&self, user_key: &str) -> Result<String, String> {
         let Some(manager) = &self.oauth else {
             return Err("mal: not logged in (oauth manager missing)".to_string());
         };
         manager
-            .access_token(OAuthProvider::Mal)
+            .access_token(OAuthProvider::Mal, user_key)
             .await
             .ok_or_else(|| "mal: not logged in (no access token)".to_string())
     }
@@ -154,18 +154,26 @@ impl TrackerService for MalTracker {
         "mal"
     }
 
-    fn is_logged_in(&self) -> bool {
+    fn is_logged_in(&self, user_key: &str) -> bool {
         match &self.oauth {
-            Some(manager) => manager.status(OAuthProvider::Mal).logged_in,
+            Some(manager) => manager.status(OAuthProvider::Mal, user_key).logged_in,
             None => false,
         }
     }
 
-    async fn search(&self, query: &str, nsfw: bool) -> Result<Vec<TrackSearchItem>, String> {
+    async fn search(
+        &self,
+        user_key: &str,
+        query: &str,
+        nsfw: bool,
+    ) -> Result<Vec<TrackSearchItem>, String> {
         // 链接输入：myanimelist.net/manga/{id} 直接定位单条目。
         if let Some(id) = Self::extract_manga_url(query) {
             let details = self
-                .get_json(&format!("{BASE_URL}/manga/{id}?fields={SEARCH_FIELDS}"))
+                .get_json(
+                    user_key,
+                    &format!("{BASE_URL}/manga/{id}?fields={SEARCH_FIELDS}"),
+                )
                 .await?;
             return Ok(Self::detail_to_item(id, &details).into_iter().collect());
         }
@@ -175,7 +183,7 @@ impl TrackerService for MalTracker {
             "{BASE_URL}/manga?q={}&nsfw={nsfw}",
             url::form_urlencoded::byte_serialize(q.as_bytes()).collect::<String>()
         );
-        let body = self.get_json(&url).await?;
+        let body = self.get_json(user_key, &url).await?;
         let nodes = body
             .get("data")
             .and_then(serde_json::Value::as_array)
@@ -193,7 +201,10 @@ impl TrackerService for MalTracker {
             let entry = entry.clone();
             futs.push(async move {
                 let details = self
-                    .get_json(&format!("{BASE_URL}/manga/{id}?fields={SEARCH_FIELDS}"))
+                    .get_json(
+                        user_key,
+                        &format!("{BASE_URL}/manga/{id}?fields={SEARCH_FIELDS}"),
+                    )
                     .await
                     .ok();
                 (entry, id, details)
@@ -236,14 +247,15 @@ impl TrackerService for MalTracker {
         Ok(results)
     }
 
-    async fn get_state(&self, track_id: &str) -> Result<TrackState, String> {
+    async fn get_state(&self, user_key: &str, track_id: &str) -> Result<TrackState, String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid mal id: {track_id}"))?;
         let body = self
-            .get_json(&format!(
-                "{BASE_URL}/manga/{id}?fields=num_volumes,num_chapters,my_list_status"
-            ))
+            .get_json(
+                user_key,
+                &format!("{BASE_URL}/manga/{id}?fields=num_volumes,num_chapters,my_list_status"),
+            )
             .await?;
         let status = body.get("my_list_status").filter(|s| !s.is_null());
         let Some(status) = status else {
@@ -285,7 +297,12 @@ impl TrackerService for MalTracker {
         })
     }
 
-    async fn update(&self, track_id: &str, update: &TrackUpdate) -> Result<(), String> {
+    async fn update(
+        &self,
+        user_key: &str,
+        track_id: &str,
+        update: &TrackUpdate,
+    ) -> Result<(), String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid mal id: {track_id}"))?;
@@ -330,7 +347,7 @@ impl TrackerService for MalTracker {
             })
             .collect::<Vec<_>>()
             .join("&");
-        let mut token = self.token().await?;
+        let mut token = self.token(user_key).await?;
         let mut response = self
             .http
             .patch(format!("{BASE_URL}/manga/{id}/my_list_status"))
@@ -347,7 +364,7 @@ impl TrackerService for MalTracker {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             // 401：先强制刷新重试一次，失败才清登录态（与 get_json 一致）。
             let refreshed = match &self.oauth {
-                Some(manager) => manager.refresh_now(OAuthProvider::Mal).await,
+                Some(manager) => manager.refresh_now(OAuthProvider::Mal, user_key).await,
                 None => None,
             };
             if let Some(new_token) = refreshed {
@@ -367,7 +384,7 @@ impl TrackerService for MalTracker {
                 status = response.status();
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.note_unauthorized();
+                self.note_unauthorized(user_key);
             }
         }
         if !status.is_success() {

@@ -227,16 +227,18 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 元数据 provider 的服务端 OAuth2 登录，采用**共享 client + 官方中转页**方案（无需按实例注册回调）。机制、client_secret 注入与部署说明见 [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md)。
 
-- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal/mangabaka 使用 PKCE）。可选 `?redirect_path_prefix=/prefix` 给回调路径加前缀，用于反代把回调挂进自有命名空间（如 kmrs 的 `/api/v1/komf`）或子路径部署
-- `GET /api/oauth/{provider}/callback` —— OAuth 回调（经中转页转交）：校验后以 code 换取 token，存入 `<configDir>/oauth.sqlite`，随后 `302` 到 `/?oauth=success`（或 `/?oauth=error&message=...`）
-- `GET /api/oauth/{provider}/status` —— `200` JSON `{"logged_in":bool,"username":string|null}`
-- `POST /api/oauth/{provider}/logout` —— `204`，清除已存 token
+- `GET /api/oauth/{provider}/start` —— `302` 跳转到平台授权页（state 携带本实例回调地址；anilist/mal/mangabaka 使用 PKCE）。可选 `?redirect_path_prefix=/prefix` 给回调路径加前缀，用于反代把回调挂进自有命名空间（如 kmrs 的 `/api/v1/komf`）或子路径部署。可选 `?user=<key>` 指定本次登录归属的用户身份（见下文多用户说明）
+- `GET /api/oauth/{provider}/callback` —— OAuth 回调（经中转页转交）：校验后以 code 换取 token，按 `start` 时记录的用户身份存入 `<configDir>/oauth.sqlite`，随后 `302` 到 `/?oauth=success`（或 `/?oauth=error&message=...`）
+- `GET /api/oauth/{provider}/status` —— `200` JSON `{"logged_in":bool,"username":string|null}`；可选 `?user=<key>` 或 `X-Tracker-User` 头
+- `POST /api/oauth/{provider}/logout` —— `204`，清除该用户已存 token
 
 登录后该 provider 的请求以 OAuth bearer token 鉴权（优先于手动 `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID`）；token 过期后若有 refresh token 则自动刷新，否则清除登录态并回退匿名请求。tracker 相关接口在请求时发现登录态已失效（过期且无法刷新、未注入 secret、刷新被拒、或源站以 `401` 拒绝该 token——同时清除已存登录态）时返回 `401`，避免阅读状态同步静默地以无用户态运行。WebUI Provider 页显示各平台登录状态并提供登录/退出入口。
 
+多用户：OAuth token 与 tracker 状态按调用方定义的用户身份（`user_key`，`[A-Za-z0-9_-]{1,64}`）隔离。`start` 用 `?user=` 传（普通链接场景），`status`/`logout` 用 `?user=` 或 `X-Tracker-User` 头；回调从服务端 pending 记录取回归属，因此 OAuth `state` JSON 与中转页均不改动。不带身份的请求落到内置 `default` 用户——komf 自带 WebUI 与元数据 provider 始终操作 `default`，单用户行为不变，已有数据库首次启动时自动迁移到 `default`。上层媒体服务器（如 kmrs）传入自己的用户 ID，即可让每个用户在各平台拥有独立的 tracker 账户。
+
 ### 阅读状态（Tracker）（`{provider}` = `anilist`、`mal`、`bangumi` 或 `mangabaka`；需先 OAuth 登录）
 
-四平台阅读列表同步，基于上述 OAuth 登录。
+四平台阅读列表同步，基于上述 OAuth 登录。所有端点按调用方身份隔离：用 `X-Tracker-User` 头传用户（缺省 `default`；见上文多用户说明）。
 
 - `GET /api/tracker/{provider}/search?name=...&nsfw=...` —— 搜索平台条目；每条带 `tracked`（是否已在用户列表中）。`nsfw` 缺省 `true`，仅在 `false` 时过滤成人内容。`name` 也支持平台条目链接——`anilist.co/manga/{id}`、`myanimelist.net/manga/{id}`、`bgm.tv`/`bangumi.tv/subject/{id}`、`mangabaka.org/{id}`——后端直接解析为单条结果。
 - `GET /api/tracker/{provider}/state?trackId=...` —— 当前列表条目（`status`、`score`、已读卷/话、开始/完成日期、总量）；未入列表返回空状态。
@@ -250,7 +252,7 @@ Docker 部署时模板放在挂载的 `/config/discord` 或 `/config/apprise` �
 
 说明：`tracked` 为用户态——AniList 取 `mediaListEntry`、MAL 取 `my_list_status`（详情并发拉取）、Bangumi 拉取用户收藏集合、MangaBaka 批量查用户收藏（`GET /v1/my/library/batch`）。Bangumi 搜索在 v0 API 失败时兜底旧版 `GET /search/subject/{q}?type=1`（元数据匹配 provider 同样兜底）。AniList 评分跟随账户 `mediaListOptions.scoreFormat`（POINT_10 账户读写 0–10，其余 0–100）。MangaBaka 评分为 0–100，其 `plan_to_read`/`considering` 映射为 `planning`；更新时条目不存在则 `POST` 创建、已存在则 `PATCH`。
 
-- `GET /api/tracker/links` —— 本实例已关联条目的本地台账：每次成功 `update` 都会按 `{provider, trackId, title, coverUrl, url, updatedAt}`（最新在前）upsert 进 `<configDir>/oauth.sqlite` 的 `tracker_links` 表。`update` 可附带 `title` / `coverUrl`（不推送平台，仅用于台账展示）。
+- `GET /api/tracker/links` —— 本实例已关联条目的本地台账：每次成功 `update` 都会按 `{provider, trackId, title, coverUrl, url, updatedAt}`（最新在前）upsert 进 `<configDir>/oauth.sqlite` 的 `tracker_links` 表，按解析出的用户身份隔离。`update` 可附带 `title` / `coverUrl`（不推送平台，仅用于台账展示）。
 
 WebUI Tracker 页中该台账显示在**已关联**下（与搜索结果互斥）；选中条目后状态表单直接在条目下方展开，再次点击可收起。
 

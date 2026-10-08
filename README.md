@@ -227,16 +227,18 @@ For Docker deployments, templates go in the mounted `/config/discord` or `/confi
 
 Server-side OAuth2 login for metadata providers, using a **shared client + official relay page** (no per-instance callback registration). See [`docs/oauth-relay/README.md`](docs/oauth-relay/README.md) for the mechanism, client-secret injection and deployment notes.
 
-- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal/mangabaka). Optional `?redirect_path_prefix=/prefix` prefixes the instance callback path, for reverse proxies that mount the callback inside their own namespace (e.g. kmrs under `/api/v1/komf`) or sub-path deployments
-- `GET /api/oauth/{provider}/callback` — OAuth callback (via the relay page): exchanges the code, stores the token in `<configDir>/oauth.sqlite`, then `302` to `/?oauth=success` (or `/?oauth=error&message=...`)
-- `GET /api/oauth/{provider}/status` — `200` JSON `{"logged_in":bool,"username":string|null}`
-- `POST /api/oauth/{provider}/logout` — `204`, clears the stored token
+- `GET /api/oauth/{provider}/start` — `302` redirect to the provider's authorization page (state carries the instance callback URL; PKCE for anilist/mal/mangabaka). Optional `?redirect_path_prefix=/prefix` prefixes the instance callback path, for reverse proxies that mount the callback inside their own namespace (e.g. kmrs under `/api/v1/komf`) or sub-path deployments. Optional `?user=<key>` attributes the login to a caller-defined user identity (see multi-user below)
+- `GET /api/oauth/{provider}/callback` — OAuth callback (via the relay page): exchanges the code, stores the token in `<configDir>/oauth.sqlite` under the user identity recorded at `start`, then `302` to `/?oauth=success` (or `/?oauth=error&message=...`)
+- `GET /api/oauth/{provider}/status` — `200` JSON `{"logged_in":bool,"username":string|null}`; optional `?user=<key>` or `X-Tracker-User` header
+- `POST /api/oauth/{provider}/logout` — `204`, clears the stored token for the resolved user
 
 Once logged in, the provider requests are authenticated with the OAuth bearer token (takes precedence over the manual `bangumiToken` / `KOMF_METADATA_PROVIDERS_MAL_CLIENT_ID` options); expired tokens are auto-refreshed when a refresh token exists, otherwise the login is cleared and the provider falls back to anonymous. The tracker endpoints return `401` whenever the login is lost at request time (expired and unrefreshable, no secret, refresh rejected, or the provider itself rejects the token with `401` — which also clears the stored login), so reading-status sync never silently operates without the user's account. The WebUI Providers page shows login status and offers login/logout per provider.
 
+Multi-user: OAuth tokens and tracker state are isolated per caller-defined user identity (`user_key`, `[A-Za-z0-9_-]{1,64}`). `start` takes it as `?user=` (plain links), `status`/`logout` as `?user=` or `X-Tracker-User` header; the callback recovers it from the server-side pending record, so neither the OAuth `state` JSON nor the relay pages change. Requests without a key resolve to the built-in `default` user — komf's own WebUI and the metadata providers always operate on `default`, so single-user behavior is unchanged and existing databases migrate to `default` on first start. A media server in front (e.g. kmrs) passes its own user IDs to give every user an independent tracker account per platform.
+
 ### Tracker (`{provider}` = `anilist`, `mal`, `bangumi` or `mangabaka`; requires OAuth login)
 
-Reading-list sync for the four platforms, backed by the OAuth login above.
+Reading-list sync for the four platforms, backed by the OAuth login above. All endpoints are scoped by caller identity: pass the user with the `X-Tracker-User` header (absent = `default`; see multi-user above).
 
 - `GET /api/tracker/{provider}/search?name=...&nsfw=...` — search the platform; each item carries `tracked` (whether it is already in the user's list). `nsfw` defaults to `true` and is filtered only when `false`. `name` may also be a platform entry link — `anilist.co/manga/{id}`, `myanimelist.net/manga/{id}`, `bgm.tv`/`bangumi.tv`/`subject/{id}`, `mangabaka.org/{id}` — with or without a scheme; the backend resolves it directly to the single item.
 - `GET /api/tracker/{provider}/state?trackId=...` — the current list entry (`status`, `score`, chapters/volumes read, start/finish dates, totals); not in the list returns an empty state (Bangumi maps the "not collected" `404` to an empty state).
@@ -250,7 +252,7 @@ Reading-list sync for the four platforms, backed by the OAuth login above.
 
 Notes: `tracked` is user-scoped — AniList via `mediaListEntry`, MAL via `my_list_status` (details fetched concurrently), Bangumi via the user's collection list, MangaBaka via the user's library (batched `GET /v1/my/library/batch`). Bangumi search falls back to the legacy `GET /search/subject/{q}?type=1` when the v0 API fails (the metadata matching provider has the same fallback). AniList scores follow the account's `mediaListOptions.scoreFormat` (POINT_10 accounts read/write 0–10; other formats 0–100). MangaBaka ratings are 0–100 and its `plan_to_read`/`considering` map to `planning`; updates create the library entry with `POST` when it does not exist yet, `PATCH` otherwise.
 
-- `GET /api/tracker/links` — the local ledger of items linked through this komf instance: every successful `update` upserts `{provider, trackId, title, coverUrl, url, updatedAt}` (newest first) into the `tracker_links` table in `<configDir>/oauth.sqlite`. `update` accepts optional `title` / `coverUrl` fields that are not sent to the platform but are stored for this list.
+- `GET /api/tracker/links` — the local ledger of items linked through this komf instance: every successful `update` upserts `{provider, trackId, title, coverUrl, url, updatedAt}` (newest first) into the `tracker_links` table in `<configDir>/oauth.sqlite`, scoped to the resolved user. `update` accepts optional `title` / `coverUrl` fields that are not sent to the platform but are stored for this list.
 
 In the WebUI Tracker page, the ledger is shown under **Linked** (mutually exclusive with search results); picking an item expands the state form inline under it, and clicking it again collapses it.
 

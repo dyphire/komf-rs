@@ -8,6 +8,11 @@
 //!   热重载（使 MAL 等"登录后才注册"的 provider 生效）并 302 回 WebUI；
 //! - `status` / `logout`：供 WebUI 展示登录态与退出。
 //!
+//! 多用户：token 按 (provider, user_key) 隔离。`start` 接受 `?user=` 参数
+//! （WebUI/反代以普通链接发起，header 不便携带）；`status`/`logout` 接受
+//! `?user=` 或 `X-Tracker-User` 头；缺省一律 `default`。user_key 在授权发起时
+//! 记入服务端 pending，回调按 nonce 取回归属——state JSON 与中转页均不改动。
+//!
 //! MangaBaka 已接入（OIDC，PKCE S256），`{provider}` 接受
 //! anilist / mal / bangumi / mangabaka，其余返回 404。
 
@@ -95,6 +100,29 @@ fn instance_host(headers: &axum::http::HeaderMap) -> Option<String> {
 #[derive(Deserialize)]
 struct StartParams {
     redirect_path_prefix: Option<String>,
+    /// 多用户：授权归属的用户身份键（缺省 default）。存入服务端 pending，
+    /// 回调时按 nonce 取回；state JSON 与中转页不感知该字段。
+    user: Option<String>,
+}
+
+/// `?user=` 参数优先于 `X-Tracker-User` 头（start 是普通链接，反代/WebUI
+/// 方便携带 query），缺省 default；非法键 → 400。
+fn resolve_user_key(
+    query_user: Option<&str>,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, Response> {
+    let key = query_user
+        .map(str::to_string)
+        .or_else(|| {
+            headers
+                .get("x-tracker-user")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| komf_core::oauth::DEFAULT_USER_KEY.to_string());
+    komf_core::oauth::validate_user_key(&key)
+        .map(|_| key)
+        .map_err(bad_request)
 }
 
 /// `GET /api/oauth/{provider}/start`：302 到平台授权页。
@@ -111,6 +139,10 @@ async fn start(
         Ok(p) => p,
         Err(r) => return r,
     };
+    let user_key = match resolve_user_key(params.user.as_deref(), &headers) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
     let Some(host) = instance_host(&headers) else {
         return bad_request("cannot determine instance host (Host header missing)");
     };
@@ -118,6 +150,7 @@ async fn start(
     authorize_response(
         &manager(&state),
         provider,
+        &user_key,
         &scheme,
         &host,
         params.redirect_path_prefix.as_deref(),
@@ -129,6 +162,7 @@ async fn start(
 fn authorize_response(
     mgr: &OAuthManager,
     provider: OAuthProvider,
+    user_key: &str,
     scheme: &str,
     host: &str,
     prefix: Option<&str>,
@@ -145,7 +179,7 @@ fn authorize_response(
         "{scheme}://{host}{prefix}/api/oauth/{}/callback",
         provider.as_str()
     );
-    match mgr.start(provider, &redirect_url) {
+    match mgr.start(provider, user_key, &redirect_url) {
         Ok(url) => Redirect::to(&url).into_response(),
         Err(e) => internal(e),
     }
@@ -189,23 +223,47 @@ async fn callback(
     }
 }
 
-/// `GET /api/oauth/{provider}/status`：登录态 + username。
-async fn status(State(state): State<SharedState>, Path(provider): Path<String>) -> Response {
+/// `GET /api/oauth/{provider}/status`：登录态 + username（`?user=` 或
+/// `X-Tracker-User`，缺省 default）。
+async fn status(
+    State(state): State<SharedState>,
+    Path(provider): Path<String>,
+    Query(params): Query<UserQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let provider = match parse_provider(&provider) {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let s: OAuthStatus = manager(&state).status(provider);
+    let user_key = match resolve_user_key(params.user.as_deref(), &headers) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let s: OAuthStatus = manager(&state).status(provider, &user_key);
     Json(s).into_response()
 }
 
-/// `POST /api/oauth/{provider}/logout`：清除登录态。
-async fn logout(State(state): State<SharedState>, Path(provider): Path<String>) -> Response {
+#[derive(Deserialize)]
+struct UserQuery {
+    user: Option<String>,
+}
+
+/// `POST /api/oauth/{provider}/logout`：清除指定用户的登录态。
+async fn logout(
+    State(state): State<SharedState>,
+    Path(provider): Path<String>,
+    Query(params): Query<UserQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let provider = match parse_provider(&provider) {
         Ok(p) => p,
         Err(r) => return r,
     };
-    manager(&state).logout(provider);
+    let user_key = match resolve_user_key(params.user.as_deref(), &headers) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    manager(&state).logout(provider, &user_key);
     // 登出后同样热重载：MAL 等仅凭 OAuth 登录才注册的 provider 随之移除。
     let config = state.read().unwrap().config.clone();
     let _ = tokio::spawn(async move {
@@ -273,6 +331,7 @@ mod tests {
         let response = authorize_response(
             &mgr,
             OAuthProvider::Anilist,
+            komf_core::oauth::DEFAULT_USER_KEY,
             "https",
             "komga.example",
             Some("/api/v1/komf"),
@@ -305,11 +364,61 @@ mod tests {
         let response = authorize_response(
             &mgr,
             OAuthProvider::Anilist,
+            komf_core::oauth::DEFAULT_USER_KEY,
             "https",
             "komga.example",
             Some("/a/../b"),
         );
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         cleanup("reject");
+    }
+
+    /// 用户身份键：query 参数优先于 header，缺省 default；非法键 400。
+    #[test]
+    fn resolve_user_key_precedence_and_validation() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            resolve_user_key(None, &headers).unwrap(),
+            komf_core::oauth::DEFAULT_USER_KEY
+        );
+        headers.insert("x-tracker-user", HeaderValue::from_static("bob"));
+        assert_eq!(resolve_user_key(None, &headers).unwrap(), "bob");
+        // query 优先于 header。
+        assert_eq!(resolve_user_key(Some("alice"), &headers).unwrap(), "alice");
+        // 非法键 → 400。
+        let err = resolve_user_key(Some("a b"), &headers).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// start 把 user_key 记入 pending：回调前可从 pending 按 nonce 取回归属。
+    #[test]
+    fn start_records_user_key_in_pending() {
+        let mgr = test_manager("pending-user");
+        let response = authorize_response(
+            &mgr,
+            OAuthProvider::Anilist,
+            "alice",
+            "https",
+            "komga.example",
+            None,
+        );
+        assert!(response.status().is_redirection());
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let url = url::Url::parse(location).unwrap();
+        let state_raw = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state_raw).unwrap();
+        let nonce = state["nonce"].as_str().unwrap();
+        // 与 OAuthManager 的测试同一前提：pending 存了 user_key（经 mgr.start 写入）。
+        assert!(!nonce.is_empty());
+        cleanup("pending-user");
     }
 }

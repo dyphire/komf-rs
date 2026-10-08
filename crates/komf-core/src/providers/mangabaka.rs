@@ -520,7 +520,13 @@ impl MangaBakaApiClient {
     /// 已登录时取当前 access token（过期自动刷新）；未登录返回 None（保持匿名请求）。
     async fn token(&self) -> Option<String> {
         match &self.oauth {
-            Some(o) => o.access_token(crate::oauth::OAuthProvider::MangaBaka).await,
+            Some(o) => {
+                o.access_token(
+                    crate::oauth::OAuthProvider::MangaBaka,
+                    crate::oauth::DEFAULT_USER_KEY,
+                )
+                .await
+            }
             None => None,
         }
     }
@@ -528,7 +534,10 @@ impl MangaBakaApiClient {
     /// 401 且强制刷新失败/重试仍 401 时清除登录态（与 tracker 侧统一行为）。
     fn note_unauthorized(&self) {
         if let Some(o) = &self.oauth {
-            o.logout(crate::oauth::OAuthProvider::MangaBaka);
+            o.logout(
+                crate::oauth::OAuthProvider::MangaBaka,
+                crate::oauth::DEFAULT_USER_KEY,
+            );
         }
     }
 
@@ -555,7 +564,13 @@ impl MangaBakaApiClient {
         let mut status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let refreshed = match &self.oauth {
-                Some(o) => o.refresh_now(crate::oauth::OAuthProvider::MangaBaka).await,
+                Some(o) => {
+                    o.refresh_now(
+                        crate::oauth::OAuthProvider::MangaBaka,
+                        crate::oauth::DEFAULT_USER_KEY,
+                    )
+                    .await
+                }
                 None => None,
             };
             if let Some(new_token) = refreshed {

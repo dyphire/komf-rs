@@ -149,7 +149,13 @@ impl MalClient {
     /// 已登录时附加 OAuth Bearer；未登录返回原请求（依赖 X-MAL-CLIENT-ID）。
     async fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let token = match &self.oauth {
-            Some(o) => o.access_token(crate::oauth::OAuthProvider::Mal).await,
+            Some(o) => {
+                o.access_token(
+                    crate::oauth::OAuthProvider::Mal,
+                    crate::oauth::DEFAULT_USER_KEY,
+                )
+                .await
+            }
             None => None,
         };
         if let Some(token) = token {
@@ -415,9 +421,13 @@ pub fn create_provider(
         return None;
     }
     // 注册条件：配置了 clientId，或已通过 OAuth 登录（登录后由热重载重建本 provider）。
-    let oauth_logged_in = oauth_manager
-        .as_ref()
-        .is_some_and(|o| o.status(crate::oauth::OAuthProvider::Mal).logged_in);
+    let oauth_logged_in = oauth_manager.as_ref().is_some_and(|o| {
+        o.status(
+            crate::oauth::OAuthProvider::Mal,
+            crate::oauth::DEFAULT_USER_KEY,
+        )
+        .logged_in
+    });
     if client_id.is_none() && !oauth_logged_in {
         return None;
     }
