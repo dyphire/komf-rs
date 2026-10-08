@@ -21,19 +21,19 @@ impl BangumiTracker {
         Self { http, oauth }
     }
 
-    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除登录态。
-    fn note_unauthorized(&self) {
+    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除该用户的登录态。
+    fn note_unauthorized(&self, user_key: &str) {
         if let Some(manager) = &self.oauth {
-            manager.logout(OAuthProvider::Bangumi);
+            manager.logout(OAuthProvider::Bangumi, user_key);
         }
     }
 
-    async fn token(&self) -> Result<String, String> {
+    async fn token(&self, user_key: &str) -> Result<String, String> {
         let Some(manager) = &self.oauth else {
             return Err("bangumi: not logged in (oauth manager missing)".to_string());
         };
         manager
-            .access_token(OAuthProvider::Bangumi)
+            .access_token(OAuthProvider::Bangumi, user_key)
             .await
             .ok_or_else(|| "bangumi: not logged in (no access token)".to_string())
     }
@@ -42,12 +42,13 @@ impl BangumiTracker {
     /// 才清登录态（四个 tracker 统一行为：401→强制刷新→重试一次→仍失败才登出）。
     async fn send_authed(
         &self,
+        user_key: &str,
         method: reqwest::Method,
         url: &str,
         body: Option<Value>,
         label: &str,
     ) -> Result<reqwest::Response, String> {
-        let mut token = self.token().await?;
+        let mut token = self.token(user_key).await?;
         let build = |token: &str| {
             let mut request = self
                 .http
@@ -65,7 +66,7 @@ impl BangumiTracker {
         let mut status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let refreshed = match &self.oauth {
-                Some(manager) => manager.refresh_now(OAuthProvider::Bangumi).await,
+                Some(manager) => manager.refresh_now(OAuthProvider::Bangumi, user_key).await,
                 None => None,
             };
             if let Some(new_token) = refreshed {
@@ -77,15 +78,15 @@ impl BangumiTracker {
                 status = response.status();
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.note_unauthorized();
+                self.note_unauthorized(user_key);
             }
         }
         Ok(response)
     }
 
-    async fn get_json(&self, url: &str) -> Result<Value, String> {
+    async fn get_json(&self, user_key: &str, url: &str) -> Result<Value, String> {
         let response = self
-            .send_authed(reqwest::Method::GET, url, None, "bangumi")
+            .send_authed(user_key, reqwest::Method::GET, url, None, "bangumi")
             .await?;
         let status = response.status();
         let body: Value = response
@@ -135,16 +136,16 @@ impl BangumiTracker {
         segments.next()?.parse::<i64>().ok()
     }
 
-    /// 拉取当前用户全部书籍（subject_type=1）收藏 ID 集合，供搜索结果标记 tracked。
+    /// 拉取指定用户全部书籍（subject_type=1）收藏 ID 集合，供搜索结果标记 tracked。
     /// 失败时返回空集（tracked 全部降级为 false，不阻塞搜索）。
-    async fn tracked_subject_ids(&self, username: &str) -> HashSet<i64> {
+    async fn tracked_subject_ids(&self, user_key: &str, username: &str) -> HashSet<i64> {
         let mut ids = HashSet::new();
         let mut offset: i64 = 0;
         loop {
             let url = format!(
                 "{API_BASE}/users/{username}/collections?subject_type=1&limit=100&offset={offset}"
             );
-            let Ok(collection) = self.get_json(&url).await else {
+            let Ok(collection) = self.get_json(user_key, &url).await else {
                 break;
             };
             let Some(data) = collection.get("data").and_then(Value::as_array) else {
@@ -196,9 +197,15 @@ impl BangumiTracker {
     }
 
     /// v0 搜索：`POST /v0/search/subjects`（type=1 书籍）。
-    async fn search_v0(&self, query: &str, nsfw: bool) -> Result<Vec<Value>, String> {
+    async fn search_v0(
+        &self,
+        user_key: &str,
+        query: &str,
+        nsfw: bool,
+    ) -> Result<Vec<Value>, String> {
         let response = self
             .send_authed(
+                user_key,
                 reqwest::Method::POST,
                 &format!("{API_BASE}/search/subjects?limit=20"),
                 Some(json!({
@@ -225,7 +232,7 @@ impl BangumiTracker {
     }
 
     /// 旧 API 兜底：`GET /search/subject/{query}?type=1`（公开，无鉴权）。
-    async fn search_legacy(&self, query: &str) -> Result<Vec<Value>, String> {
+    async fn search_legacy(&self, user_key: &str, query: &str) -> Result<Vec<Value>, String> {
         let encoded: String = query
             .as_bytes()
             .iter()
@@ -251,7 +258,7 @@ impl BangumiTracker {
             .await
             .map_err(|e| format!("bangumi legacy search response parse failed: {e}"))?;
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized();
+            self.note_unauthorized(user_key);
         }
         if !status.is_success() {
             return Err(format!(
@@ -268,11 +275,11 @@ impl BangumiTracker {
     }
 
     /// 当前用户书籍收藏 ID 集合（内部共用；失败返回空集）。
-    async fn current_tracked_ids(&self) -> HashSet<i64> {
+    async fn current_tracked_ids(&self, user_key: &str) -> HashSet<i64> {
         let mut tracked = HashSet::new();
-        if let Ok(me) = self.get_json(&format!("{API_BASE}/me")).await {
+        if let Ok(me) = self.get_json(user_key, &format!("{API_BASE}/me")).await {
             if let Some(username) = me.get("username").and_then(Value::as_str) {
-                tracked = self.tracked_subject_ids(username).await;
+                tracked = self.tracked_subject_ids(user_key, username).await;
             }
         }
         tracked
@@ -285,32 +292,42 @@ impl TrackerService for BangumiTracker {
         "bangumi"
     }
 
-    fn is_logged_in(&self) -> bool {
+    fn is_logged_in(&self, user_key: &str) -> bool {
         match &self.oauth {
-            Some(manager) => manager.status(OAuthProvider::Bangumi).logged_in,
+            Some(manager) => manager.status(OAuthProvider::Bangumi, user_key).logged_in,
             None => false,
         }
     }
 
-    async fn search(&self, query: &str, nsfw: bool) -> Result<Vec<TrackSearchItem>, String> {
+    async fn search(
+        &self,
+        user_key: &str,
+        query: &str,
+        nsfw: bool,
+    ) -> Result<Vec<TrackSearchItem>, String> {
         // 链接输入：bgm.tv/bangumi.tv/subject/{id} 直接定位单条目。
         if let Some(id) = Self::extract_subject_url(query) {
-            let tracked = self.current_tracked_ids().await;
-            let subject = self.get_json(&format!("{API_BASE}/subjects/{id}")).await?;
+            let tracked = self.current_tracked_ids(user_key).await;
+            let subject = self
+                .get_json(user_key, &format!("{API_BASE}/subjects/{id}"))
+                .await?;
             return Ok(Self::subject_to_item(&subject, &tracked)
                 .into_iter()
                 .collect());
         }
         // 用户态 tracked 标记：拉取当前用户书籍收藏集合（失败则降级为全 false）。
-        let tracked = self.current_tracked_ids().await;
+        let tracked = self.current_tracked_ids(user_key).await;
         // R18 条目仅在登录态可见（bgm.tv 对未登录请求忽略 NSFW 过滤；本路由已要求登录）。
-        let subjects = match self.search_v0(query, nsfw).await {
+        let subjects = match self.search_v0(user_key, query, nsfw).await {
             Ok(subjects) => subjects,
             Err(v0_err) => {
                 // 旧 API 兜底：公开搜索接口（无鉴权），响应 { subjects: [...] }。
-                let fallback = self.search_legacy(query).await.map_err(|legacy_err| {
-                    format!("bangumi search failed (v0: {v0_err}; legacy: {legacy_err})")
-                })?;
+                let fallback = self
+                    .search_legacy(user_key, query)
+                    .await
+                    .map_err(|legacy_err| {
+                        format!("bangumi search failed (v0: {v0_err}; legacy: {legacy_err})")
+                    })?;
                 fallback
             }
         };
@@ -320,18 +337,21 @@ impl TrackerService for BangumiTracker {
             .collect())
     }
 
-    async fn get_state(&self, track_id: &str) -> Result<TrackState, String> {
+    async fn get_state(&self, user_key: &str, track_id: &str) -> Result<TrackState, String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid bangumi id: {track_id}"))?;
         // 先取当前用户 username（collection 查询要求指定用户名）。
-        let me = self.get_json(&format!("{API_BASE}/me")).await?;
+        let me = self.get_json(user_key, &format!("{API_BASE}/me")).await?;
         let username = me
             .get("username")
             .and_then(Value::as_str)
             .ok_or_else(|| "bangumi /v0/me returned no username".to_string())?;
         let collection = match self
-            .get_json(&format!("{API_BASE}/users/{username}/collections/{id}"))
+            .get_json(
+                user_key,
+                &format!("{API_BASE}/users/{username}/collections/{id}"),
+            )
             .await
         {
             Ok(v) => v,
@@ -344,7 +364,7 @@ impl TrackerService for BangumiTracker {
             return Ok(TrackState::default()); // 未入列表
         }
         let subject = self
-            .get_json(&format!("{API_BASE}/subjects/{id}"))
+            .get_json(user_key, &format!("{API_BASE}/subjects/{id}"))
             .await
             .ok();
         let status_str = match collection.get("type").and_then(Value::as_i64) {
@@ -386,7 +406,12 @@ impl TrackerService for BangumiTracker {
         })
     }
 
-    async fn update(&self, track_id: &str, update: &TrackUpdate) -> Result<(), String> {
+    async fn update(
+        &self,
+        user_key: &str,
+        track_id: &str,
+        update: &TrackUpdate,
+    ) -> Result<(), String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid bangumi id: {track_id}"))?;
@@ -406,6 +431,7 @@ impl TrackerService for BangumiTracker {
         }
         let response = self
             .send_authed(
+                user_key,
                 reqwest::Method::POST,
                 &format!("{API_BASE}/users/-/collections/{id}"),
                 Some(Value::Object(body)),

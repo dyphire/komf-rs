@@ -14,6 +14,11 @@
 //!
 //! token 持久化于 `<work_dir>/oauth.sqlite`（rusqlite），内存缓存于
 //! `RwLock`，供 provider 请求时附加 `Authorization: Bearer`。
+//!
+//! 多用户：token/登录态按 `(provider, user_key)` 隔离，`user_key` 是不透明
+//! 字符串（由调用方如媒体服务器传入其用户 ID）。所有数据访问方法都要求
+//! `user_key`；未显式指定时用 [`DEFAULT_USER_KEY`]（历史单用户数据迁移后
+//! 也归于此），因此旧行为完全保留。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -25,6 +30,33 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use url::Url;
 use uuid::Uuid;
+
+/// 未提供用户身份时的默认账户键：历史数据与单用户调用方（如 komf 自带
+/// WebUI、元数据 provider）全部落在此键下。
+pub const DEFAULT_USER_KEY: &str = "default";
+
+/// 校验调用方传入的用户身份键：`[A-Za-z0-9_-]{1,64}`。
+/// 字符集与 `validate_redirect_path_prefix` 一致（排除 `.`/`/`/`%` 等路径
+/// 敏感字符），足以覆盖 UUID 与 komga 风格短 ID。SQL 全部参数绑定，此规则
+/// 只是输入卫生，超长/非法字符在路由层即被拒（400）。
+pub fn validate_user_key(key: &str) -> Result<(), String> {
+    const MAX_LEN: usize = 64;
+    if key.is_empty() || key.len() > MAX_LEN {
+        return Err(format!(
+            "invalid user key: length must be 1-{MAX_LEN} bytes, got {}",
+            key.len()
+        ));
+    }
+    if !key
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(format!(
+            "invalid user key '{key}': only [A-Za-z0-9_-] allowed"
+        ));
+    }
+    Ok(())
+}
 
 /// 支持的 OAuth 平台。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -209,11 +241,11 @@ pub struct OAuthStatus {
     pub username: Option<String>,
 }
 
-/// 内存态（token 缓存 + username），sqlite 为持久层。
+/// 内存态（token 缓存 + username），sqlite 为持久层。键 = (provider, user_key)。
 #[derive(Default)]
 struct OAuthInner {
-    tokens: HashMap<OAuthProvider, OAuthToken>,
-    usernames: HashMap<OAuthProvider, String>,
+    tokens: HashMap<(OAuthProvider, String), OAuthToken>,
+    usernames: HashMap<(OAuthProvider, String), String>,
 }
 
 /// OAuth 管理器：授权发起、回调交换、自动刷新、持久化。
@@ -256,7 +288,7 @@ impl OAuthManager {
             return;
         };
         let mut stmt = match conn.prepare(
-            "SELECT provider, access_token, refresh_token, token_type, expires_at, username \
+            "SELECT provider, user_key, access_token, refresh_token, token_type, expires_at, username \
              FROM oauth_tokens",
         ) {
             Ok(s) => s,
@@ -266,13 +298,14 @@ impl OAuthManager {
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
                     OAuthToken {
-                        access_token: row.get(1)?,
-                        refresh_token: row.get(2)?,
-                        token_type: row.get(3)?,
-                        expires_at: row.get(4)?,
+                        access_token: row.get(2)?,
+                        refresh_token: row.get(3)?,
+                        token_type: row.get(4)?,
+                        expires_at: row.get(5)?,
                     },
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .ok();
@@ -280,21 +313,29 @@ impl OAuthManager {
             let mut inner = self.inner.write().unwrap();
             for row in rows.flatten() {
                 if let Some(p) = OAuthProvider::from_str(&row.0) {
-                    inner.tokens.insert(p, row.1);
-                    if let Some(name) = row.2 {
-                        inner.usernames.insert(p, name);
+                    let key = (p, row.1);
+                    inner.tokens.insert(key.clone(), row.2);
+                    if let Some(name) = row.3 {
+                        inner.usernames.insert(key, name);
                     }
                 }
             }
         }
     }
 
-    fn save_token(&self, provider: OAuthProvider, token: &OAuthToken, username: Option<String>) {
+    fn save_token(
+        &self,
+        provider: OAuthProvider,
+        user_key: &str,
+        token: &OAuthToken,
+        username: Option<String>,
+    ) {
         {
             let mut inner = self.inner.write().unwrap();
-            inner.tokens.insert(provider, token.clone());
+            let key = (provider, user_key.to_string());
+            inner.tokens.insert(key.clone(), token.clone());
             if let Some(name) = &username {
-                inner.usernames.insert(provider, name.clone());
+                inner.usernames.insert(key, name.clone());
             }
         }
         let mut guard = self.conn();
@@ -302,13 +343,14 @@ impl OAuthManager {
             return;
         };
         let _ = conn.execute(
-            "INSERT INTO oauth_tokens(provider, access_token, refresh_token, token_type, expires_at, username) \
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT(provider) DO UPDATE SET \
+            "INSERT INTO oauth_tokens(provider, user_key, access_token, refresh_token, token_type, expires_at, username) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(provider, user_key) DO UPDATE SET \
                access_token=excluded.access_token, refresh_token=excluded.refresh_token, \
                token_type=excluded.token_type, expires_at=excluded.expires_at, username=excluded.username",
             params![
                 provider.as_str(),
+                user_key,
                 token.access_token,
                 token.refresh_token,
                 token.token_type,
@@ -318,40 +360,43 @@ impl OAuthManager {
         );
     }
 
-    /// 清除指定平台的登录态（token + username + 残留 pending）。
-    pub fn logout(&self, provider: OAuthProvider) {
+    /// 清除指定平台、指定用户的登录态（token + username + 该用户残留 pending）。
+    pub fn logout(&self, provider: OAuthProvider, user_key: &str) {
         {
             let mut inner = self.inner.write().unwrap();
-            inner.tokens.remove(&provider);
-            inner.usernames.remove(&provider);
+            let key = (provider, user_key.to_string());
+            inner.tokens.remove(&key);
+            inner.usernames.remove(&key);
         }
         let mut guard = self.conn();
         if let Some(conn) = guard.as_mut() {
             let _ = conn.execute(
-                "DELETE FROM oauth_tokens WHERE provider=?1",
-                params![provider.as_str()],
+                "DELETE FROM oauth_tokens WHERE provider=?1 AND user_key=?2",
+                params![provider.as_str(), user_key],
             );
             let _ = conn.execute(
-                "DELETE FROM oauth_pending WHERE provider=?1",
-                params![provider.as_str()],
+                "DELETE FROM oauth_pending WHERE provider=?1 AND user_key=?2",
+                params![provider.as_str(), user_key],
             );
         }
     }
 
     /// 登录状态（含 username，供 WebUI 展示）。
-    pub fn status(&self, provider: OAuthProvider) -> OAuthStatus {
+    pub fn status(&self, provider: OAuthProvider, user_key: &str) -> OAuthStatus {
         let inner = self.inner.read().unwrap();
+        let key = (provider, user_key.to_string());
         OAuthStatus {
-            logged_in: inner.tokens.contains_key(&provider),
-            username: inner.usernames.get(&provider).cloned(),
+            logged_in: inner.tokens.contains_key(&key),
+            username: inner.usernames.get(&key).cloned(),
         }
     }
 
-    /// 生成 code_verifier（43-128 个 unreserved 字符；两段 uuid hex = 64 字符）。
-    /// 记录"通过 komf API 关联"的条目（update 成功后调用；按 provider+track_id upsert）。
+    /// 记录"通过 komf API 关联"的条目（update 成功后调用；按 user_key + provider
+    /// + track_id upsert）。
     pub fn record_tracker_link(
         &self,
         provider: &str,
+        user_key: &str,
         track_id: &str,
         title: Option<&str>,
         url: Option<&str>,
@@ -362,10 +407,11 @@ impl OAuthManager {
             return;
         };
         let _ = conn.execute(
-            "INSERT INTO tracker_links(provider, track_id, title, url, cover_url, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT(provider, track_id) DO UPDATE SET title=excluded.title, url=excluded.url, cover_url=excluded.cover_url, updated_at=excluded.updated_at",
+            "INSERT INTO tracker_links(provider, user_key, track_id, title, url, cover_url, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(provider, user_key, track_id) DO UPDATE SET title=excluded.title, url=excluded.url, cover_url=excluded.cover_url, updated_at=excluded.updated_at",
             params![
                 provider,
+                user_key,
                 track_id,
                 title,
                 url,
@@ -375,10 +421,11 @@ impl OAuthManager {
         );
     }
 
-    /// 已关联条目台账（按更新时间倒序）。
-    /// 返回 (provider, track_id, title, url, updated_at)。
+    /// 已关联条目台账（按更新时间倒序），仅返回指定用户的记录。
+    /// 返回 (provider, track_id, title, url, cover_url, updated_at)。
     pub fn list_tracker_links(
         &self,
+        user_key: &str,
     ) -> Vec<(
         String,
         String,
@@ -392,12 +439,13 @@ impl OAuthManager {
             return Vec::new();
         };
         let mut stmt = match conn.prepare(
-            "SELECT provider, track_id, title, url, cover_url, updated_at FROM tracker_links ORDER BY updated_at DESC",
+            "SELECT provider, track_id, title, url, cover_url, updated_at FROM tracker_links \
+             WHERE user_key=?1 ORDER BY updated_at DESC",
         ) {
             Ok(st) => st,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![user_key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -411,6 +459,7 @@ impl OAuthManager {
             .unwrap_or_default()
     }
 
+    /// 生成 code_verifier（43-128 个 unreserved 字符；两段 uuid hex = 64 字符）。
     fn new_verifier() -> String {
         format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
     }
@@ -426,10 +475,15 @@ impl OAuthManager {
         }
     }
 
-    /// 发起授权：生成 verifier/nonce 暂存，返回可跳转的 authorize URL。
-    /// `redirect_url`：state.redirectUrl（当前实例 `/api/oauth/{p}/callback`，
-    /// 中转页据此把授权结果转交回来）。
-    pub fn start(&self, provider: OAuthProvider, redirect_url: &str) -> Result<String, String> {
+    /// 发起授权：生成 verifier/nonce 暂存（连同归属的 user_key），返回可跳转的
+    /// authorize URL。`redirect_url`：state.redirectUrl（当前实例
+    /// `/api/oauth/{p}/callback`，中转页据此把授权结果转交回来）。
+    pub fn start(
+        &self,
+        provider: OAuthProvider,
+        user_key: &str,
+        redirect_url: &str,
+    ) -> Result<String, String> {
         let app = OAuthApp::for_provider(provider);
         let verifier = Self::new_verifier();
         let nonce = Uuid::new_v4().simple().to_string();
@@ -439,13 +493,20 @@ impl OAuthManager {
         });
         let state = serde_json::to_string(&state_payload).map_err(|e| e.to_string())?;
 
-        // 暂存 pending（TTL）
+        // 暂存 pending（TTL）。主键 (provider, nonce)：同平台可并发发起多场
+        // 授权（不同用户各自登录），互不覆盖。
         let mut guard = self.conn();
         if let Some(conn) = guard.as_mut() {
             let _ = conn.execute(
-                "INSERT INTO oauth_pending(provider, nonce, verifier, created_at) VALUES(?1, ?2, ?3, ?4) \
-                 ON CONFLICT(provider) DO UPDATE SET nonce=excluded.nonce, verifier=excluded.verifier, created_at=excluded.created_at",
-                params![provider.as_str(), nonce, verifier, chrono::Utc::now().timestamp()],
+                "INSERT INTO oauth_pending(provider, nonce, verifier, user_key, created_at) \
+                 VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![
+                    provider.as_str(),
+                    nonce,
+                    verifier,
+                    user_key,
+                    chrono::Utc::now().timestamp()
+                ],
             );
         }
         drop(guard);
@@ -474,7 +535,8 @@ impl OAuthManager {
         Ok(url.to_string())
     }
 
-    /// 校验回调 state 并完成 code→token 交换。
+    /// 校验回调 state 并完成 code→token 交换。token 归属的 user_key 从
+    /// pending（发起时存入）取回，调用方无需也无法指定。
     pub async fn handle_callback(
         self: &Arc<Self>,
         provider: OAuthProvider,
@@ -489,30 +551,28 @@ impl OAuthManager {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "state 缺少 nonce")?;
         let now = chrono::Utc::now().timestamp();
-        let verifier = {
+        let (verifier, user_key) = {
             let mut guard = self.conn();
             let conn = guard.as_mut().ok_or("数据库未就绪")?;
             let pending: Option<(String, String, i64)> = conn
                 .query_row(
-                    "SELECT nonce, verifier, created_at FROM oauth_pending WHERE provider=?1",
-                    params![provider.as_str()],
+                    "SELECT verifier, user_key, created_at FROM oauth_pending \
+                     WHERE provider=?1 AND nonce=?2",
+                    params![provider.as_str(), nonce],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .ok();
             let _ = conn.execute(
-                "DELETE FROM oauth_pending WHERE provider=?1",
-                params![provider.as_str()],
+                "DELETE FROM oauth_pending WHERE provider=?1 AND nonce=?2",
+                params![provider.as_str(), nonce],
             );
-            let Some((stored_nonce, verifier, created)) = pending else {
+            let Some((verifier, user_key, created)) = pending else {
                 return Err("授权会话不存在或已过期，请重新发起授权".to_string());
             };
-            if stored_nonce != nonce {
-                return Err("state 校验失败（nonce 不匹配）".to_string());
-            }
             if now - created > PENDING_TTL_SECS {
                 return Err("授权会话已过期，请重新发起授权".to_string());
             }
-            verifier
+            (verifier, user_key)
         };
 
         // 2) 交换 token
@@ -541,7 +601,7 @@ impl OAuthManager {
         // 3) 获取 username（失败不阻断登录）
         let username = self.fetch_username(provider, &token.access_token).await;
 
-        self.save_token(provider, &token, username);
+        self.save_token(provider, &user_key, &token, username);
         Ok(())
     }
 
@@ -673,36 +733,42 @@ impl OAuthManager {
         result
     }
 
-    /// 取当前可用的 access token（过期自动刷新；无 refresh → 清除并返回 None）。
-    pub async fn access_token(&self, provider: OAuthProvider) -> Option<String> {
+    /// 取指定用户当前可用的 access token（过期自动刷新；无 refresh → 清除该
+    /// 用户登录态并返回 None）。
+    pub async fn access_token(&self, provider: OAuthProvider, user_key: &str) -> Option<String> {
         let token = {
             let inner = self.inner.read().unwrap();
-            inner.tokens.get(&provider).cloned()
+            inner.tokens.get(&(provider, user_key.to_string())).cloned()
         }?;
         if !token.expired() {
             return Some(token.access_token);
         }
         let Some(_) = token.refresh_token.clone() else {
             // 无 refresh（AniList 等）：清除，需重新授权
-            self.logout(provider);
+            self.logout(provider, user_key);
             return None;
         };
         let app = OAuthApp::for_provider(provider);
         if app.requires_secret && app.client_secret.is_none() {
             // 无 secret 无法刷新：清除登录态，需重新授权（重新编译时注入即可）。
             tracing::warn!(
-                "OAuth refresh skipped for {}: {} not set at build time",
+                "OAuth refresh skipped for {} (user {}): {} not set at build time",
                 provider.as_str(),
+                user_key,
                 app.secret_env_var
             );
-            self.logout(provider);
+            self.logout(provider, user_key);
             return None;
         }
-        match self.refresh_now(provider).await {
+        match self.refresh_now(provider, user_key).await {
             Some(access_token) => Some(access_token),
             None => {
-                tracing::warn!("OAuth refresh failed for {}", provider.as_str());
-                self.logout(provider);
+                tracing::warn!(
+                    "OAuth refresh failed for {} (user {})",
+                    provider.as_str(),
+                    user_key
+                );
+                self.logout(provider, user_key);
                 None
             }
         }
@@ -711,10 +777,10 @@ impl OAuthManager {
     /// 强制刷新：源站 401（token 被判无效，本地 expires_at 尚未触发）时调用。
     /// 有 refresh_token 且 secret 齐备则直接走 token 刷新；成功返回新 access token
     /// 并持久化（username 保留），失败返回 None（由调用方决定是否登出）。
-    pub async fn refresh_now(&self, provider: OAuthProvider) -> Option<String> {
+    pub async fn refresh_now(&self, provider: OAuthProvider, user_key: &str) -> Option<String> {
         let token = {
             let inner = self.inner.read().unwrap();
-            inner.tokens.get(&provider).cloned()
+            inner.tokens.get(&(provider, user_key.to_string())).cloned()
         }?;
         let Some(refresh_token) = token.refresh_token.clone() else {
             return None;
@@ -740,9 +806,12 @@ impl OAuthManager {
         };
         let username = {
             let inner = self.inner.read().unwrap();
-            inner.usernames.get(&provider).cloned()
+            inner
+                .usernames
+                .get(&(provider, user_key.to_string()))
+                .cloned()
         };
-        self.save_token(provider, &fresh, username);
+        self.save_token(provider, user_key, &fresh, username);
         Some(fresh.access_token)
     }
 }
@@ -778,36 +847,119 @@ pub fn validate_redirect_path_prefix(prefix: &str) -> Result<(), String> {
     }
 }
 
+/// 判断表是否已有指定列（`PRAGMA table_info`）。
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
+        return false;
+    };
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map(|rows| rows.flatten().collect::<Vec<_>>())
+        .unwrap_or_default();
+    names.iter().any(|n| n == column)
+}
+
+/// 重建表：把旧表数据（缺失的列以默认值补齐）搬入新 schema 后丢弃旧表。
+/// SQLite 不能改主键/加主键列，改键只能重建。
+fn rebuild_table(conn: &Connection, table: &str, new_ddl: &str, insert_select: &str) {
+    let backup = format!("{table}_old");
+    let _ = conn.execute(&format!("ALTER TABLE {table} RENAME TO {backup}"), []);
+    let _ = conn.execute_batch(new_ddl);
+    let _ = conn.execute(insert_select, []);
+    let _ = conn.execute(&format!("DROP TABLE {backup}"), []);
+}
+
 fn open_db(path: &Path) -> Option<Connection> {
     let conn = Connection::open(path).ok()?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS oauth_tokens (
-            provider TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            user_key TEXT NOT NULL DEFAULT 'default',
             access_token TEXT NOT NULL,
             refresh_token TEXT,
             token_type TEXT,
             expires_at INTEGER,
-            username TEXT
+            username TEXT,
+            PRIMARY KEY (provider, user_key)
         );
         CREATE TABLE IF NOT EXISTS oauth_pending (
-            provider TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
             nonce TEXT NOT NULL,
             verifier TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            user_key TEXT NOT NULL DEFAULT 'default',
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (provider, nonce)
         );
         CREATE TABLE IF NOT EXISTS tracker_links (
             provider TEXT NOT NULL,
+            user_key TEXT NOT NULL DEFAULT 'default',
             track_id TEXT NOT NULL,
             title TEXT,
             url TEXT,
             cover_url TEXT,
             updated_at INTEGER NOT NULL,
-            PRIMARY KEY (provider, track_id)
+            PRIMARY KEY (provider, user_key, track_id)
         );",
     )
     .ok()?;
-    // 迁移旧库：tracker_links 无 cover_url 列时补充（列已存在时报错，忽略）。
-    let _ = conn.execute("ALTER TABLE tracker_links ADD COLUMN cover_url TEXT", []);
+    // 迁移旧库（主键变更只能重建表；user_key 一律回填 'default'）：
+    if !column_exists(&conn, "oauth_tokens", "user_key") {
+        rebuild_table(
+            &conn,
+            "oauth_tokens",
+            "CREATE TABLE oauth_tokens (
+                provider TEXT NOT NULL,
+                user_key TEXT NOT NULL DEFAULT 'default',
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                token_type TEXT,
+                expires_at INTEGER,
+                username TEXT,
+                PRIMARY KEY (provider, user_key)
+            );",
+            "INSERT INTO oauth_tokens(provider, user_key, access_token, refresh_token, token_type, expires_at, username) \
+             SELECT provider, 'default', access_token, refresh_token, token_type, expires_at, username FROM oauth_tokens_old",
+        );
+    }
+    if !column_exists(&conn, "oauth_pending", "user_key") {
+        rebuild_table(
+            &conn,
+            "oauth_pending",
+            "CREATE TABLE oauth_pending (
+                provider TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                verifier TEXT NOT NULL,
+                user_key TEXT NOT NULL DEFAULT 'default',
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (provider, nonce)
+            );",
+            "INSERT INTO oauth_pending(provider, nonce, verifier, user_key, created_at) \
+             SELECT provider, nonce, verifier, 'default', created_at FROM oauth_pending_old",
+        );
+    }
+    if !column_exists(&conn, "tracker_links", "user_key") {
+        rebuild_table(
+            &conn,
+            "tracker_links",
+            "CREATE TABLE tracker_links (
+                provider TEXT NOT NULL,
+                user_key TEXT NOT NULL DEFAULT 'default',
+                track_id TEXT NOT NULL,
+                title TEXT,
+                url TEXT,
+                cover_url TEXT,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (provider, user_key, track_id)
+            );",
+            // cover_url 一律回填 NULL（超旧库可能缺该列；INSERT SELECT 引用不存在的
+            // 列会整体失败丢数据，台账行非关键数据，下次 update 会补回）。
+            "INSERT INTO tracker_links(provider, user_key, track_id, title, url, cover_url, updated_at) \
+             SELECT provider, 'default', track_id, title, url, NULL, updated_at FROM tracker_links_old",
+        );
+    } else {
+        // 已是新 schema 的库：仅补齐 cover_url（列已存在时报错，忽略）。
+        let _ = conn.execute("ALTER TABLE tracker_links ADD COLUMN cover_url TEXT", []);
+    }
     Some(conn)
 }
 
@@ -905,5 +1057,197 @@ mod tests {
                 p.as_str()
             );
         }
+    }
+
+    /// user_key 校验：字符集与长度上限（kmrs 等调用方的用户 ID 形态须被接受，
+    /// 路径敏感字符须被拒）。
+    #[test]
+    fn user_key_validation() {
+        for ok in [
+            "default",
+            "alice",
+            "01J5Y5ZQ0K",
+            "550e8400-e29b-41d4-a716-446655440000",
+            &"a".repeat(64),
+        ] {
+            assert!(validate_user_key(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "a b", "a/b", "a.b", "a%2f", "中文", &"a".repeat(65)] {
+            assert!(validate_user_key(bad).is_err(), "{bad}");
+        }
+    }
+
+    fn test_manager_dir(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "komf-oauth-core-{test_name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cleanup_dir(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 旧 schema（provider 单键、无 user_key 列）→ 新管理器打开后数据归入
+    /// 'default' 用户且读写正常。
+    #[test]
+    fn migration_assigns_existing_tokens_to_default_user() {
+        let dir = test_manager_dir("migrate");
+        let db_path = dir.join("oauth.sqlite");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE oauth_tokens (
+                    provider TEXT PRIMARY KEY,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT,
+                    token_type TEXT,
+                    expires_at INTEGER,
+                    username TEXT
+                );
+                CREATE TABLE tracker_links (
+                    provider TEXT NOT NULL,
+                    track_id TEXT NOT NULL,
+                    title TEXT,
+                    url TEXT,
+                    cover_url TEXT,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (provider, track_id)
+                );
+                INSERT INTO oauth_tokens(provider, access_token, username) \
+                    VALUES('anilist', 'legacy-token', 'legacy-user');
+                INSERT INTO tracker_links(provider, track_id, title, updated_at) \
+                    VALUES('anilist', '42', 'Legacy Title', 1700000000);",
+            )
+            .unwrap();
+        }
+        let mgr = OAuthManager::new(Some(&dir), reqwest::Client::new());
+        // 旧 token 归 default。
+        let status = mgr.status(OAuthProvider::Anilist, DEFAULT_USER_KEY);
+        assert!(status.logged_in);
+        assert_eq!(status.username.as_deref(), Some("legacy-user"));
+        // 其他用户不受影响（未登录）。
+        assert!(!mgr.status(OAuthProvider::Anilist, "alice").logged_in);
+        // 旧台账归 default，新用户看不到。
+        let links = mgr.list_tracker_links(DEFAULT_USER_KEY);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].1, "42");
+        assert!(mgr.list_tracker_links("alice").is_empty());
+        cleanup_dir(&dir);
+    }
+
+    /// 多用户隔离：同平台两个用户的 token 互不可见；logout 只清掉目标用户。
+    #[tokio::test]
+    async fn per_user_token_isolation() {
+        let dir = test_manager_dir("isolate");
+        let mgr = OAuthManager::new(Some(&dir), reqwest::Client::new());
+        let token_a = OAuthToken {
+            access_token: "token-alice".to_string(),
+            refresh_token: None,
+            token_type: Some("Bearer".to_string()),
+            expires_at: None,
+        };
+        let token_b = OAuthToken {
+            access_token: "token-bob".to_string(),
+            ..token_a.clone()
+        };
+        mgr.save_token(
+            OAuthProvider::Mal,
+            "alice",
+            &token_a,
+            Some("alice".to_string()),
+        );
+        mgr.save_token(OAuthProvider::Mal, "bob", &token_b, Some("bob".to_string()));
+
+        assert_eq!(
+            mgr.access_token(OAuthProvider::Mal, "alice")
+                .await
+                .as_deref(),
+            Some("token-alice")
+        );
+        assert_eq!(
+            mgr.access_token(OAuthProvider::Mal, "bob").await.as_deref(),
+            Some("token-bob")
+        );
+        assert_eq!(
+            mgr.status(OAuthProvider::Mal, "alice").username.as_deref(),
+            Some("alice")
+        );
+
+        mgr.logout(OAuthProvider::Mal, "alice");
+        assert!(!mgr.status(OAuthProvider::Mal, "alice").logged_in);
+        assert!(mgr.status(OAuthProvider::Mal, "bob").logged_in);
+
+        // 重新打开（持久层重载）：bob 的 token 仍在，alice 已彻底清除。
+        drop(mgr);
+        let mgr = OAuthManager::new(Some(&dir), reqwest::Client::new());
+        assert_eq!(
+            mgr.access_token(OAuthProvider::Mal, "bob").await.as_deref(),
+            Some("token-bob")
+        );
+        assert!(!mgr.status(OAuthProvider::Mal, "alice").logged_in);
+        cleanup_dir(&dir);
+    }
+
+    /// 同平台并发发起多场授权：pending 按 (provider, nonce) 存储，互不覆盖，
+    /// 且各场 pending 记住自己的 user_key。
+    #[test]
+    fn concurrent_pending_logins_same_provider() {
+        let dir = test_manager_dir("pending");
+        let mgr = OAuthManager::new(Some(&dir), reqwest::Client::new());
+
+        let nonce_of = |url: &str| -> String {
+            let url = Url::parse(url).unwrap();
+            let state = url
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned())
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(&state).unwrap()["nonce"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        let url_a = mgr
+            .start(
+                OAuthProvider::Anilist,
+                "alice",
+                "http://x/api/oauth/anilist/callback",
+            )
+            .unwrap();
+        let url_b = mgr
+            .start(
+                OAuthProvider::Anilist,
+                "bob",
+                "http://x/api/oauth/anilist/callback",
+            )
+            .unwrap();
+        let nonce_a = nonce_of(&url_a);
+        let nonce_b = nonce_of(&url_b);
+        assert_ne!(nonce_a, nonce_b);
+
+        let guard = mgr.conn();
+        let conn = guard.as_ref().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_pending WHERE provider='anilist'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "两场同平台授权必须共存");
+        let user_of_a: String = conn
+            .query_row(
+                "SELECT user_key FROM oauth_pending WHERE nonce=?1",
+                params![nonce_a],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(user_of_a, "alice");
+        cleanup_dir(&dir);
     }
 }

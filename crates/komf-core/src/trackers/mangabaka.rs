@@ -128,27 +128,27 @@ impl MangaBakaTracker {
         }
     }
 
-    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除登录态。
-    fn note_unauthorized(&self) {
+    /// 源站判定 token 失效（HTTP 401，且强制刷新失败/重试仍 401）时清除该用户的登录态。
+    fn note_unauthorized(&self, user_key: &str) {
         if let Some(manager) = &self.oauth {
-            manager.logout(OAuthProvider::MangaBaka);
+            manager.logout(OAuthProvider::MangaBaka, user_key);
         }
     }
 
-    async fn token(&self) -> Result<String, String> {
+    async fn token(&self, user_key: &str) -> Result<String, String> {
         let Some(manager) = &self.oauth else {
             return Err("mangabaka: not logged in (oauth manager missing)".to_string());
         };
         manager
-            .access_token(OAuthProvider::MangaBaka)
+            .access_token(OAuthProvider::MangaBaka, user_key)
             .await
             .ok_or_else(|| "mangabaka: not logged in (no access token)".to_string())
     }
 
     /// 带 Bearer 的 GET，解析 JSON 值。遇 401 先强制刷新重试一次，刷新失败或
     /// 重试仍 401 才清登录态（四个 tracker 统一行为：401→强制刷新→重试一次→仍失败才登出）。
-    async fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
-        let mut token = self.token().await?;
+    async fn get_json(&self, user_key: &str, url: &str) -> Result<serde_json::Value, String> {
+        let mut token = self.token(user_key).await?;
         let mut response = self
             .http
             .get(url)
@@ -159,7 +159,11 @@ impl MangaBakaTracker {
         let mut status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let refreshed = match &self.oauth {
-                Some(manager) => manager.refresh_now(OAuthProvider::MangaBaka).await,
+                Some(manager) => {
+                    manager
+                        .refresh_now(OAuthProvider::MangaBaka, user_key)
+                        .await
+                }
                 None => None,
             };
             if let Some(new_token) = refreshed {
@@ -174,7 +178,7 @@ impl MangaBakaTracker {
                 status = response.status();
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.note_unauthorized();
+                self.note_unauthorized(user_key);
             }
         }
         let body: serde_json::Value = response
@@ -283,7 +287,11 @@ impl MangaBakaTracker {
     }
 
     /// 批量查询收藏状态 → 已收藏的 series_id 集合。
-    async fn tracked_ids(&self, ids: &[i64]) -> Result<std::collections::HashSet<i64>, String> {
+    async fn tracked_ids(
+        &self,
+        user_key: &str,
+        ids: &[i64],
+    ) -> Result<std::collections::HashSet<i64>, String> {
         if ids.is_empty() {
             return Ok(std::collections::HashSet::new());
         }
@@ -293,7 +301,7 @@ impl MangaBakaTracker {
             .collect::<Vec<_>>()
             .join("&");
         let body = self
-            .get_json(&format!("{BASE_URL}/v1/my/library/batch?{query}"))
+            .get_json(user_key, &format!("{BASE_URL}/v1/my/library/batch?{query}"))
             .await?;
         let data = body
             .get("data")
@@ -336,14 +344,19 @@ impl TrackerService for MangaBakaTracker {
         "mangabaka"
     }
 
-    fn is_logged_in(&self) -> bool {
+    fn is_logged_in(&self, user_key: &str) -> bool {
         match &self.oauth {
-            Some(manager) => manager.status(OAuthProvider::MangaBaka).logged_in,
+            Some(manager) => manager.status(OAuthProvider::MangaBaka, user_key).logged_in,
             None => false,
         }
     }
 
-    async fn search(&self, query: &str, nsfw: bool) -> Result<Vec<TrackSearchItem>, String> {
+    async fn search(
+        &self,
+        user_key: &str,
+        query: &str,
+        nsfw: bool,
+    ) -> Result<Vec<TrackSearchItem>, String> {
         // 链接输入：mangabaka.org/{id} 直接定位单条目（tracked 单查）。
         if let Some(id) = Self::extract_series_url(query) {
             let body = self
@@ -354,7 +367,7 @@ impl TrackerService for MangaBakaTracker {
             )
             .map_err(|e| format!("mangabaka series parse failed: {e}"))?;
             let tracked = self
-                .get_json(&format!("{BASE_URL}/v1/my/library/{id}"))
+                .get_json(user_key, &format!("{BASE_URL}/v1/my/library/{id}"))
                 .await
                 .map(|b| b.get("data").map(|d| !d.is_null()).unwrap_or(false))
                 .unwrap_or(false);
@@ -373,14 +386,14 @@ impl TrackerService for MangaBakaTracker {
             serde_json::from_value(body.get("data").cloned().unwrap_or(serde_json::Value::Null))
                 .map_err(|e| format!("mangabaka search parse failed: {e}"))?;
         let ids = series.iter().map(|s| s.id).collect::<Vec<_>>();
-        let tracked = self.tracked_ids(&ids).await.unwrap_or_default();
+        let tracked = self.tracked_ids(user_key, &ids).await.unwrap_or_default();
         Ok(series
             .iter()
             .map(|s| self.series_to_item(s, tracked.contains(&s.id)))
             .collect())
     }
 
-    async fn get_state(&self, track_id: &str) -> Result<TrackState, String> {
+    async fn get_state(&self, user_key: &str, track_id: &str) -> Result<TrackState, String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid mangabaka id: {track_id}"))?;
@@ -399,7 +412,7 @@ impl TrackerService for MangaBakaTracker {
         let (total_chapters, total_volumes) = totals.unwrap_or((None, None));
         // 收藏状态：404 = 未收藏 → 空状态（总数仍返回）。
         let Ok(body) = self
-            .get_json(&format!("{BASE_URL}/v1/my/library/{id}"))
+            .get_json(user_key, &format!("{BASE_URL}/v1/my/library/{id}"))
             .await
         else {
             return Ok(TrackState {
@@ -430,11 +443,16 @@ impl TrackerService for MangaBakaTracker {
         })
     }
 
-    async fn update(&self, track_id: &str, update: &TrackUpdate) -> Result<(), String> {
+    async fn update(
+        &self,
+        user_key: &str,
+        track_id: &str,
+        update: &TrackUpdate,
+    ) -> Result<(), String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid mangabaka id: {track_id}"))?;
-        let mut token = self.token().await?;
+        let mut token = self.token(user_key).await?;
 
         let mut body: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         if let Some(status) = update.status {
@@ -478,7 +496,7 @@ impl TrackerService for MangaBakaTracker {
 
         // 已收藏 → PATCH；未收藏 → POST（create 语义）。
         let existing = self
-            .get_json(&format!("{BASE_URL}/v1/my/library/{id}"))
+            .get_json(user_key, &format!("{BASE_URL}/v1/my/library/{id}"))
             .await
             .map(|b| b.get("data").map(|d| !d.is_null()).unwrap_or(false))
             .unwrap_or(false);
@@ -500,7 +518,11 @@ impl TrackerService for MangaBakaTracker {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             // 401：先强制刷新重试一次，失败才清登录态（与 get_json 一致）。
             let refreshed = match &self.oauth {
-                Some(manager) => manager.refresh_now(OAuthProvider::MangaBaka).await,
+                Some(manager) => {
+                    manager
+                        .refresh_now(OAuthProvider::MangaBaka, user_key)
+                        .await
+                }
                 None => None,
             };
             if let Some(new_token) = refreshed {
@@ -520,7 +542,7 @@ impl TrackerService for MangaBakaTracker {
                 status = response.status();
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.note_unauthorized();
+                self.note_unauthorized(user_key);
             }
         }
         if !status.is_success() {

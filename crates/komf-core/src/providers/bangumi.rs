@@ -140,7 +140,13 @@ impl BangumiClient {
     /// 已登录时附加 OAuth Bearer（覆盖 default header 的手动 token）；未登录原样返回。
     async fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let token = match &self.oauth {
-            Some(o) => o.access_token(crate::oauth::OAuthProvider::Bangumi).await,
+            Some(o) => {
+                o.access_token(
+                    crate::oauth::OAuthProvider::Bangumi,
+                    crate::oauth::DEFAULT_USER_KEY,
+                )
+                .await
+            }
             None => None,
         };
         if let Some(token) = token {
@@ -3771,7 +3777,14 @@ mod tests {
             assert_eq!(md.metadata.authors[0].name, "藤本タツキ");
             // 无笔名的出版社 person 仍按开关走 name_cn / 原名
             let publisher = md.metadata.publisher.as_ref().map(|p| p.name.as_str());
-            assert_eq!(publisher, if use_cn { Some("台湾尖端") } else { Some("尖端出版") });
+            assert_eq!(
+                publisher,
+                if use_cn {
+                    Some("台湾尖端")
+                } else {
+                    Some("尖端出版")
+                }
+            );
         }
     }
 

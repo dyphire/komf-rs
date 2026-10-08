@@ -241,7 +241,13 @@ impl AniListClient {
         self.limiter.acquire().await;
         let mut request = self.http.post(GRAPHQL_URL);
         let token = match &self.oauth {
-            Some(o) => o.access_token(crate::oauth::OAuthProvider::Anilist).await,
+            Some(o) => {
+                o.access_token(
+                    crate::oauth::OAuthProvider::Anilist,
+                    crate::oauth::DEFAULT_USER_KEY,
+                )
+                .await
+            }
             None => None,
         };
         if let Some(token) = token {
@@ -407,7 +413,13 @@ impl AniListMetadataMapper {
         }
         self.oauth
             .as_ref()
-            .map(|o| o.status(crate::oauth::OAuthProvider::Anilist).logged_in)
+            .map(|o| {
+                o.status(
+                    crate::oauth::OAuthProvider::Anilist,
+                    crate::oauth::DEFAULT_USER_KEY,
+                )
+                .logged_in
+            })
             .unwrap_or(false)
     }
 
@@ -638,8 +650,9 @@ fn reorder_by_language_priority(titles: &mut Vec<SeriesTitle>, priority: &[Strin
     let mut out: Vec<SeriesTitle> = Vec::with_capacity(titles.len());
     for lang in priority {
         let tag = language_tag(lang);
-        let (hit, rest): (Vec<_>, Vec<_>) =
-            titles.drain(..).partition(|t| t.language.as_deref() == Some(tag));
+        let (hit, rest): (Vec<_>, Vec<_>) = titles
+            .drain(..)
+            .partition(|t| t.language.as_deref() == Some(tag));
         out.extend(hit);
         *titles = rest;
     }
@@ -1073,7 +1086,14 @@ mod tests {
             Some(std::path::Path::new("__komf_test_no_dir__")),
             reqwest::Client::new(),
         );
-        assert!(!oauth.status(crate::oauth::OAuthProvider::Anilist).logged_in);
+        assert!(
+            !oauth
+                .status(
+                    crate::oauth::OAuthProvider::Anilist,
+                    crate::oauth::DEFAULT_USER_KEY
+                )
+                .logged_in
+        );
         let mapper = mapper_with_oauth(oauth);
         let out = mapper.to_series_metadata(&media, None);
         let t: Vec<_> = out
@@ -1255,7 +1275,12 @@ mod tests {
         let media: AniListMedia = serde_json::from_str(json).unwrap();
         let mapper = mapper_with_priority(vec![" Native ", "bogus", "ENGLISH"]);
         let out = mapper.to_series_metadata(&media, None);
-        let names: Vec<_> = out.metadata.titles.iter().map(|t| t.name.as_str()).collect();
+        let names: Vec<_> = out
+            .metadata
+            .titles
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         // native 提前；english 无值跳过；romaji 保持原位次在后
         assert_eq!(names, vec!["ネイティブ", "ROMAJI"]);
         assert_eq!(out.metadata.title.as_ref().unwrap().name, "ネイティブ");

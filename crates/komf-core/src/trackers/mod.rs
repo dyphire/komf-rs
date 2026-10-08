@@ -86,18 +86,33 @@ pub(crate) fn parse_tracker_url(query: &str) -> Option<url::Url> {
 }
 
 /// 平台 tracker 的统一接口。
+///
+/// 所有方法都带 `user_key`：多用户场景下每个用户在每个平台有独立的 OAuth
+/// 登录态，komf 按 `(provider, user_key)` 取 token（见
+/// [`crate::oauth::OAuthManager`]）。单用户调用方传
+/// [`crate::oauth::DEFAULT_USER_KEY`]。
 #[async_trait::async_trait]
 pub trait TrackerService: Send + Sync {
     /// 平台标识（`anilist` / `mal` / `bangumi`）。
     fn provider(&self) -> &'static str;
-    /// 是否已登录（有可用 OAuth token）。
-    fn is_logged_in(&self) -> bool;
+    /// 指定用户是否已登录（有可用 OAuth token）。
+    fn is_logged_in(&self, user_key: &str) -> bool;
     /// 按标题搜索平台上的条目。`nsfw = true` 包含成人内容（平台允许时）。
-    async fn search(&self, query: &str, nsfw: bool) -> Result<Vec<TrackSearchItem>, String>;
+    async fn search(
+        &self,
+        user_key: &str,
+        query: &str,
+        nsfw: bool,
+    ) -> Result<Vec<TrackSearchItem>, String>;
     /// 读取某条目在平台上的跟踪状态。
-    async fn get_state(&self, track_id: &str) -> Result<TrackState, String>;
+    async fn get_state(&self, user_key: &str, track_id: &str) -> Result<TrackState, String>;
     /// 推送状态/进度/评分到平台。
-    async fn update(&self, track_id: &str, update: &TrackUpdate) -> Result<(), String>;
+    async fn update(
+        &self,
+        user_key: &str,
+        track_id: &str,
+        update: &TrackUpdate,
+    ) -> Result<(), String>;
 }
 
 /// 四个平台的 tracker 容器（app 层持有，供路由按 provider 分发）。

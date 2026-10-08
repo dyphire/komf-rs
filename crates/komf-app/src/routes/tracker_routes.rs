@@ -7,13 +7,19 @@
 //!
 //! `{provider}` 仅接受 anilist / mal / bangumi / mangabaka（与 OAuth 一致），
 //! 未登录时返回 401；其余返回 404。
+//!
+//! 多用户：所有端点按调用方身份隔离（`X-Tracker-User` 请求头，缺省
+//! `default`）。komf 不解释 user_key 语义——由可信调用方（如 kmrs 代理，
+//! 以服务端会话填充）传入其用户 ID；单用户场景（komf 自带 WebUI）不传头
+//! 即落到 default 账户，行为与历史一致。
 
 use crate::routes::SharedState;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use komf_api_models::common::KomfErrorResponse;
+use komf_core::oauth::{validate_user_key, DEFAULT_USER_KEY};
 use komf_core::trackers::{TrackUpdate, TrackerService};
 use serde::Deserialize;
 
@@ -23,6 +29,23 @@ pub fn router() -> Router<SharedState> {
         .route("/tracker/:provider/state", axum::routing::get(get_state))
         .route("/tracker/:provider/update", axum::routing::post(update))
         .route("/tracker/links", axum::routing::get(list_links))
+}
+
+/// 提取调用方用户身份（`X-Tracker-User` 头，缺省 default）；非法键 → 400。
+fn user_key_from(headers: &HeaderMap) -> Result<String, Response> {
+    let key = headers
+        .get("x-tracker-user")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(DEFAULT_USER_KEY);
+    validate_user_key(key)
+        .map(|_| key.to_string())
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(KomfErrorResponse { message: e }),
+            )
+                .into_response()
+        })
 }
 
 fn tracker_for<'a>(
@@ -86,12 +109,17 @@ async fn search(
     State(state): State<SharedState>,
     Path(provider): Path<String>,
     Query(query): Query<SearchQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    let user_key = match user_key_from(&headers) {
+        Ok(k) => k,
+        Err(response) => return response,
+    };
     let tracker = match tracker_for(&state, &provider) {
         Ok(t) => t,
         Err(response) => return response,
     };
-    if !tracker.is_logged_in() {
+    if !tracker.is_logged_in(&user_key) {
         return unauthorized(format!(
             "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
         ));
@@ -110,7 +138,10 @@ async fn search(
         .clone();
     let name = komf_core::util::bracket_search_term(&query.name, author_separator.as_deref())
         .unwrap_or_else(|| query.name.clone());
-    match tracker.search(&name, query.nsfw.unwrap_or(true)).await {
+    match tracker
+        .search(&user_key, &name, query.nsfw.unwrap_or(true))
+        .await
+    {
         Ok(results) => Json(results).into_response(),
         Err(error) => tracker_error(&provider, error),
     }
@@ -127,17 +158,22 @@ async fn get_state(
     State(state): State<SharedState>,
     Path(provider): Path<String>,
     Query(query): Query<StateQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    let user_key = match user_key_from(&headers) {
+        Ok(k) => k,
+        Err(response) => return response,
+    };
     let tracker = match tracker_for(&state, &provider) {
         Ok(t) => t,
         Err(response) => return response,
     };
-    if !tracker.is_logged_in() {
+    if !tracker.is_logged_in(&user_key) {
         return unauthorized(format!(
             "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
         ));
     }
-    match tracker.get_state(&query.track_id).await {
+    match tracker.get_state(&user_key, &query.track_id).await {
         Ok(track_state) => Json(track_state).into_response(),
         Err(error) => tracker_error(&provider, error),
     }
@@ -158,18 +194,26 @@ struct UpdateRequest {
 async fn update(
     State(state): State<SharedState>,
     Path(provider): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateRequest>,
 ) -> Response {
+    let user_key = match user_key_from(&headers) {
+        Ok(k) => k,
+        Err(response) => return response,
+    };
     let tracker = match tracker_for(&state, &provider) {
         Ok(t) => t,
         Err(response) => return response,
     };
-    if !tracker.is_logged_in() {
+    if !tracker.is_logged_in(&user_key) {
         return unauthorized(format!(
             "{provider} tracker: not logged in (see /api/oauth/{provider}/start)"
         ));
     }
-    match tracker.update(&request.track_id, &request.update).await {
+    match tracker
+        .update(&user_key, &request.track_id, &request.update)
+        .await
+    {
         Ok(()) => {
             // 记录"通过 komf API 关联"的条目（本地台账，供 Tracker 页"已关联"查看）。
             let title = request.update.title.as_deref();
@@ -177,6 +221,7 @@ async fn update(
             let cover_url = request.update.cover_url.as_deref();
             state.read().unwrap().oauth_manager.record_tracker_link(
                 &provider,
+                &user_key,
                 &request.track_id,
                 title,
                 url.as_deref(),
@@ -212,12 +257,17 @@ struct TrackerLinkItem {
 }
 
 /// `GET /api/tracker/links` → 通过 komf API 关联过的条目列表（无需登录）。
-async fn list_links(State(state): State<SharedState>) -> Response {
+/// 按 `X-Tracker-User` 隔离（缺省 default）。
+async fn list_links(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    let user_key = match user_key_from(&headers) {
+        Ok(k) => k,
+        Err(response) => return response,
+    };
     let links = state
         .read()
         .unwrap()
         .oauth_manager
-        .list_tracker_links()
+        .list_tracker_links(&user_key)
         .into_iter()
         .map(
             |(provider, track_id, title, url, cover_url, updated_at)| TrackerLinkItem {
@@ -231,4 +281,27 @@ async fn list_links(State(state): State<SharedState>) -> Response {
         )
         .collect::<Vec<_>>();
     Json(links).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn user_key_from_defaults_and_validates() {
+        let headers = HeaderMap::new();
+        assert_eq!(user_key_from(&headers).unwrap(), DEFAULT_USER_KEY);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tracker-user", HeaderValue::from_static("alice"));
+        assert_eq!(user_key_from(&headers).unwrap(), "alice");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tracker-user", HeaderValue::from_static("a b"));
+        assert_eq!(
+            user_key_from(&headers).unwrap_err().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
