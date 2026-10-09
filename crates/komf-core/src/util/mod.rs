@@ -12,7 +12,7 @@ pub mod ttl_cache;
 
 pub use analyzer::droppable_floor;
 pub use analyzer::{index_analyze_terms, normalize, search_analyze, t2s_str};
-pub use book_name_parser::BookNameParser;
+pub use book_name_parser::{BookNameParser, BookVolumeChapter};
 pub use chinese::{ChineseConverter, ChineseDirection};
 pub use name_similarity::{similarity_score, NameSimilarityMatcher};
 pub use natural_comparator::{case_insensitive_nat_sort, SimpleNaturalComparator};

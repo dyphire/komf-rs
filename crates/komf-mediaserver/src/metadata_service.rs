@@ -1395,8 +1395,11 @@ impl MetadataService {
 
     fn get_book_number(&self, book_name: &str) -> Option<BookRange> {
         match self.library_type {
-            MediaType::Manga => BookNameParser::get_volumes(book_name),
-            MediaType::Novel | MediaType::Comic => BookNameParser::get_book_number(book_name),
+            // manga：卷章并存时书按章编号（卷只是分组），取有效序号而非卷号
+            MediaType::Manga | MediaType::Novel | MediaType::Comic => {
+                BookNameParser::get_primary_number(book_name)
+                    .or_else(|| BookNameParser::get_book_number(book_name))
+            }
             MediaType::Webtoon => BookNameParser::get_chapters(book_name)
                 .or_else(|| BookNameParser::get_book_number(book_name)),
         }
@@ -1551,7 +1554,8 @@ impl MetadataService {
         let (first_book, range) = sorted
             .iter()
             .map(|book| {
-                let number = BookNameParser::get_volumes(&book.name)
+                // 卷章并存时按章编号；无卷章信号回退扫描器序号
+                let number = BookNameParser::get_primary_number(&book.name)
                     .unwrap_or_else(|| BookRange::single(book.number as f64));
                 (book, number)
             })

@@ -48,6 +48,16 @@ static EXTRA_DATA_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[(?<extra>.*?)
 
 pub struct BookNameParser;
 
+/// 一份书名里独立识别出的卷/章信号（都可能缺失）。
+/// 规则：两者并存时这本书按章编号（卷只是分组信息），`chapter` 是有效序号。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookVolumeChapter {
+    /// 卷号；与章节并存时只是分组信息，不作为该书的序号。
+    pub volume: Option<BookRange>,
+    /// 章节号；与卷并存时是该书的有效序号。
+    pub chapter: Option<BookRange>,
+}
+
 impl BookNameParser {
     pub fn get_volumes(name: &str) -> Option<BookRange> {
         // 统一预处理：全角数字/字母/符号转半角（"第５巻" → "第5巻"、"Vol. ３" → "Vol. 3"）
@@ -81,6 +91,24 @@ impl BookNameParser {
 
     pub fn get_chapters(name: &str) -> Option<BookRange> {
         Self::get_book_number_from(name, &CHAPTER_REGEXES)
+    }
+
+    /// 同时提取卷号与章节号。书名可能两者并存（"Vol.03 ch.12"、"第3卷 第12话"）。
+    /// 注意语义：两者并存时这本书按章编号，`chapter` 才是有效序号——旧消费链的
+    /// "卷优先"（`get_volumes().or_else(get_chapters)`）会把这类书错认成卷，
+    /// 请改用 [`Self::get_primary_number`]。
+    pub fn get_volumes_and_chapters(name: &str) -> BookVolumeChapter {
+        BookVolumeChapter {
+            volume: Self::get_volumes(name),
+            chapter: Self::get_chapters(name),
+        }
+    }
+
+    /// 书的有效序号：卷章并存时取章节（书按章编号，卷只是分组信息），
+    /// 纯卷名取卷号，两者都没有时返回 None。
+    pub fn get_primary_number(name: &str) -> Option<BookRange> {
+        let parsed = Self::get_volumes_and_chapters(name);
+        parsed.chapter.or(parsed.volume)
     }
 
     pub fn get_book_number(name: &str) -> Option<BookRange> {
@@ -377,4 +405,57 @@ mod tests {
             vec!["Omnibus"]
         );
     }
+}
+
+/// 卷/章并存的组合提取：与消费链的"卷优先"短路不同，两个信号都要保留。
+#[test]
+fn extracts_volume_and_chapter_together() {
+    let both = BookNameParser::get_volumes_and_chapters("Series Vol.03 ch.12");
+    assert_eq!(both.volume, Some(BookRange::single(3.0)));
+    assert_eq!(both.chapter, Some(BookRange::single(12.0)));
+
+    let cjk = BookNameParser::get_volumes_and_chapters("第3卷 第12话");
+    assert_eq!(cjk.volume, Some(BookRange::single(3.0)));
+    assert_eq!(cjk.chapter, Some(BookRange::single(12.0)));
+
+    // 范围取两端 end：读完 1-2 卷、10-12 话 = 卷 2、话 12
+    let ranges = BookNameParser::get_volumes_and_chapters("Vol.1-2 ch.10-12");
+    assert_eq!(ranges.volume, Some(BookRange::new(1.0, 2.0)));
+    assert_eq!(ranges.chapter, Some(BookRange::new(10.0, 12.0)));
+}
+
+#[test]
+fn combined_extraction_keeps_single_signal_and_absence() {
+    let volume_only = BookNameParser::get_volumes_and_chapters("Series Vol.03");
+    assert_eq!(volume_only.volume, Some(BookRange::single(3.0)));
+    assert_eq!(volume_only.chapter, None);
+
+    let chapter_only = BookNameParser::get_volumes_and_chapters("Series ch.012");
+    assert_eq!(chapter_only.volume, None);
+    assert_eq!(chapter_only.chapter, Some(BookRange::single(12.0)));
+
+    let neither = BookNameParser::get_volumes_and_chapters("Some Book");
+    assert_eq!(neither.volume, None);
+    assert_eq!(neither.chapter, None);
+}
+/// 有效序号：卷章并存时按章编号（卷只是分组），纯卷名取卷号。
+#[test]
+fn primary_number_is_chapter_when_both_present() {
+    assert_eq!(
+        BookNameParser::get_primary_number("Series Vol.03 ch.12"),
+        Some(BookRange::single(12.0))
+    );
+    assert_eq!(
+        BookNameParser::get_primary_number("第3卷 第12话"),
+        Some(BookRange::single(12.0))
+    );
+    assert_eq!(
+        BookNameParser::get_primary_number("Series Vol.03"),
+        Some(BookRange::single(3.0))
+    );
+    assert_eq!(
+        BookNameParser::get_primary_number("Series ch.012"),
+        Some(BookRange::single(12.0))
+    );
+    assert_eq!(BookNameParser::get_primary_number("Some Book"), None);
 }

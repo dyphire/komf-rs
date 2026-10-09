@@ -409,10 +409,10 @@ pub fn order_book_by_name(
     metadata: &BookMetadata,
 ) -> BookMetadata {
     let range = match library_type {
-        MediaType::Manga => BookNameParser::get_volumes(book_name)
-            .or_else(|| BookNameParser::get_chapters(book_name))
-            .or_else(|| BookNameParser::get_book_number(book_name)),
-        MediaType::Novel | MediaType::Comic => BookNameParser::get_book_number(book_name),
+        MediaType::Manga | MediaType::Novel | MediaType::Comic => {
+            BookNameParser::get_primary_number(book_name)
+                .or_else(|| BookNameParser::get_book_number(book_name))
+        }
         MediaType::Webtoon => BookNameParser::get_chapters(book_name)
             .or_else(|| BookNameParser::get_book_number(book_name)),
     };
