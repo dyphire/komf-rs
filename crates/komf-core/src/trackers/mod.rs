@@ -73,7 +73,19 @@ pub struct TrackSearchItem {
     pub description: Option<String>,
     /// 当前用户是否已把该条目加入列表。
     pub tracked: bool,
+    /// 漫画/小说区分（平台提供时）：AniList 取 format，MAL 取 media_type，
+    /// Bangumi 取书籍 platform，MangaBaka 取 series type。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<TrackMediaType>,
     pub url: Option<String>,
+}
+
+/// 条目的媒体类型（漫画 vs 小说/轻小说）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackMediaType {
+    Manga,
+    Novel,
 }
 
 /// 解析条目链接，容忍无 scheme 的输入（如 `anilist.co/manga/87395`）。

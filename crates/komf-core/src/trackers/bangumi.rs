@@ -3,7 +3,7 @@
 //! `GET /v0/me` → `GET /v0/users/{username}/collections/{id}`，更新
 //! `POST /v0/users/-/collections/{id}`（"-" 表示当前用户）。
 
-use super::{TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -173,6 +173,12 @@ impl BangumiTracker {
         let name = subject.get("name").and_then(Value::as_str).unwrap_or("");
         let name_cn = subject.get("name_cn").and_then(Value::as_str).unwrap_or("");
         let title = if !name_cn.is_empty() { name_cn } else { name };
+        // 书籍条目的 platform 标注载体："漫画"/"小说"/"轻小说"/"画集"…
+        let media_type = match subject.get("platform").and_then(Value::as_str) {
+            Some(p) if p.contains("小说") => Some(TrackMediaType::Novel),
+            Some(p) if p.contains("漫画") => Some(TrackMediaType::Manga),
+            _ => None,
+        };
         Some(TrackSearchItem {
             id: id.to_string(),
             title: if title.is_empty() {
@@ -190,8 +196,9 @@ impl BangumiTracker {
                 .get("summary")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            // 用户态：命中当前用户书籍收藏即标记 tracked（未入列表为 false）。
+            // 用户态：命中当前用户书籍收藏集合即 tracked（未入列表为 false）。
             tracked: tracked.contains(&id),
+            media_type,
             url: Some(format!("https://bgm.tv/subject/{id}")),
         })
     }
@@ -444,5 +451,38 @@ impl TrackerService for BangumiTracker {
             return Err(format!("bangumi update error (HTTP {status}): {body}"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subject(platform: Option<&str>) -> Value {
+        let mut value = serde_json::json!({ "id": 1902, "name": "Title", "name_cn": "" });
+        if let Some(platform) = platform {
+            value.as_object_mut().unwrap().insert("platform".into(), platform.into());
+        }
+        value
+    }
+
+    #[test]
+    fn subject_to_item_maps_book_platforms() {
+        let novel = BangumiTracker::subject_to_item(&subject(Some("小说")), &HashSet::new()).unwrap();
+        assert_eq!(novel.media_type, Some(TrackMediaType::Novel));
+        let light_novel =
+            BangumiTracker::subject_to_item(&subject(Some("轻小说")), &HashSet::new()).unwrap();
+        assert_eq!(light_novel.media_type, Some(TrackMediaType::Novel));
+        let manga = BangumiTracker::subject_to_item(&subject(Some("漫画")), &HashSet::new()).unwrap();
+        assert_eq!(manga.media_type, Some(TrackMediaType::Manga));
+    }
+
+    #[test]
+    fn subject_to_item_without_known_platform_has_no_media_type() {
+        let artbook =
+            BangumiTracker::subject_to_item(&subject(Some("画集")), &HashSet::new()).unwrap();
+        assert_eq!(artbook.media_type, None);
+        let none = BangumiTracker::subject_to_item(&subject(None), &HashSet::new()).unwrap();
+        assert_eq!(none.media_type, None);
     }
 }

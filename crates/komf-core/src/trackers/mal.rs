@@ -2,7 +2,7 @@
 //! REST：搜索 `GET /manga?q`，状态 `GET /manga/{id}?fields=...`，更新
 //! `PATCH /manga/{id}/my_list_status`（form-urlencoded）。
 
-use super::{TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use std::sync::Arc;
 
@@ -122,6 +122,8 @@ impl MalTracker {
     }
 
     /// 单条目详情 → TrackSearchItem（tracked 取 my_list_status 是否存在）。
+    /// `media_type` 区分漫画与小说（复用 provider 侧 MAL media_type 口径：
+    /// novel/light_novel → 小说，其余漫画类 → 漫画）。
     fn detail_to_item(id: i64, details: &serde_json::Value) -> Option<TrackSearchItem> {
         Some(TrackSearchItem {
             id: id.to_string(),
@@ -143,8 +145,20 @@ impl MalTracker {
                 .get("my_list_status")
                 .map(|s| !s.is_null())
                 .unwrap_or(false),
+            media_type: media_type_of(details.get("media_type").and_then(serde_json::Value::as_str)),
             url: Some(format!("https://myanimelist.net/manga/{id}")),
         })
+    }
+}
+
+/// MAL media_type 字符串 → 漫画/小说（manhwa/manhua 归漫画展示）。
+fn media_type_of(media_type: Option<&str>) -> Option<TrackMediaType> {
+    match media_type {
+        Some("novel" | "light_novel") => Some(TrackMediaType::Novel),
+        Some("manga" | "one_shot" | "doujinshi" | "manhua" | "manhwa" | "oel") => {
+            Some(TrackMediaType::Manga)
+        }
+        _ => None,
     }
 }
 
@@ -241,6 +255,11 @@ impl TrackerService for MalTracker {
                     .and_then(|d| d.get("my_list_status"))
                     .map(|s| !s.is_null())
                     .unwrap_or(false),
+                media_type: media_type_of(
+                    details
+                        .and_then(|d| d.get("media_type"))
+                        .and_then(serde_json::Value::as_str),
+                ),
                 url: Some(format!("https://myanimelist.net/manga/{id}")),
             });
         }

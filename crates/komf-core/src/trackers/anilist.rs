@@ -1,7 +1,7 @@
 //! AniList tracker —— GraphQL 用户列表实现。
 //! GraphQL：搜索带 `mediaListEntry`（标记已入列表）、更新用 `SaveMediaListEntry`。
 
-use super::{TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -300,6 +300,7 @@ impl AniListTracker {
     }
 
     /// Media 节点 → TrackSearchItem（tracked 取 mediaListEntry 是否存在）。
+    /// `format` 区分漫画与小说（AniList 小说=NOVEL，其余格式归漫画）。
     fn media_to_item(media: &Value) -> Option<TrackSearchItem> {
         let id = media.get("id")?.as_i64()?;
         let title = media
@@ -308,6 +309,12 @@ impl AniListTracker {
             .and_then(Value::as_str)
             .unwrap_or("Unknown Title")
             .to_string();
+        let media_type = match media.get("format").and_then(Value::as_str) {
+            Some("NOVEL") => Some(TrackMediaType::Novel),
+            // MANGA / ONE_SHOT / DOUJIN / MANHWA / MANHUA / …
+            Some(_) => Some(TrackMediaType::Manga),
+            None => None,
+        };
         Some(TrackSearchItem {
             id: id.to_string(),
             title,
@@ -324,6 +331,7 @@ impl AniListTracker {
                 .get("mediaListEntry")
                 .map(|e| !e.is_null())
                 .unwrap_or(false),
+            media_type,
             url: Some(format!("https://anilist.co/manga/{id}")),
         })
     }
@@ -467,5 +475,39 @@ impl TrackerService for AniListTracker {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn media(format: &str) -> Value {
+        serde_json::json!({
+            "id": 87395,
+            "title": { "userPreferred": "Title" },
+            "format": format,
+            "mediaListEntry": null,
+        })
+    }
+
+    #[test]
+    fn media_to_item_maps_novel_and_manga_formats() {
+        let novel = AniListTracker::media_to_item(&media("NOVEL")).unwrap();
+        assert_eq!(novel.media_type, Some(TrackMediaType::Novel));
+        let manga = AniListTracker::media_to_item(&media("MANGA")).unwrap();
+        assert_eq!(manga.media_type, Some(TrackMediaType::Manga));
+        let oneshot = AniListTracker::media_to_item(&media("ONE_SHOT")).unwrap();
+        assert_eq!(oneshot.media_type, Some(TrackMediaType::Manga));
+    }
+
+    #[test]
+    fn media_to_item_without_format_has_no_media_type() {
+        let mut value = media("MANGA");
+        value.as_object_mut().unwrap().remove("format");
+        assert_eq!(
+            AniListTracker::media_to_item(&value).unwrap().media_type,
+            None
+        );
     }
 }

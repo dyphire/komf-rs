@@ -10,7 +10,7 @@
 //!
 //! 通用响应包装：`{ status, message, data, issues }`；错误时 data 为 null。
 
-use super::{TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -33,6 +33,9 @@ struct SeriesDto {
     description: Option<String>,
     #[serde(default)]
     status: String,
+    /// series 类型（wire 字段名 `type`）：manga/novel/manhwa/manhua/oel/other。
+    #[serde(default, rename = "type")]
+    series_type: Option<String>,
     #[serde(default)]
     total_chapters: Option<String>,
     #[serde(default)]
@@ -271,6 +274,13 @@ impl MangaBakaTracker {
             }
             _ => series.title.clone(),
         };
+        // series 类型：novel → 小说，其余漫画类 → 漫画（与 provider 侧口径一致，
+        // manhwa/manhua 在二元展示下归漫画）
+        let media_type = match series.series_type.as_deref() {
+            Some("novel") => Some(TrackMediaType::Novel),
+            Some("manga" | "manhwa" | "manhua" | "oel") => Some(TrackMediaType::Manga),
+            _ => None,
+        };
         TrackSearchItem {
             id: series.id.to_string(),
             title,
@@ -282,6 +292,7 @@ impl MangaBakaTracker {
                 .or_else(|| series.cover.raw.as_ref().and_then(|r| r.url.clone())),
             description: series.description.clone(),
             tracked,
+            media_type,
             url: Some(format!("https://mangabaka.org/{}", series.id)),
         }
     }
