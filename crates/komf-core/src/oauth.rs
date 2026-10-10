@@ -253,6 +253,10 @@ pub struct OAuthManager {
     http: reqwest::Client,
     db: Mutex<Option<Connection>>,
     inner: RwLock<OAuthInner>,
+    /// 刷新串行锁：Bangumi/MangaBaka 等平台为 refresh_token 轮换制（旧 token
+    /// 用后即废），并发刷新会让后到者拿着已作废的旧 refresh_token 撞上
+    /// invalid_grant 而被误登出；锁内重读可让后到者直接复用先到者的刷新结果。
+    refresh_lock: tokio::sync::Mutex<()>,
     /// 授权完成后的跳回路径（WebUI 前端路由）。
     pub callback_return_path: &'static str,
 }
@@ -270,6 +274,7 @@ impl OAuthManager {
             http,
             db: Mutex::new(db),
             inner: RwLock::new(OAuthInner::default()),
+            refresh_lock: tokio::sync::Mutex::new(()),
             callback_return_path: "/",
         };
         let arc = Arc::new(manager);
@@ -760,7 +765,17 @@ impl OAuthManager {
             self.logout(provider, user_key);
             return None;
         }
-        match self.refresh_now(provider, user_key).await {
+        // 串行化刷新并在锁内重读：等待锁期间可能已被其他任务刷新过，直接复用，
+        // 避免轮换制 refresh_token 被重复刷新（后到者会撞 invalid_grant）。
+        let _guard = self.refresh_lock.lock().await;
+        let token = {
+            let inner = self.inner.read().unwrap();
+            inner.tokens.get(&(provider, user_key.to_string())).cloned()
+        }?;
+        if !token.expired() {
+            return Some(token.access_token);
+        }
+        match self.do_refresh(provider, user_key, &app).await {
             Some(access_token) => Some(access_token),
             None => {
                 tracing::warn!(
@@ -777,21 +792,52 @@ impl OAuthManager {
     /// 强制刷新：源站 401（token 被判无效，本地 expires_at 尚未触发）时调用。
     /// 有 refresh_token 且 secret 齐备则直接走 token 刷新；成功返回新 access token
     /// 并持久化（username 保留），失败返回 None（由调用方决定是否登出）。
+    /// 调用方持有的 token 被判 401 时，若等待锁期间其他任务已刷新出新 token，
+    /// 直接返回新 token（复用，不做二次轮换）。
     pub async fn refresh_now(&self, provider: OAuthProvider, user_key: &str) -> Option<String> {
+        let seen = {
+            let inner = self.inner.read().unwrap();
+            inner
+                .tokens
+                .get(&(provider, user_key.to_string()))
+                .map(|t| t.access_token.clone())
+        };
+        let app = OAuthApp::for_provider(provider);
+        let _guard = self.refresh_lock.lock().await;
         let token = {
             let inner = self.inner.read().unwrap();
             inner.tokens.get(&(provider, user_key.to_string())).cloned()
         }?;
-        let Some(refresh_token) = token.refresh_token.clone() else {
+        if app.requires_secret && app.client_secret.is_none() {
             return None;
-        };
-        let app = OAuthApp::for_provider(provider);
+        }
+        if Some(&token.access_token) != seen.as_ref() {
+            // 等待锁期间已有其他任务刷新出新 token，复用其结果。
+            return Some(token.access_token);
+        }
+        self.do_refresh(provider, user_key, &app).await
+    }
+
+    /// 实际执行刷新（调用方必须已持有 `refresh_lock`）：重读内存 token，
+    /// 走 refresh_token 授权交换新 token 并持久化。响应缺 refresh_token 时
+    /// 沿用旧值（RFC 6749 §6 惯例，防服务端未返回时丢失刷新能力）。
+    async fn do_refresh(
+        &self,
+        provider: OAuthProvider,
+        user_key: &str,
+        app: &OAuthApp,
+    ) -> Option<String> {
+        let token = {
+            let inner = self.inner.read().unwrap();
+            inner.tokens.get(&(provider, user_key.to_string())).cloned()
+        }?;
+        let refresh_token = token.refresh_token.clone()?;
         if app.requires_secret && app.client_secret.is_none() {
             return None;
         }
         let mut form: Vec<(&str, String)> = vec![
             ("grant_type", "refresh_token".to_string()),
-            ("refresh_token", refresh_token),
+            ("refresh_token", refresh_token.clone()),
         ];
         form.push(("client_id", app.client_id.to_string()));
         if let Some(secret) = &app.client_secret {
@@ -800,10 +846,13 @@ impl OAuthManager {
         if app.confidential {
             form.push(("redirect_uri", app.relay_url.to_string()));
         }
-        let fresh = match self.exchange(app.token_url, &form).await {
+        let mut fresh = match self.exchange(app.token_url, &form).await {
             Ok(t) if !t.access_token.is_empty() => t,
             _ => return None,
         };
+        if fresh.refresh_token.is_none() {
+            fresh.refresh_token = Some(refresh_token);
+        }
         let username = {
             let inner = self.inner.read().unwrap();
             inner
