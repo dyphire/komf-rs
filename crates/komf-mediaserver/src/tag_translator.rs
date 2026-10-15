@@ -2,8 +2,9 @@
 //! 编译时嵌入 tag_translation.json）。当 seriesTitleLanguage 为中文时，
 //! 对非 bangumi/ehentai provider 的最终写入 tags 做 display_en → display_zh 翻译。
 //!
-//! 匹配策略：provider 标签与 `display_en` 或 `key` 小写化后精确匹配才翻译，
-//! 未命中保持原文（不猜词、不破坏用户已有中文标签）。
+//! 匹配策略：provider 标签与 `display_en` 或 `key` 小写化后精确匹配才翻译；
+//! 未命中时兜底处理 AniList 旧版斜杠复数记法（如 `Exorcist/s`、`Special Ability/ies`，
+//! 取 `/` 前词干尝试常见复数词形）；仍未命中保持原文（不猜词、不破坏用户已有中文标签）。
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -40,12 +41,31 @@ impl TagTranslator {
         Self { map }
     }
 
-    /// 翻译单个标签：精确匹配（小写）命中则替换为中文，否则原样返回。
+    /// 翻译单个标签：精确匹配（小写）命中则替换为中文；
+    /// 未命中时兜底处理斜杠复数记法（`Exorcist/s` → 词干 `exorcist` → `exorcists`），
+    /// 仍无命中则原样返回。
     pub fn translate(&self, tag: &str) -> String {
-        self.map
-            .get(&tag.to_ascii_lowercase())
-            .cloned()
-            .unwrap_or_else(|| tag.to_string())
+        let lower = tag.to_ascii_lowercase();
+        if let Some(zh) = self.map.get(&lower) {
+            return zh.clone();
+        }
+        // AniList 旧版标签使用斜杠复数记法（Exorcist/s、Special Ability/ies），
+        // 当前 AniList 已全局改名不再产生，但媒体服务器可能残留历史写入的旧标签。
+        if let Some(stem) = lower.split('/').next() {
+            if !stem.is_empty() && stem.len() < lower.len() {
+                let mut candidates =
+                    vec![stem.to_string(), format!("{stem}s"), format!("{stem}es")];
+                if let Some(head) = stem.strip_suffix('y') {
+                    candidates.push(format!("{head}ies"));
+                }
+                for c in candidates {
+                    if let Some(zh) = self.map.get(&c) {
+                        return zh.clone();
+                    }
+                }
+            }
+        }
+        tag.to_string()
     }
 
     /// seriesTitleLanguage 是否属于中文（zh / zh-cn / zh-hans / zh-hk / zh-tw / zh-hant …）。
@@ -111,6 +131,36 @@ mod tests {
     }
 
     #[test]
+    fn slash_plural_fallback() {
+        let tr = translator();
+        // AniList 旧版斜杠复数记法：词干或常见复数词形在字典中已有翻译。
+        // （github.com/dyphire/komf-rs issues/20）
+        assert_eq!(tr.translate("Exorcist/s"), "驱魔人");
+        assert_eq!(tr.translate("Special Ability/ies"), "特殊能力");
+        assert_eq!(tr.translate("Dead Family Member/s"), "家人死亡");
+        assert_eq!(tr.translate("Mentor/s"), "导师");
+        assert_eq!(tr.translate("Shaman/s"), "萨满");
+        assert_eq!(tr.translate("Monster/s"), "怪物");
+        assert_eq!(tr.translate("Sorcerer/s"), "术士");
+        assert_eq!(tr.translate("Supernatural Element/s"), "超自然元素");
+    }
+
+    #[test]
+    fn slash_plural_fallback_hits_stem_first() {
+        let tr = translator();
+        // 词干本身在字典中时直接命中（Fairy/ies → fairy，无需再尝试 fairies）。
+        assert_eq!(tr.translate("Fairy/ies"), "妖精");
+    }
+
+    #[test]
+    fn slash_unknown_keeps_original() {
+        let tr = translator();
+        // 斜杠标签无字典条目时保持原文（不猜词）。
+        assert_eq!(tr.translate("Totally Unknown/s"), "Totally Unknown/s");
+        assert_eq!(tr.translate("Publisher/s: Kodansha"), "Publisher/s: Kodansha");
+    }
+
+    #[test]
     fn chinese_language_detection() {
         assert!(TagTranslator::is_chinese_language(Some("zh")));
         assert!(TagTranslator::is_chinese_language(Some("zh-CN")));
@@ -150,7 +200,7 @@ mod tests {
     #[test]
     fn builtin_has_expected_entries() {
         let tr = translator();
-        // 447 条数据中抽样：Genre 类的常见标签。
+        // 字典数据中抽样：Genre 类的常见标签。
         for (en, zh) in [("Action", "动作"), ("Romance", "恋爱"), ("Comedy", "喜剧")] {
             assert_eq!(tr.translate(en), zh, "missing translation for {en}");
         }
