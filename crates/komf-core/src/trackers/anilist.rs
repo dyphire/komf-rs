@@ -257,6 +257,32 @@ impl AniListTracker {
         }
     }
 
+    /// 构造 `SaveMediaListEntry` 的 variables。
+    /// 只发送实际有值的字段，避免 AniList 把显式 null 当成非法输入。
+    fn update_variables(id: i64, update: &TrackUpdate, score: Option<i32>) -> Value {
+        let mut variables = serde_json::Map::new();
+        variables.insert("id".into(), json!(id));
+        if let Some(status) = update.status {
+            variables.insert("status".into(), json!(Self::to_status_str(status)));
+        }
+        if let Some(chapter) = update.last_read_chapter {
+            variables.insert("progress".into(), json!(chapter.floor() as i64));
+        }
+        if let Some(volume) = update.last_read_volume {
+            variables.insert("volumes".into(), json!(volume));
+        }
+        if let Some(score) = score {
+            variables.insert("score".into(), json!(score));
+        }
+        if let Some(date) = Self::date_input(update.start_read_date.as_deref()) {
+            variables.insert("startedAt".into(), date);
+        }
+        if let Some(date) = Self::date_input(update.finish_read_date.as_deref()) {
+            variables.insert("completedAt".into(), date);
+        }
+        Value::Object(variables)
+    }
+
     /// 读取指定用户的媒体列表评分格式（按用户缓存）。
     /// POINT_10 时读写需在 0-10 与 0-100（scoreRaw）间转换，其余格式直接使用 0-100。
     async fn store_score_format(&self, user_key: &str) -> String {
@@ -459,21 +485,8 @@ impl TrackerService for AniListTracker {
         } else {
             None
         };
-        let _ = self
-            .graphql(
-                user_key,
-                UPDATE_MUTATION,
-                json!({
-                    "id": id,
-                    "status": update.status.map(Self::to_status_str),
-                    "progress": update.last_read_chapter.map(|c| c.floor() as i64),
-                    "volumes": update.last_read_volume,
-                    "score": score,
-                    "startedAt": Self::date_input(update.start_read_date.as_deref()),
-                    "completedAt": Self::date_input(update.finish_read_date.as_deref()),
-                }),
-            )
-            .await?;
+        let variables = Self::update_variables(id, update, score);
+        let _ = self.graphql(user_key, UPDATE_MUTATION, variables).await?;
         Ok(())
     }
 }
@@ -509,5 +522,22 @@ mod tests {
             AniListTracker::media_to_item(&value).unwrap().media_type,
             None
         );
+    }
+
+    #[test]
+    fn update_variables_omit_unset_fields() {
+        let update = TrackUpdate {
+            last_read_chapter: Some(12.9),
+            ..TrackUpdate::default()
+        };
+        let vars = AniListTracker::update_variables(42, &update, None);
+        let obj = vars.as_object().unwrap();
+        assert_eq!(obj.get("id"), Some(&json!(42)));
+        assert_eq!(obj.get("progress"), Some(&json!(12)));
+        assert!(!obj.contains_key("status"));
+        assert!(!obj.contains_key("volumes"));
+        assert!(!obj.contains_key("score"));
+        assert!(!obj.contains_key("startedAt"));
+        assert!(!obj.contains_key("completedAt"));
     }
 }
