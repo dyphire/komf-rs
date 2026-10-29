@@ -10,7 +10,9 @@
 //!
 //! 通用响应包装：`{ status, message, data, issues }`；错误时 data 为 null。
 
-use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{
+    TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService,
+};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -296,6 +298,7 @@ impl MangaBakaTracker {
             description: series.description.clone(),
             tracked,
             media_type,
+            series: false,
             url: Some(format!("https://mangabaka.org/{}", series.id)),
         }
     }

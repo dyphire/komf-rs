@@ -77,6 +77,9 @@ pub struct TrackSearchItem {
     /// Bangumi 取书籍 platform，MangaBaka 取 series type。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<TrackMediaType>,
+    /// 该条目是否为"系列"聚合条目（平台提供时；目前仅 Bangumi Next API 返回）。
+    #[serde(default)]
+    pub series: bool,
     pub url: Option<String>,
 }
 

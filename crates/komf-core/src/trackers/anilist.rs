@@ -1,7 +1,9 @@
 //! AniList tracker —— GraphQL 用户列表实现。
 //! GraphQL：搜索带 `mediaListEntry`（标记已入列表）、更新用 `SaveMediaListEntry`。
 
-use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{
+    TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService,
+};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -358,6 +360,7 @@ impl AniListTracker {
                 .map(|e| !e.is_null())
                 .unwrap_or(false),
             media_type,
+            series: false,
             url: Some(format!("https://anilist.co/manga/{id}")),
         })
     }

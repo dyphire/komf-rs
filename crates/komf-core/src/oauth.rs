@@ -698,7 +698,7 @@ impl OAuthManager {
             OAuthProvider::Bangumi => {
                 let resp = self
                     .http
-                    .get("https://api.bgm.tv/v0/me")
+                    .get("https://next.bgm.tv/p1/me")
                     .header("Authorization", &bearer)
                     .header("User-Agent", "dyphire/komf-rs")
                     .send()
