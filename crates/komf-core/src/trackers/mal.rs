@@ -2,7 +2,9 @@
 //! REST：搜索 `GET /manga?q`，状态 `GET /manga/{id}?fields=...`，更新
 //! `PATCH /manga/{id}/my_list_status`（form-urlencoded）。
 
-use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{
+    TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService,
+};
 use crate::oauth::{OAuthManager, OAuthProvider};
 use std::sync::Arc;
 
@@ -146,7 +148,12 @@ impl MalTracker {
                 .get("my_list_status")
                 .map(|s| !s.is_null())
                 .unwrap_or(false),
-            media_type: media_type_of(details.get("media_type").and_then(serde_json::Value::as_str)),
+            media_type: media_type_of(
+                details
+                    .get("media_type")
+                    .and_then(serde_json::Value::as_str),
+            ),
+            series: false,
             url: Some(format!("https://myanimelist.net/manga/{id}")),
         })
     }
@@ -203,14 +210,70 @@ impl TrackerService for MalTracker {
         Ok(body
             .get("data")
             .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|node| {
-                let entry = node.get("node")?;
-                let id = entry.get("id")?.as_i64()?;
-                Self::detail_to_item(id, entry)
-            })
-            .collect())
+            .cloned()
+            .unwrap_or_default();
+        let mut futs = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            let Some(entry) = node.get("node") else {
+                continue;
+            };
+            let Some(id) = entry.get("id").and_then(serde_json::Value::as_i64) else {
+                continue;
+            };
+            // 逐条并发拉详情以拿到 my_list_status（tracked 标记）。
+            let entry = entry.clone();
+            futs.push(async move {
+                let details = self
+                    .get_json(
+                        user_key,
+                        &format!("{BASE_URL}/manga/{id}?fields={SEARCH_FIELDS}"),
+                    )
+                    .await
+                    .ok();
+                (entry, id, details)
+            });
+        }
+        let fetched = futures::future::join_all(futs).await;
+        let mut results = Vec::with_capacity(fetched.len());
+        for (entry, id, details) in fetched {
+            let details = details.as_ref();
+            results.push(TrackSearchItem {
+                id: id.to_string(),
+                title: details
+                    .and_then(|d| d.get("title"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| entry.get("title").and_then(serde_json::Value::as_str))
+                    .unwrap_or("Unknown Title")
+                    .to_string(),
+                cover_url: details
+                    .and_then(|d| d.get("main_picture"))
+                    .and_then(|p| p.get("large"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        entry
+                            .get("main_picture")
+                            .and_then(|p| p.get("large"))
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .map(str::to_string),
+                description: details
+                    .and_then(|d| d.get("synopsis"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                tracked: details
+                    .and_then(|d| d.get("my_list_status"))
+                    .map(|s| !s.is_null())
+                    .unwrap_or(false),
+                media_type: media_type_of(
+                    details
+                        .and_then(|d| d.get("media_type"))
+                        .and_then(serde_json::Value::as_str),
+                ),
+                series: false,
+                url: Some(format!("https://myanimelist.net/manga/{id}")),
+            });
+        }
+        Ok(results)
     }
 
     async fn get_state(&self, user_key: &str, track_id: &str) -> Result<TrackState, String> {

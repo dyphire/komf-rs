@@ -1,19 +1,80 @@
-//! Bangumi tracker —— bgm.tv v0 用户列表实现。
-//! REST：搜索 `POST /v0/search/subjects`（type=1 书籍），状态
-//! `GET /v0/me` → `GET /v0/users/{username}/collections/{id}`，更新
-//! `POST /v0/users/-/collections/{id}`（"-" 表示当前用户）。
+//! Bangumi tracker —— bgm.tv Next API（next.bgm.tv/p1）用户列表实现。
+//! REST：搜索 `POST /p1/search/subjects`（type=1 书籍），状态/详情
+//! `GET /p1/subjects/{id}`（响应内嵌当前用户 interest 收藏状态），更新
+//! `PUT /p1/collections/subjects/{id}`（收藏状态/评分）+
+//! `PATCH /p1/collections/subjects/{id}`（阅读进度）。
+//!
+//! 相比 v0 API 的变化：搜索结果与详情均内嵌 `interest`（收藏状态/评分/进度），
+//! 不再需要先 `GET /v0/me` 再分页拉取全量收藏来标记 tracked；`get_state`
+//! 也由 me + collection + subject 三次请求合并为一次 subject 请求。
 
-use super::{TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService};
+use super::{
+    TrackMediaType, TrackSearchItem, TrackState, TrackStatus, TrackUpdate, TrackerService,
+};
 use crate::oauth::{OAuthManager, OAuthProvider};
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 
-const API_BASE: &str = "https://api.bgm.tv/v0";
+const API_BASE: &str = "https://next.bgm.tv";
+const SEARCH_LIMIT: usize = 20;
 
 pub struct BangumiTracker {
     http: reqwest::Client,
     oauth: Option<Arc<OAuthManager>>,
+}
+
+/// Next API 条目（搜索/详情共用结构；详情比搜索多 eps/volumes 等字段）。
+#[derive(Debug, Default, Deserialize)]
+struct Subject {
+    id: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "nameCN")]
+    name_cn: Option<String>,
+    #[serde(default)]
+    info: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    images: Option<Images>,
+    #[serde(default)]
+    platform: Option<SubjectPlatform>,
+    /// 是否系列条目（系列 = 整部作品的聚合条目，非单行本）。
+    #[serde(default)]
+    series: bool,
+    #[serde(default)]
+    eps: Option<i32>,
+    #[serde(default)]
+    volumes: Option<i32>,
+    /// 当前用户的收藏状态（未收藏 → null）。
+    #[serde(default)]
+    interest: Option<SubjectInterest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubjectPlatform {
+    #[serde(default, rename = "typeCN")]
+    type_cn: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Images {
+    #[serde(default)]
+    large: Option<String>,
+}
+
+/// 收藏状态（Next API 内嵌于 subject；type：1=wish 2=collect 3=do 4=on_hold 5=dropped）。
+#[derive(Debug, Default, Deserialize)]
+struct SubjectInterest {
+    #[serde(default, rename = "type")]
+    collection_type: Option<i64>,
+    #[serde(default)]
+    rate: Option<i32>,
+    #[serde(default, rename = "epStatus")]
+    ep_status: Option<i64>,
+    #[serde(default, rename = "volStatus")]
+    vol_status: Option<i32>,
 }
 
 impl BangumiTracker {
@@ -99,6 +160,16 @@ impl BangumiTracker {
         Ok(body)
     }
 
+    /// 响应非 2xx 时转为错误（body 原文带上，便于排查）。
+    async fn ensure_success(response: reqwest::Response, label: &str) -> Result<(), String> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body: Value = response.json().await.unwrap_or_default();
+        Err(format!("{label} error (HTTP {status}): {body}"))
+    }
+
     fn to_type(status: TrackStatus) -> i64 {
         // Bangumi 收藏类型：1=wish 2=collect 3=do 4=on_hold 5=dropped
         match status {
@@ -111,13 +182,13 @@ impl BangumiTracker {
         }
     }
 
-    fn from_status_str(status: &str) -> Option<TrackStatus> {
-        match status {
-            "do" => Some(TrackStatus::Reading),
-            "wish" => Some(TrackStatus::Planning),
-            "collect" => Some(TrackStatus::Completed),
-            "on_hold" => Some(TrackStatus::Paused),
-            "dropped" => Some(TrackStatus::Dropped),
+    fn from_collection_type(collection_type: Option<i64>) -> Option<TrackStatus> {
+        match collection_type {
+            Some(1) => Some(TrackStatus::Planning),  // wish
+            Some(2) => Some(TrackStatus::Completed), // collect
+            Some(3) => Some(TrackStatus::Reading),   // do
+            Some(4) => Some(TrackStatus::Paused),    // on_hold
+            Some(5) => Some(TrackStatus::Dropped),
             _ => None,
         }
     }
@@ -136,160 +207,43 @@ impl BangumiTracker {
         segments.next()?.parse::<i64>().ok()
     }
 
-    /// 拉取指定用户全部书籍（subject_type=1）收藏 ID 集合，供搜索结果标记 tracked。
-    /// 失败时返回空集（tracked 全部降级为 false，不阻塞搜索）。
-    async fn tracked_subject_ids(&self, user_key: &str, username: &str) -> HashSet<i64> {
-        let mut ids = HashSet::new();
-        let mut offset: i64 = 0;
-        loop {
-            let url = format!(
-                "{API_BASE}/users/{username}/collections?subject_type=1&limit=100&offset={offset}"
-            );
-            let Ok(collection) = self.get_json(user_key, &url).await else {
-                break;
-            };
-            let Some(data) = collection.get("data").and_then(Value::as_array) else {
-                break;
-            };
-            if data.is_empty() {
-                break;
-            }
-            for item in data {
-                if let Some(sid) = item.get("subject_id").and_then(Value::as_i64) {
-                    ids.insert(sid);
-                }
-            }
-            let total = collection.get("total").and_then(Value::as_i64).unwrap_or(0);
-            offset += 100;
-            if total > 0 && offset >= total {
-                break;
-            }
-        }
-        ids
-    }
-
-    fn subject_to_item(subject: &Value, tracked: &HashSet<i64>) -> Option<TrackSearchItem> {
-        let id = subject.get("id")?.as_i64()?;
-        let name = subject.get("name").and_then(Value::as_str).unwrap_or("");
-        let name_cn = subject.get("name_cn").and_then(Value::as_str).unwrap_or("");
-        let title = if !name_cn.is_empty() { name_cn } else { name };
-        // 书籍条目的 platform 标注载体："漫画"/"小说"/"轻小说"/"画集"…
-        let media_type = match subject.get("platform").and_then(Value::as_str) {
+    /// subject → 搜索候选（tracked 取内嵌 interest 是否存在）。
+    fn subject_to_item(subject: Subject) -> TrackSearchItem {
+        let tracked = subject.interest.is_some();
+        let title = subject
+            .name_cn
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&subject.name);
+        // 书籍条目的 platform.typeCN 标注载体："漫画"/"小说"/"轻小说"/"画集"…
+        let media_type = match subject.platform.as_ref().and_then(|p| p.type_cn.as_deref()) {
             Some(p) if p.contains("小说") => Some(TrackMediaType::Novel),
             Some(p) if p.contains("漫画") => Some(TrackMediaType::Manga),
             _ => None,
         };
-        Some(TrackSearchItem {
-            id: id.to_string(),
+        TrackSearchItem {
+            id: subject.id.to_string(),
             title: if title.is_empty() {
                 "Unknown Title"
             } else {
                 title
             }
             .to_string(),
-            cover_url: subject
-                .get("images")
-                .and_then(|i| i.get("large"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            description: subject
-                .get("summary")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            // 用户态：命中当前用户书籍收藏集合即 tracked（未入列表为 false）。
-            tracked: tracked.contains(&id),
+            cover_url: subject.images.as_ref().and_then(|i| i.large.clone()),
+            description: subject.summary.or(subject.info),
+            tracked,
             media_type,
-            url: Some(format!("https://bgm.tv/subject/{id}")),
-        })
+            series: subject.series,
+            url: Some(format!("https://bgm.tv/subject/{}", subject.id)),
+        }
     }
 
-    /// v0 搜索：`POST /v0/search/subjects`（type=1 书籍）。
-    async fn search_v0(
-        &self,
-        user_key: &str,
-        query: &str,
-        nsfw: bool,
-    ) -> Result<Vec<Value>, String> {
-        let response = self
-            .send_authed(
-                user_key,
-                reqwest::Method::POST,
-                &format!("{API_BASE}/search/subjects?limit=20"),
-                Some(json!({
-                    "keyword": query,
-                    "sort": "match",
-                    "filter": { "type": [1], "nsfw": nsfw }
-                })),
-                "bangumi search",
-            )
+    /// 单条目详情（Next API 响应内嵌当前用户 interest 与 eps/volumes）。
+    async fn subject(&self, user_key: &str, id: i64) -> Result<Subject, String> {
+        let body = self
+            .get_json(user_key, &format!("{API_BASE}/p1/subjects/{id}"))
             .await?;
-        let status = response.status();
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("bangumi search response parse failed: {e}"))?;
-        if !status.is_success() {
-            return Err(format!("bangumi search error (HTTP {status}): {body}"));
-        }
-        Ok(body
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    /// 旧 API 兜底：`GET /search/subject/{query}?type=1`（公开，无鉴权）。
-    async fn search_legacy(&self, user_key: &str, query: &str) -> Result<Vec<Value>, String> {
-        let encoded: String = query
-            .as_bytes()
-            .iter()
-            .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    (*b as char).to_string()
-                }
-                _ => format!("%{b:02X}"),
-            })
-            .collect();
-        let response = self
-            .http
-            .get(format!(
-                "https://api.bgm.tv/search/subject/{encoded}?type=1"
-            ))
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await
-            .map_err(|e| format!("bangumi legacy search request failed: {e}"))?;
-        let status = response.status();
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("bangumi legacy search response parse failed: {e}"))?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.note_unauthorized(user_key);
-        }
-        if !status.is_success() {
-            return Err(format!(
-                "bangumi legacy search error (HTTP {status}): {body}"
-            ));
-        }
-        // 旧 API 响应字段为 list（v0 为 data），兼容两者。
-        Ok(body
-            .get("list")
-            .or_else(|| body.get("subjects"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    /// 当前用户书籍收藏 ID 集合（内部共用；失败返回空集）。
-    async fn current_tracked_ids(&self, user_key: &str) -> HashSet<i64> {
-        let mut tracked = HashSet::new();
-        if let Ok(me) = self.get_json(user_key, &format!("{API_BASE}/me")).await {
-            if let Some(username) = me.get("username").and_then(Value::as_str) {
-                tracked = self.tracked_subject_ids(user_key, username).await;
-            }
-        }
-        tracked
+        serde_json::from_value(body).map_err(|e| format!("bangumi subject parse failed: {e}"))
     }
 }
 
@@ -314,100 +268,51 @@ impl TrackerService for BangumiTracker {
     ) -> Result<Vec<TrackSearchItem>, String> {
         // 链接输入：bgm.tv/bangumi.tv/subject/{id} 直接定位单条目。
         if let Some(id) = Self::extract_subject_url(query) {
-            let tracked = self.current_tracked_ids(user_key).await;
-            let subject = self
-                .get_json(user_key, &format!("{API_BASE}/subjects/{id}"))
-                .await?;
-            return Ok(Self::subject_to_item(&subject, &tracked)
-                .into_iter()
-                .collect());
+            let subject = self.subject(user_key, id).await?;
+            return Ok(vec![Self::subject_to_item(subject)]);
         }
-        // 用户态 tracked 标记：拉取当前用户书籍收藏集合（失败则降级为全 false）。
-        let tracked = self.current_tracked_ids(user_key).await;
         // R18 条目仅在登录态可见（bgm.tv 对未登录请求忽略 NSFW 过滤；本路由已要求登录）。
-        let subjects = match self.search_v0(user_key, query, nsfw).await {
-            Ok(subjects) => subjects,
-            Err(v0_err) => {
-                // 旧 API 兜底：公开搜索接口（无鉴权），响应 { subjects: [...] }。
-                let fallback = self
-                    .search_legacy(user_key, query)
-                    .await
-                    .map_err(|legacy_err| {
-                        format!("bangumi search failed (v0: {v0_err}; legacy: {legacy_err})")
-                    })?;
-                fallback
-            }
-        };
-        Ok(subjects
-            .iter()
-            .filter_map(|subject| Self::subject_to_item(subject, &tracked))
-            .collect())
+        let response = self
+            .send_authed(
+                user_key,
+                reqwest::Method::POST,
+                &format!("{API_BASE}/p1/search/subjects?limit={SEARCH_LIMIT}"),
+                Some(json!({
+                    "keyword": query,
+                    "sort": "match",
+                    "filter": { "type": [1], "nsfw": nsfw }
+                })),
+                "bangumi search",
+            )
+            .await?;
+        let status = response.status();
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("bangumi search response parse failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("bangumi search error (HTTP {status}): {body}"));
+        }
+        let subjects: Vec<Subject> =
+            serde_json::from_value(body.get("data").cloned().unwrap_or(Value::Null))
+                .map_err(|e| format!("bangumi search parse failed: {e}"))?;
+        Ok(subjects.into_iter().map(Self::subject_to_item).collect())
     }
 
     async fn get_state(&self, user_key: &str, track_id: &str) -> Result<TrackState, String> {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid bangumi id: {track_id}"))?;
-        // 先取当前用户 username（collection 查询要求指定用户名）。
-        let me = self.get_json(user_key, &format!("{API_BASE}/me")).await?;
-        let username = me
-            .get("username")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "bangumi /v0/me returned no username".to_string())?;
-        let collection = match self
-            .get_json(
-                user_key,
-                &format!("{API_BASE}/users/{username}/collections/{id}"),
-            )
-            .await
-        {
-            Ok(v) => v,
-            // 未收藏：该端点对未入列表条目返回 404（subject is not collected by user），
-            // 与"已收藏但 type 缺失"一样按空状态处理，避免 WebUI 报 500。
-            Err(e) if e.contains("HTTP 404") => return Ok(TrackState::default()),
-            Err(e) => return Err(e),
-        };
-        if collection.get("type").is_none() {
-            return Ok(TrackState::default()); // 未入列表
-        }
-        let subject = self
-            .get_json(user_key, &format!("{API_BASE}/subjects/{id}"))
-            .await
-            .ok();
-        let status_str = match collection.get("type").and_then(Value::as_i64) {
-            Some(1) => "wish",
-            Some(2) => "collect",
-            Some(3) => "do",
-            Some(4) => "on_hold",
-            Some(5) => "dropped",
-            _ => "",
-        };
+        // 单次请求：interest（收藏状态/评分/进度）与 eps/volumes 均内嵌于详情。
+        let subject = self.subject(user_key, id).await?;
+        let interest = subject.interest.unwrap_or_default();
         Ok(TrackState {
-            score: collection
-                .get("rate")
-                .and_then(Value::as_i64)
-                .map(|v| v as i32),
-            status: Self::from_status_str(status_str),
-            last_read_chapter: collection
-                .get("ep_status")
-                .and_then(Value::as_i64)
-                .map(|v| v as f32),
-            last_read_volume: collection
-                .get("vol_status")
-                .and_then(Value::as_i64)
-                .map(|v| v as i32),
-            total_chapters: subject
-                .as_ref()
-                .and_then(|s| {
-                    s.get("eps")
-                        .and_then(Value::as_i64)
-                        .or_else(|| s.get("total_episodes").and_then(Value::as_i64))
-                })
-                .map(|v| v as i32),
-            total_volumes: subject
-                .as_ref()
-                .and_then(|s| s.get("volumes").and_then(Value::as_i64))
-                .map(|v| v as i32),
+            score: interest.rate,
+            status: Self::from_collection_type(interest.collection_type),
+            last_read_chapter: interest.ep_status.map(|v| v as f32),
+            last_read_volume: interest.vol_status,
+            total_chapters: subject.eps,
+            total_volumes: subject.volumes,
             start_read_date: None, // Bangumi API 不返回收藏开始日期
             finish_read_date: None,
         })
@@ -422,33 +327,92 @@ impl TrackerService for BangumiTracker {
         let id: i64 = track_id
             .parse()
             .map_err(|_| format!("invalid bangumi id: {track_id}"))?;
-        // 动态构建 body：未提供的字段省略（WebUI "keep" 语义），type 必须为整数。
-        let mut body = serde_json::Map::new();
+        // Next API 拆分两类更新：收藏状态/评分（PUT）与阅读进度（PATCH）。
+        // 动态构建 body：未提供的字段省略（WebUI "keep" 语义）；日期无可写端点，忽略。
+        let mut collection_body = serde_json::Map::new();
         if let Some(status) = update.status {
-            body.insert("type".to_string(), json!(Self::to_type(status)));
+            collection_body.insert("type".to_string(), json!(Self::to_type(status)));
         }
         if let Some(score) = update.score {
-            body.insert("rate".to_string(), json!(score));
+            collection_body.insert("rate".to_string(), json!(score));
         }
+        let mut progress_body = serde_json::Map::new();
         if let Some(chapter) = update.last_read_chapter {
-            body.insert("ep_status".to_string(), json!(chapter.floor() as i64));
+            progress_body.insert("epStatus".to_string(), json!(chapter.floor() as i64));
         }
         if let Some(volume) = update.last_read_volume {
-            body.insert("vol_status".to_string(), json!(volume));
+            progress_body.insert("volStatus".to_string(), json!(volume));
         }
-        let response = self
-            .send_authed(
-                user_key,
-                reqwest::Method::POST,
-                &format!("{API_BASE}/users/-/collections/{id}"),
-                Some(Value::Object(body)),
-                "bangumi update",
-            )
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body: Value = response.json().await.unwrap_or_default();
-            return Err(format!("bangumi update error (HTTP {status}): {body}"));
+        let has_collection_update = !collection_body.is_empty();
+        if !has_collection_update && progress_body.is_empty() {
+            return Ok(());
+        }
+        // PUT 要求 type/rate 成对：只改其一时先读现有收藏值补齐
+        //（未收藏缺省 type=3 在读 / rate=0）。
+        if has_collection_update && (update.status.is_none() || update.score.is_none()) {
+            let interest = self
+                .subject(user_key, id)
+                .await?
+                .interest
+                .unwrap_or_default();
+            if update.status.is_none() {
+                collection_body.insert(
+                    "type".to_string(),
+                    json!(interest.collection_type.unwrap_or(3)),
+                );
+            }
+            if update.score.is_none() {
+                collection_body.insert("rate".to_string(), json!(interest.rate.unwrap_or(0)));
+            }
+        }
+        let url = format!("{API_BASE}/p1/collections/subjects/{id}");
+        if has_collection_update {
+            let response = self
+                .send_authed(
+                    user_key,
+                    reqwest::Method::PUT,
+                    &url,
+                    Some(Value::Object(collection_body)),
+                    "bangumi update",
+                )
+                .await?;
+            Self::ensure_success(response, "bangumi update").await?;
+        }
+        if !progress_body.is_empty() {
+            let response = self
+                .send_authed(
+                    user_key,
+                    reqwest::Method::PATCH,
+                    &url,
+                    Some(Value::Object(progress_body.clone())),
+                    "bangumi progress update",
+                )
+                .await?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND && !has_collection_update {
+                // 未收藏时进度 PATCH 返回 404：先以默认状态建收藏，再重试进度更新。
+                let response = self
+                    .send_authed(
+                        user_key,
+                        reqwest::Method::PUT,
+                        &url,
+                        Some(json!({ "type": 3, "rate": 0 })),
+                        "bangumi update",
+                    )
+                    .await?;
+                Self::ensure_success(response, "bangumi update").await?;
+                let response = self
+                    .send_authed(
+                        user_key,
+                        reqwest::Method::PATCH,
+                        &url,
+                        Some(Value::Object(progress_body)),
+                        "bangumi progress update",
+                    )
+                    .await?;
+                Self::ensure_success(response, "bangumi progress update").await?;
+            } else {
+                Self::ensure_success(response, "bangumi progress update").await?;
+            }
         }
         Ok(())
     }
@@ -458,31 +422,72 @@ impl TrackerService for BangumiTracker {
 mod tests {
     use super::*;
 
-    fn subject(platform: Option<&str>) -> Value {
-        let mut value = serde_json::json!({ "id": 1902, "name": "Title", "name_cn": "" });
-        if let Some(platform) = platform {
-            value.as_object_mut().unwrap().insert("platform".into(), platform.into());
+    fn subject(platform: Option<&str>) -> Subject {
+        Subject {
+            id: 1902,
+            name: "Title".to_string(),
+            platform: platform.map(|type_cn| SubjectPlatform {
+                type_cn: Some(type_cn.to_string()),
+            }),
+            ..Subject::default()
         }
-        value
     }
 
     #[test]
     fn subject_to_item_maps_book_platforms() {
-        let novel = BangumiTracker::subject_to_item(&subject(Some("小说")), &HashSet::new()).unwrap();
+        let novel = BangumiTracker::subject_to_item(subject(Some("小说")));
         assert_eq!(novel.media_type, Some(TrackMediaType::Novel));
-        let light_novel =
-            BangumiTracker::subject_to_item(&subject(Some("轻小说")), &HashSet::new()).unwrap();
+        let light_novel = BangumiTracker::subject_to_item(subject(Some("轻小说")));
         assert_eq!(light_novel.media_type, Some(TrackMediaType::Novel));
-        let manga = BangumiTracker::subject_to_item(&subject(Some("漫画")), &HashSet::new()).unwrap();
+        let manga = BangumiTracker::subject_to_item(subject(Some("漫画")));
         assert_eq!(manga.media_type, Some(TrackMediaType::Manga));
     }
 
     #[test]
     fn subject_to_item_without_known_platform_has_no_media_type() {
-        let artbook =
-            BangumiTracker::subject_to_item(&subject(Some("画集")), &HashSet::new()).unwrap();
+        let artbook = BangumiTracker::subject_to_item(subject(Some("画集")));
         assert_eq!(artbook.media_type, None);
-        let none = BangumiTracker::subject_to_item(&subject(None), &HashSet::new()).unwrap();
+        let none = BangumiTracker::subject_to_item(subject(None));
         assert_eq!(none.media_type, None);
+    }
+
+    #[test]
+    fn subject_to_item_reads_embedded_interest_and_series_flag() {
+        let mut value = subject(Some("漫画"));
+        assert!(!BangumiTracker::subject_to_item(subject(Some("漫画"))).tracked);
+        value.interest = Some(SubjectInterest {
+            collection_type: Some(3),
+            rate: Some(8),
+            ..SubjectInterest::default()
+        });
+        value.series = true;
+        let item = BangumiTracker::subject_to_item(value);
+        assert!(item.tracked);
+        assert!(item.series);
+    }
+
+    #[test]
+    fn collection_type_maps_to_track_status() {
+        assert_eq!(
+            BangumiTracker::from_collection_type(Some(1)),
+            Some(TrackStatus::Planning)
+        );
+        assert_eq!(
+            BangumiTracker::from_collection_type(Some(2)),
+            Some(TrackStatus::Completed)
+        );
+        assert_eq!(
+            BangumiTracker::from_collection_type(Some(3)),
+            Some(TrackStatus::Reading)
+        );
+        assert_eq!(
+            BangumiTracker::from_collection_type(Some(4)),
+            Some(TrackStatus::Paused)
+        );
+        assert_eq!(
+            BangumiTracker::from_collection_type(Some(5)),
+            Some(TrackStatus::Dropped)
+        );
+        assert_eq!(BangumiTracker::from_collection_type(None), None);
     }
 }
