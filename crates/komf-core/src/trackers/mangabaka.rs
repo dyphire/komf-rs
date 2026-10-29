@@ -16,6 +16,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 const BASE_URL: &str = "https://api.mangabaka.org";
+/// 搜索页大小：与 AniList（perPage 20）/ MAL / Bangumi 口径一致；同时让随后的
+/// `/v1/my/library/batch` 收藏批量查询保持有界。
+const SEARCH_LIMIT: usize = 20;
 
 // ---------------------------------------------------------------------------
 // API 模型（与 MangaBaka API 一致）
@@ -386,7 +389,7 @@ impl TrackerService for MangaBakaTracker {
         }
 
         let mut url = format!(
-            "{BASE_URL}/v1/series/search?q={}",
+            "{BASE_URL}/v1/series/search?q={}&limit={SEARCH_LIMIT}",
             url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
         );
         if !nsfw {
