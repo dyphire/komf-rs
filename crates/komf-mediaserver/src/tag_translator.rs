@@ -157,7 +157,10 @@ mod tests {
         let tr = translator();
         // 斜杠标签无字典条目时保持原文（不猜词）。
         assert_eq!(tr.translate("Totally Unknown/s"), "Totally Unknown/s");
-        assert_eq!(tr.translate("Publisher/s: Kodansha"), "Publisher/s: Kodansha");
+        assert_eq!(
+            tr.translate("Publisher/s: Kodansha"),
+            "Publisher/s: Kodansha"
+        );
     }
 
     #[test]

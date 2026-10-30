@@ -987,6 +987,7 @@ function TrackerPage() {
                   <b>{r.title}</b>
                   <div className="row">
                     {r.tracked ? <span className="badge">{t('tr.tracked')}</span> : null}
+                    {r.series ? <span className="badge">{t('tr.series')}</span> : null}
                     {r.url ? <a href={r.url} target="_blank" rel="noreferrer">{t('source')}</a> : null}
                   </div>
                   {r.description ? <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>{r.description.slice(0, 200)}{r.description.length > 200 ? '…' : ''}</p> : null}
