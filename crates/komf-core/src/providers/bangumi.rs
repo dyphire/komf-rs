@@ -12,17 +12,242 @@ use crate::util::chinese::{ChineseConverter, ChineseDirection};
 use crate::util::{similarity_score, NameSimilarityMatcher};
 use serde::Deserialize;
 
-const BASE_URL: &str = "https://api.bgm.tv";
+const BASE_URL: &str = "https://next.bgm.tv";
 
+/// Next API（https://next.bgm.tv/p1）搜索响应：data 为 SlimSubject
+/// （缺 summary/date/tags/volumes/eps，含 series 标志）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BangumiSearchResponse {
-    /// v0 API 字段。
+pub struct NextSearchResponse {
     #[serde(default)]
-    pub data: Vec<BangumiSubject>,
-    /// 旧 API 字段（fallback 搜索结果）。
+    pub data: Vec<NextSlimSubject>,
+}
+
+/// Next API SlimSubject（搜索结果 / relations 内嵌条目）。仅 HTTP 边界使用，
+/// 经 `From` 适配为内部 `BangumiSubject`，下游 mapper 逻辑零改动。
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextSlimSubject {
+    pub id: u64,
+    pub name: String,
+    #[serde(default, rename = "nameCN")]
+    pub name_cn: Option<String>,
+    #[serde(rename = "type")]
+    pub subject_type: Option<i32>,
     #[serde(default)]
-    pub list: Vec<BangumiSubject>,
+    pub platform: Option<NextPlatform>,
+    #[serde(default)]
+    pub series: Option<bool>,
+    #[serde(default)]
+    pub images: Option<BangumiImages>,
+    #[serde(default)]
+    pub nsfw: Option<bool>,
+}
+
+/// Next API Subject（详情）。与 v0 的差异：name_cn→nameCN、date→airtime.date、
+/// rank→rating.rank、platform 字符串→对象、infobox 恒为 [{key, values:[{k?, v}]}]
+/// 规整形；无 age_rating/total_episodes；新增 series/seriesEntry。
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextSubject {
+    pub id: u64,
+    pub name: String,
+    #[serde(default, rename = "nameCN")]
+    pub name_cn: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub images: Option<BangumiImages>,
+    #[serde(default)]
+    pub rating: Option<NextRating>,
+    #[serde(rename = "type")]
+    pub subject_type: Option<i32>,
+    #[serde(default)]
+    pub platform: Option<NextPlatform>,
+    #[serde(default)]
+    pub tags: Vec<BangumiTag>,
+    #[serde(default)]
+    pub volumes: Option<i32>,
+    #[serde(default)]
+    pub eps: Option<i32>,
+    #[serde(default)]
+    pub airtime: Option<NextAirtime>,
+    #[serde(default)]
+    pub infobox: Vec<NextInfoBoxItem>,
+    #[serde(default)]
+    pub series: Option<bool>,
+    #[serde(default, rename = "seriesEntry")]
+    pub series_entry: Option<u64>,
+    #[serde(default)]
+    pub nsfw: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextRating {
+    #[serde(default)]
+    pub score: Option<f64>,
+    #[serde(default)]
+    pub total: Option<i32>,
+    #[serde(default)]
+    pub rank: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextPlatform {
+    /// 平台中文名（漫画/小说/画集…），与 v0 顶层 platform 字符串同值。
+    #[serde(default, rename = "typeCN")]
+    pub type_cn: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextAirtime {
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextInfoBoxItem {
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub values: Vec<NextInfoBoxValue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextInfoBoxValue {
+    #[serde(default)]
+    pub k: Option<String>,
+    #[serde(default)]
+    pub v: Option<serde_json::Value>,
+}
+
+/// Next API relations 分页响应：GET /p1/subjects/{id}/relations。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextRelationsResponse {
+    #[serde(default)]
+    pub data: Vec<NextRelationItem>,
+    #[serde(default)]
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextRelationItem {
+    pub subject: NextSlimSubject,
+    #[serde(default)]
+    pub relation: Option<NextRelationType>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NextRelationType {
+    /// 关系中文名（单行本/番外篇/画集…），与 v0 的 relation 字符串同值。
+    #[serde(default)]
+    pub cn: Option<String>,
+}
+
+/// Next infobox（恒为 [{key, values:[{k?, v}]}]）→ v0 形态：单值且无 k 折叠为
+/// 裸字符串，多值/带 k 为 [{k, v}] 数组。mapper 的取值逻辑（HashMap 按键取
+/// value，字符串/数组两态）因此零改动。
+fn next_infobox_to_v0(items: Vec<NextInfoBoxItem>) -> Vec<BangumiInfoBoxItem> {
+    items
+        .into_iter()
+        .map(|item| {
+            let value = if item.values.len() == 1 && item.values[0].k.is_none() {
+                item.values.into_iter().next().and_then(|v| v.v)
+            } else if item.values.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(
+                    item.values
+                        .into_iter()
+                        .map(|v| {
+                            let mut obj = serde_json::Map::new();
+                            if let Some(k) = v.k {
+                                obj.insert("k".to_string(), serde_json::Value::String(k));
+                            }
+                            if let Some(vv) = v.v {
+                                obj.insert("v".to_string(), vv);
+                            }
+                            serde_json::Value::Object(obj)
+                        })
+                        .collect(),
+                ))
+            };
+            BangumiInfoBoxItem {
+                key: item.key,
+                value,
+            }
+        })
+        .collect()
+}
+
+impl From<NextSlimSubject> for BangumiSubject {
+    /// SlimSubject 适配：搜索结果映射只用 name/name_cn/platform/images/nsfw/series；
+    /// 详情字段（summary/date/tags/volumes/eps/infobox）留空，由 get() 详情补齐。
+    fn from(s: NextSlimSubject) -> Self {
+        Self {
+            id: s.id,
+            name: s.name,
+            name_cn: s.name_cn,
+            image: None,
+            summary: None,
+            date: None,
+            images: s.images,
+            rating: None,
+            rank: None,
+            subject_type: s.subject_type,
+            platform: s.platform.and_then(|p| p.type_cn).filter(|p| !p.is_empty()),
+            tags: Vec::new(),
+            volumes: None,
+            eps: None,
+            total_episodes: None,
+            infobox: Vec::new(),
+            eps_info: None,
+            age_rating: None,
+            nsfw: s.nsfw,
+            series: s.series,
+            series_entry: None,
+        }
+    }
+}
+
+impl From<NextSubject> for BangumiSubject {
+    fn from(s: NextSubject) -> Self {
+        let (rating, rank) = match s.rating {
+            Some(r) => (
+                Some(BangumiRating {
+                    score: r.score,
+                    total: r.total,
+                }),
+                r.rank,
+            ),
+            None => (None, None),
+        };
+        Self {
+            id: s.id,
+            name: s.name,
+            name_cn: s.name_cn,
+            image: None,
+            summary: s.summary,
+            date: s.airtime.and_then(|a| a.date).filter(|d| !d.is_empty()),
+            images: s.images,
+            rating,
+            rank,
+            subject_type: s.subject_type,
+            platform: s.platform.and_then(|p| p.type_cn).filter(|p| !p.is_empty()),
+            tags: s.tags,
+            // Next 恒返回 int（N/A 为 0）；v0 语义为 null → 0 归一为 None
+            volumes: s.volumes.filter(|v| *v > 0),
+            eps: s.eps.filter(|v| *v > 0),
+            // Next 无 total_episodes；书籍场景 v0 恒为 0，info 文本的 "N话" 与 eps 重复
+            total_episodes: None,
+            infobox: next_infobox_to_v0(s.infobox),
+            eps_info: None,
+            // Next 无 age_rating：map_bangumi_age_rating 回退 nsfw/tags 推断
+            age_rating: None,
+            nsfw: s.nsfw,
+            series: s.series,
+            series_entry: s.series_entry,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +284,14 @@ pub struct BangumiSubject {
     /// Bangumi 成人内容标记（在线 API 与 Archive 均有）
     #[serde(default)]
     pub nsfw: Option<bool>,
+    /// Next API 系列条目标记（v0 无此字段 → None；Archive dump 有同名字段）。
+    /// None 视为系列条目（与 archive 路径判定一致）。
+    #[serde(default)]
+    pub series: Option<bool>,
+    /// Next API 所属系列条目 id（单行本 → 系列；0/None 表示非系列成员）。
+    /// 仅详情接口返回，搜索 SlimSubject 无此字段。
+    #[serde(default)]
+    pub series_entry: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,7 +334,8 @@ pub struct BangumiEpisode {
     pub ep: Option<f64>,
 }
 
-/// 对应 Kotlin `SubjectRelation`（GET /v0/subjects/{id}/subjects，snake_case JSON）。
+/// 对应 Kotlin `SubjectRelation`（Next API /p1/subjects/{id}/relations 适配后的
+/// 内部形态：relation 取 relation.cn，与原 v0 字符串同值）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct BangumiSubjectRelation {
     pub id: u64,
@@ -156,85 +390,79 @@ impl BangumiClient {
         }
     }
 
+    /// Next API 搜索：POST /p1/search/subjects（body 与 v0 相同；响应 SlimSubject
+    /// 经 From 适配）。v0 时代的旧 API 兜底（GET /search/subject/{name}）随迁移删除。
     pub async fn search(
         &self,
         name: &str,
-        _limit: u32,
+        limit: u32,
     ) -> Result<Vec<BangumiSubject>, ProviderError> {
-        match self.search_v0(name).await {
-            Ok(subjects) => Ok(subjects),
-            // v0 失败时兜底旧 API（公开搜索接口，无鉴权）。
-            Err(_v0_err) => self.search_legacy(name).await,
-        }
-    }
-
-    /// v0 搜索：POST /v0/search/subjects，JSON body
-    /// { "keyword": ..., "sort": "match", "filter": { "type": [1], "nsfw": true } }
-    async fn search_v0(&self, name: &str) -> Result<Vec<BangumiSubject>, ProviderError> {
         let body = serde_json::json!({
             "keyword": name,
             "sort": "match",
             "filter": { "type": [1], "nsfw": true }
         });
         let response = self
-            .authorized(self.http.post(format!("{BASE_URL}/v0/search/subjects")))
+            .authorized(self.http.post(format!(
+                "{BASE_URL}/p1/search/subjects?limit={}",
+                limit.clamp(1, 100)
+            )))
             .await
             .json(&body)
             .send()
             .await?;
         let response = super::ensure_success(CoreProviders::Bangumi, response).await?;
-        let body: BangumiSearchResponse = response.json().await?;
-        Ok(body.data)
-    }
-
-    /// 旧 API 兜底：GET /search/subject/{name}?type=1（公开，无鉴权；响应字段为 list）。
-    async fn search_legacy(&self, name: &str) -> Result<Vec<BangumiSubject>, ProviderError> {
-        let encoded: String = name
-            .as_bytes()
-            .iter()
-            .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    (*b as char).to_string()
-                }
-                _ => format!("%{b:02X}"),
-            })
-            .collect();
-        let response = self
-            .http
-            .get(format!("{BASE_URL}/search/subject/{encoded}?type=1"))
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await?;
-        let response = super::ensure_success(CoreProviders::Bangumi, response).await?;
-        let body: BangumiSearchResponse = response.json().await?;
-        Ok(body.list)
+        let body: NextSearchResponse = response.json().await?;
+        Ok(body.data.into_iter().map(Into::into).collect())
     }
 
     pub async fn get(&self, id: u64) -> Result<BangumiSubject, ProviderError> {
         let response = self
-            .authorized(self.http.get(format!("{BASE_URL}/v0/subjects/{id}")))
+            .authorized(self.http.get(format!("{BASE_URL}/p1/subjects/{id}")))
             .await
             .send()
             .await?;
         let response = super::ensure_success(CoreProviders::Bangumi, response).await?;
-        Ok(response.json().await?)
+        let subject: NextSubject = response.json().await?;
+        Ok(subject.into())
     }
 
-    /// 对应 Kotlin `getSubjectRelations`：GET /v0/subjects/{id}/subjects
+    /// 对应 Kotlin `getSubjectRelations`：GET /p1/subjects/{id}/relations（分页）。
+    /// 服务端过滤 type=1&offprint=true 即「书籍单行本」子集；调用方仍按
+    /// relation=="单行本" 二次过滤作保险。v0 一次全量返回，Next 需翻页。
     pub async fn get_subject_relations(
         &self,
         id: u64,
     ) -> Result<Vec<BangumiSubjectRelation>, ProviderError> {
-        let response = self
-            .authorized(
-                self.http
-                    .get(format!("{BASE_URL}/v0/subjects/{id}/subjects")),
-            )
-            .await
-            .send()
-            .await?;
-        let response = super::ensure_success(CoreProviders::Bangumi, response).await?;
-        Ok(response.json().await?)
+        let mut out = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let response = self
+                .authorized(self.http.get(format!(
+                    "{BASE_URL}/p1/subjects/{id}/relations?type=1&offprint=true&limit=100&offset={offset}"
+                )))
+                .await
+                .send()
+                .await?;
+            let response = super::ensure_success(CoreProviders::Bangumi, response).await?;
+            let page: NextRelationsResponse = response.json().await?;
+            let fetched = page.data.len() as u64;
+            out.extend(page.data.into_iter().map(|r| BangumiSubjectRelation {
+                id: r.subject.id,
+                name: r.subject.name,
+                name_cn: r.subject.name_cn,
+                r#type: r.subject.subject_type,
+                relation: r.relation.and_then(|rel| rel.cn),
+            }));
+            match page.total {
+                Some(total) if fetched > 0 && offset + fetched < total => {
+                    offset += fetched;
+                    self.limiter.acquire().await;
+                }
+                _ => break,
+            }
+        }
+        Ok(out)
     }
 
     /// 封面 URL 候选：顶层 image（search API 有）→ images 各尺寸（详情 API 只有 images）。
@@ -1067,31 +1295,36 @@ const ARCHIVE_MATCH_SEARCH_LIMIT: usize = 25;
 /// （单行本 name_cn 常为空，故 name 是可靠主键；各卷原名不统一而中文名统一时
 /// name_cn 兜底）。前缀余量必须是卷号装饰（空 / ( （ [ 【 # ＃ / 数字 / 第+数字）——
 /// 外传·番外·完全版等派生作品的余量是普通词（"番外編集 <原罪>""セブンデイズ"），
-/// 不被误杀。无对应系列条目的非系列主条目保留——不再做 BangumiKomga
-/// resort 式的"非系列即跳过"硬过滤：wiki 常把合法主条目（web 漫整卷收录等）标
-/// series=False，硬过滤会误杀（如 385468《大医凌然》漫画版）；且在线 API 无
-/// series 概念不过滤，离线行为应对齐在线。泛型 T 保留调用方附加数据
-/// （搜索侧为相似度分，匹配侧为单位元）。
-fn filter_shadowed_single_volumes<T>(candidates: &mut Vec<(ArchiveSubject, T)>) {
+/// 不被误杀。无对应系列条目的非系列主条目保留——不做"非系列即跳过"硬过滤：
+/// wiki 常把合法主条目（web 漫整卷收录、单发作品如《さよなら絵梨》）标
+/// series=False，硬过滤会误杀（如 385468《大医凌然》漫画版）。
+/// key 提取 (name, name_cn, platform, series)：archive 路径传 ArchiveSubject，
+/// 在线 Next API 路径传 BangumiSubject（SlimSubject 适配后），行为对齐。
+fn shadow_dedup_single_volumes<T>(
+    candidates: &mut Vec<T>,
+    key: impl Fn(&T) -> (String, Option<String>, Option<String>, Option<bool>),
+) {
     let series_entries: Vec<(String, Option<String>, Option<String>)> = candidates
         .iter()
-        .filter(|(a, _)| a.series != Some(false))
-        .map(|(a, _)| (a.name.clone(), a.name_cn.clone(), a.platform_str()))
+        .map(&key)
+        .filter(|(_, _, _, series)| *series != Some(false))
+        .map(|(name, name_cn, plat, _)| (name, name_cn, plat))
         .collect();
     if series_entries.is_empty() {
         return;
     }
-    candidates.retain(|(a, _)| {
-        if a.series != Some(false) {
+    candidates.retain(|c| {
+        let (name, name_cn, plat, series) = key(c);
+        if series != Some(false) {
             return true;
         }
-        !series_entries.iter().any(|(name, name_cn, plat)| {
-            if plat != &a.platform_str() {
+        !series_entries.iter().any(|(sname, sname_cn, splat)| {
+            if *splat != plat {
                 return false;
             }
-            let name_shadow = name.chars().count() >= 2 && is_series_volume_tail(&a.name, name);
+            let name_shadow = sname.chars().count() >= 2 && is_series_volume_tail(&name, sname);
             // name_cn 兜底：双方均非空且前缀 ≥2 字符
-            let cn_shadow = match (name_cn, &a.name_cn) {
+            let cn_shadow = match (sname_cn, &name_cn) {
                 (Some(base), Some(candidate)) if !base.is_empty() && base.chars().count() >= 2 => {
                     is_series_volume_tail(candidate, base)
                 }
@@ -1100,6 +1333,30 @@ fn filter_shadowed_single_volumes<T>(candidates: &mut Vec<(ArchiveSubject, T)>) 
             name_shadow || cn_shadow
         })
     });
+}
+
+/// archive 候选的影子去重（泛型 T 保留调用方附加数据：搜索侧为相似度分，匹配侧为单位元）。
+fn filter_shadowed_single_volumes<T>(candidates: &mut Vec<(ArchiveSubject, T)>) {
+    shadow_dedup_single_volumes(candidates, |(a, _)| {
+        (
+            a.name.clone(),
+            a.name_cn.clone(),
+            a.platform_str(),
+            a.series,
+        )
+    });
+}
+
+/// 在线搜索候选（Next SlimSubject 适配后的 BangumiSubject）的影子去重 key。
+fn bangumi_subject_shadow_key(
+    s: &BangumiSubject,
+) -> (String, Option<String>, Option<String>, Option<bool>) {
+    (
+        s.name.clone(),
+        s.name_cn.clone(),
+        s.platform.clone(),
+        s.series,
+    )
 }
 
 /// 前缀 + 余量白名单判定：candidate 以 base 开头，且余量只能是卷号装饰——
@@ -1877,13 +2134,19 @@ impl MetadataProvider for BangumiMetadataProvider {
         }
         // ② 在线（archive 未启用）
         let results = self.client.search(series_name, limit as u32).await?;
-        Ok(results
+        let mut candidates: Vec<BangumiSubject> = results
             .into_iter()
-            .filter(|s| !s.tags.iter().any(|t| t.name == "漫画单行本"))
             .filter(|s| match platform_filter {
                 Some(platform) => s.platform.as_deref() == Some(platform),
                 None => true,
             })
+            .collect();
+        // 单行本影子去重（替代 v0 时代的"漫画单行本"tag 过滤：Next SlimSubject
+        // 无 tags；series 标志 + 名称前缀规则与 archive 路径同一判定，且不误杀
+        // 单发作品——无对应系列条目的 series=False 主条目保留）
+        shadow_dedup_single_volumes(&mut candidates, bangumi_subject_shadow_key);
+        Ok(candidates
+            .into_iter()
             .take(limit)
             .map(|s| self.metadata_mapper.to_series_search_result(&s))
             .collect())
@@ -1907,14 +2170,15 @@ impl MetadataProvider for BangumiMetadataProvider {
             .media_type
             .and_then(media_type_platform)
             .or_else(|| media_type_platform(self.media_type));
-        let candidates: Vec<BangumiSubject> = results
+        let mut candidates: Vec<BangumiSubject> = results
             .into_iter()
-            .filter(|s| !s.tags.iter().any(|t| t.name == "漫画单行本"))
             .filter(|s| match platform_filter {
                 Some(platform) => s.platform.as_deref() == Some(platform),
                 None => true,
             })
             .collect();
+        // 同 search_series：影子去重替代"漫画单行本"tag 过滤
+        shadow_dedup_single_volumes(&mut candidates, bangumi_subject_shadow_key);
 
         let mut matches: Vec<BangumiSubject> = candidates
             .iter()
@@ -1988,6 +2252,19 @@ impl MetadataProvider for BangumiMetadataProvider {
         };
         let Some(subject) = subject else {
             return Ok(None);
+        };
+        // Next 详情 seriesEntry 指向所属系列（单行本 → 系列 id）：系列匹配命中
+        // 单行本时回到系列条目——系列元数据应落在系列上（该单行本仍经 relations
+        // 进入 books）。系列条目不返回 search top-N 时才会走到这里。
+        let subject = match subject
+            .series_entry
+            .filter(|id| *id > 0 && *id != subject.id)
+        {
+            Some(series_id) => match self.client.get(series_id).await {
+                Ok(series) => series,
+                Err(_) => subject,
+            },
+            None => subject,
         };
 
         // Rust 扩展：在线搜索命中后优先尝试从离线数据库读取对应 id 的数据并使用
@@ -2224,6 +2501,138 @@ impl BangumiMetadataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Next 详情 JSON → BangumiSubject：字段改名/重组/infobox 折叠/0 值归一。
+    #[test]
+    fn next_subject_adapts_to_bangumi_subject() {
+        let json = r#"{
+            "id": 12121,
+            "name": "ONE PIECE (1)",
+            "nameCN": "航海王 (1)",
+            "summary": "冒险的黎明",
+            "images": {"large": "https://lain.bgm.tv/pic/cover/l/1.jpg"},
+            "rating": {"score": 8.5, "total": 123, "rank": 456},
+            "type": 1,
+            "platform": {"id": 1001, "type": "comic", "typeCN": "漫画"},
+            "tags": [{"name": "冒险", "count": 10}],
+            "volumes": 0,
+            "eps": 8,
+            "airtime": {"date": "1997-12-24", "year": 1997},
+            "infobox": [
+                {"key": "中文名", "values": [{"v": "航海王 (1)"}]},
+                {"key": "别名", "values": [{"k": "英文名", "v": "ONE PIECE 1"}, {"k": "日文名", "v": "ワンピース 1"}]},
+                {"key": "空键", "values": []}
+            ],
+            "series": false,
+            "seriesEntry": 3510,
+            "nsfw": false
+        }"#;
+        let next: NextSubject = serde_json::from_str(json).unwrap();
+        let s = BangumiSubject::from(next);
+        assert_eq!(s.id, 12121);
+        assert_eq!(s.name_cn.as_deref(), Some("航海王 (1)"));
+        assert_eq!(s.date.as_deref(), Some("1997-12-24"));
+        assert_eq!(s.platform.as_deref(), Some("漫画"));
+        assert_eq!(s.rank, Some(456));
+        assert_eq!(s.rating.and_then(|r| r.score), Some(8.5));
+        assert_eq!(s.subject_type, Some(1));
+        assert_eq!(s.series, Some(false));
+        assert_eq!(s.series_entry, Some(3510));
+        // 0 值归一：volumes=0 → None（v0 null 语义），eps=8 保留
+        assert_eq!(s.volumes, None);
+        assert_eq!(s.eps, Some(8));
+        // Next 无 total_episodes / age_rating
+        assert_eq!(s.total_episodes, None);
+        assert_eq!(s.age_rating, None);
+        // infobox：单值无 k → 裸字符串；多值带 k → [{k, v}] 数组；空 values → None
+        assert_eq!(s.infobox.len(), 3);
+        assert_eq!(
+            s.infobox[0].value,
+            Some(serde_json::Value::String("航海王 (1)".to_string()))
+        );
+        let arr = s.infobox[1]
+            .value
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["k"], "英文名");
+        assert_eq!(arr[0]["v"], "ONE PIECE 1");
+        assert_eq!(s.infobox[2].value, None);
+    }
+
+    /// Next 搜索 SlimSubject → BangumiSubject：详情字段留空，series 透传。
+    #[test]
+    fn next_search_response_adapts_slim_subjects() {
+        let json = r#"{
+            "data": [
+                {"id": 3510, "name": "ONE PIECE", "nameCN": "航海王", "type": 1,
+                 "platform": {"typeCN": "漫画"}, "series": true,
+                 "images": {"large": "https://x/l.jpg"}, "nsfw": false},
+                {"id": 12121, "name": "ONE PIECE (1)", "type": 1,
+                 "platform": {"typeCN": "漫画"}, "series": false}
+            ],
+            "total": 635
+        }"#;
+        let resp: NextSearchResponse = serde_json::from_str(json).unwrap();
+        let subjects: Vec<BangumiSubject> = resp.data.into_iter().map(Into::into).collect();
+        assert_eq!(subjects.len(), 2);
+        assert_eq!(subjects[0].series, Some(true));
+        assert_eq!(subjects[0].platform.as_deref(), Some("漫画"));
+        assert!(subjects[0].tags.is_empty() && subjects[0].infobox.is_empty());
+        assert_eq!(subjects[1].name_cn, None);
+        assert_eq!(subjects[1].series_entry, None);
+    }
+
+    /// Next relations 响应 → BangumiSubjectRelation：relation.cn 透出"单行本"。
+    #[test]
+    fn next_relations_adapt_relation_cn() {
+        let json = r#"{
+            "data": [{
+                "subject": {"id": 12121, "name": "ONE PIECE (1)", "type": 1,
+                            "platform": {"typeCN": "漫画"}, "series": false},
+                "relation": {"id": 1003, "en": "offprint", "cn": "单行本", "jp": "単行本"},
+                "order": 1
+            }],
+            "total": 110
+        }"#;
+        let page: NextRelationsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(page.total, Some(110));
+        let item = page.data.into_iter().next().unwrap();
+        assert_eq!(item.subject.id, 12121);
+        assert_eq!(item.relation.and_then(|r| r.cn).as_deref(), Some("单行本"));
+    }
+
+    /// 在线候选影子去重：替代 v0"漫画单行本"tag 过滤的行为验证。
+    #[test]
+    fn online_shadow_dedup_replaces_tag_filter() {
+        let mk = |id: u64, name: &str, series: Option<bool>| -> BangumiSubject {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "platform": "漫画", "series": series
+            }))
+            .unwrap()
+        };
+        // 系列 + 两卷 → 卷被剔除（原 tag 过滤语义）
+        let mut v = vec![
+            mk(3510, "ONE PIECE", Some(true)),
+            mk(12121, "ONE PIECE (1)", Some(false)),
+            mk(12122, "ONE PIECE (2)", Some(false)),
+        ];
+        shadow_dedup_single_volumes(&mut v, bangumi_subject_shadow_key);
+        assert_eq!(v.iter().map(|s| s.id).collect::<Vec<_>>(), vec![3510]);
+        // 单发作品（さよなら絵梨型：series=False 且无对应系列条目）→ 保留
+        let mut v = vec![mk(377599, "さよなら絵梨", Some(false))];
+        shadow_dedup_single_volumes(&mut v, bangumi_subject_shadow_key);
+        assert_eq!(v.len(), 1);
+        // 派生作品（番外系列 + 其单行本）：系列保留、卷剔除；外传系列本身不被本传误杀
+        let mut v = vec![
+            mk(886, "進撃の巨人", Some(true)),
+            mk(89713, "進撃の巨人 悔いなき選択", Some(true)),
+            mk(101680, "進撃の巨人 悔いなき選択 (1)", Some(false)),
+        ];
+        shadow_dedup_single_volumes(&mut v, bangumi_subject_shadow_key);
+        assert_eq!(v.iter().map(|s| s.id).collect::<Vec<_>>(), vec![886, 89713]);
+    }
 
     #[test]
     fn offline_person_roles_2002_2007_name_cn_priority() {
@@ -2563,6 +2972,8 @@ mod tests {
             eps_info: None,
             age_rating: None,
             nsfw: None,
+            series: None,
+            series_entry: None,
         };
         let authors = extract_authors(&subject, &[AuthorRole::Writer], &[AuthorRole::Penciller]);
         for name in ["麻枝准", "涼元悠一", "魁", "丘野塔也"] {
@@ -2696,34 +3107,6 @@ mod tests {
             "三月的狮子",
             &provider.variant_titles(vec!["三月的獅子".to_string()])
         ));
-    }
-
-    /// 真实 Bangumi v0 搜索响应（2026-09 抓取）：`data` 字段（非 `results`）。
-    #[test]
-    fn search_response_parses_data_field() {
-        let json = r#"{"total":608,"limit":20,"offset":0,"data":[{"id":3510,"name":"ONE PIECE","name_cn":"海贼王","summary":"拥有财富、名声、权力……","image":"https://lain.bgm.tv/pic/cover/l/2f/37/3510_1j4W8.jpg","tags":[{"name":"热血","count":1234}],"rating":{"rank":1,"total":4567,"count":{"1":10,"10":200},"score":9.1},"type":1}]}"#;
-        let response: BangumiSearchResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.data.len(), 1);
-        let subject = &response.data[0];
-        assert_eq!(subject.id, 3510);
-        assert_eq!(subject.name, "ONE PIECE");
-        assert_eq!(subject.name_cn.as_deref(), Some("海贼王"));
-        assert_eq!(subject.tags.len(), 1);
-        assert_eq!(subject.subject_type, Some(1));
-    }
-
-    /// 旧 API 搜索响应（2026-09 抓取）：`list` 字段（非 v0 的 `data`）。
-    #[test]
-    fn search_response_parses_list_field() {
-        let json = r#"{"results":608,"list":[{"id":3510,"name":"ONE PIECE","name_cn":"海贼王","summary":"拥有财富、名声、权力……","image":"https://lain.bgm.tv/pic/cover/l/2f/37/3510_1j4W8.jpg","tags":[{"name":"热血","count":1234}],"type":1}]}"#;
-        let response: BangumiSearchResponse = serde_json::from_str(json).unwrap();
-        assert!(response.data.is_empty());
-        assert_eq!(response.list.len(), 1);
-        let subject = &response.list[0];
-        assert_eq!(subject.id, 3510);
-        assert_eq!(subject.name, "ONE PIECE");
-        assert_eq!(subject.name_cn.as_deref(), Some("海贼王"));
-        assert_eq!(subject.subject_type, Some(1));
     }
 
     /// Kotlin `isbn10ToIsbn13`：10 位转 13 位。
