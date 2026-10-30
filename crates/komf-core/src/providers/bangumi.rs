@@ -189,13 +189,18 @@ pub struct NextStaffPositionType {
 
 /// Next 人物关联 → PersonInfo（archive 离线路径同构）：一个 person 的多个职务
 /// 拆成多条；笔名/别名 SlimPerson 不含（archive dump 才有）置空。
+/// 入库前过清理链（与显示侧 person_display_name 同一套 clean_author_names）：
+/// API 的 nameCN 常带消歧注记（"星野真（动画人）"实测），提前剥括号注记让
+/// publisher_display_name 的精确匹配不吃注记的亏（显示侧再清理是幂等的）。
 fn next_staff_to_persons(item: NextSubjectStaff) -> Vec<PersonInfo> {
+    let name = cleaned_person_name(&item.staff.name).unwrap_or_else(|| item.staff.name.clone());
+    let name_cn = item.staff.name_cn.as_deref().and_then(cleaned_person_name);
     item.positions
         .into_iter()
         .map(|pos| PersonInfo {
             person_id: item.staff.id,
-            name: item.staff.name.clone(),
-            name_cn: item.staff.name_cn.clone().filter(|s| !s.is_empty()),
+            name: name.clone(),
+            name_cn: name_cn.clone(),
             pen_name: None,
             person_type: item.staff.person_type,
             career: item.staff.career.clone(),
@@ -2710,13 +2715,13 @@ mod tests {
     fn next_staffs_adapt_persons() {
         let json = r#"{
             "data": [
-                {"staff": {"id": 11, "name": "尾田栄一郎", "nameCN": "尾田荣一郎",
+                {"staff": {"id": 11, "name": "尾田栄一郎", "nameCN": "尾田荣一郎（漫画家）",
                            "type": 1, "career": ["mangaka"]},
                  "positions": [
                      {"type": {"id": 2001, "en": "Author", "cn": "作者"}, "summary": "", "appearEps": ""},
                      {"type": {"id": 2007, "en": "Original creator", "cn": "原作"}, "summary": "", "appearEps": "1-10"}
                  ]},
-                {"staff": {"id": 1307, "name": "集英社", "nameCN": "集英社",
+                {"staff": {"id": 1307, "name": "Shueisha", "nameCN": "集英社（出版社）",
                            "type": 2, "career": ["producer"]},
                  "positions": [
                      {"type": {"id": 2004, "en": "Publisher", "cn": "出版社"}, "summary": "", "appearEps": ""}
@@ -2734,6 +2739,7 @@ mod tests {
         // 多职务拆分：作者 2001 + 原作 2007 两条
         assert_eq!(persons.len(), 3);
         assert_eq!(persons[0].position, Some(2001));
+        // 入库前清理：nameCN 的消歧注记（"尾田荣一郎（漫画家）"）被剥除
         assert_eq!(persons[0].name_cn.as_deref(), Some("尾田荣一郎"));
         assert_eq!(persons[0].career, vec!["mangaka".to_string()]);
         assert_eq!(persons[1].position, Some(2007));
@@ -2741,6 +2747,10 @@ mod tests {
         // 出版社 2004 也进 persons（仅作 name_cn 映射，分类仍看 infobox 键）
         assert_eq!(persons[2].position, Some(2004));
         assert_eq!(persons[2].person_type, Some(2));
+        // 清理后的 nameCN 能被出版社精确匹配命中：p.name="Shueisha" 不匹配
+        // infobox 的「集英社」，清理后的 name_cn「集英社」匹配 → 返回显示名
+        // （不清理则 name_cn="集英社（出版社）" 永远匹配不上）
+        assert_eq!(publisher_display_name(&persons, "集英社", true), "集英社");
     }
 
     /// Next relations 响应 → BangumiSubjectRelation：relation.cn 透出"单行本"。
