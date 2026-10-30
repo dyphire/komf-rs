@@ -162,6 +162,7 @@ const dict: Record<string, { zh: string; en: string }> = {
   'tr.search': { zh: '搜索', en: 'Search' },
   'tr.results': { zh: '{n} 条结果', en: '{n} results' },
   'tr.tracked': { zh: '已在列表', en: 'tracked' },
+  'tr.series': { zh: '系列', en: 'series' },
   'tr.pick': { zh: '选择', en: 'Select' },
   'tr.selected': { zh: '选中条目: {id}', en: 'Selected: {id}' },
   'tr.state': { zh: '当前状态', en: 'Current' },

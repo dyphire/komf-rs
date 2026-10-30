@@ -936,8 +936,15 @@ impl BangumiArchiveStore {
             .map_err(|e| ProviderError::message(format!("archive persons open: {e}")))?;
         let reader = std::io::BufReader::new(file);
         let mut lines = reader.lines();
-        let mut batch: Vec<(u64, String, Option<String>, Option<String>, Option<i64>, String, String)> =
-            Vec::new();
+        let mut batch: Vec<(
+            u64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            String,
+            String,
+        )> = Vec::new();
         let mut count = 0usize;
         loop {
             let Some(line) = lines.next() else { break };
@@ -969,7 +976,15 @@ impl BangumiArchiveStore {
 
     fn insert_person_batch(
         c: &rusqlite::Connection,
-        batch: &[(u64, String, Option<String>, Option<String>, Option<i64>, String, String)],
+        batch: &[(
+            u64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            String,
+            String,
+        )],
     ) -> Result<(), ProviderError> {
         for b in batch {
             c.execute(
@@ -2091,12 +2106,10 @@ mod tests {
     #[test]
     fn person_pen_name_parsed() {
         let ib = "{{Infobox Crt\r\n|简体中文名= 博\r\n|别名={\r\n[笔名|藤本タツキ]\r\n[本名|藤本樹]\r\n}\r\n}}";
-        assert_eq!(
-            person_pen_name(Some(ib)),
-            Some("藤本タツキ".to_string())
-        );
+        assert_eq!(person_pen_name(Some(ib)), Some("藤本タツキ".to_string()));
         // 多个笔名顿号连接 → 整条入库（拆分取首个在显示侧 clean_author_names）
-        let ib_multi = "{{Infobox Crt\r\n|别名={\r\n[笔名|三陽五郎、伊坂秀樹、葉月九ロウ]\r\n}\r\n}}";
+        let ib_multi =
+            "{{Infobox Crt\r\n|别名={\r\n[笔名|三陽五郎、伊坂秀樹、葉月九ロウ]\r\n}\r\n}}";
         assert_eq!(
             person_pen_name(Some(ib_multi)),
             Some("三陽五郎、伊坂秀樹、葉月九ロウ".to_string())
@@ -2105,8 +2118,14 @@ mod tests {
         let ib_empty = "{{Infobox Crt\r\n|别名={\r\n[笔名|]\r\n[昵称|ボーイ]\r\n}\r\n}}";
         assert_eq!(person_pen_name(Some(ib_empty)), None);
         // 单行块 / 无别名块 / None → None
-        assert_eq!(person_pen_name(Some("{{Infobox Crt\r\n|别名=ぼん\r\n}}")), None);
-        assert_eq!(person_pen_name(Some("{{Infobox Crt\r\n|性别= 女\r\n}}")), None);
+        assert_eq!(
+            person_pen_name(Some("{{Infobox Crt\r\n|别名=ぼん\r\n}}")),
+            None
+        );
+        assert_eq!(
+            person_pen_name(Some("{{Infobox Crt\r\n|性别= 女\r\n}}")),
+            None
+        );
         assert_eq!(person_pen_name(None), None);
         // 别名输出不受笔名子项影响（保持原行为，k|v 只收 v）
         let ib = "{{Infobox Crt\r\n|别名={\r\n[笔名|藤本タツキ]\r\n}\r\n}}";
