@@ -187,34 +187,49 @@ pub struct NextStaffPositionType {
     pub id: Option<i32>,
 }
 
+/// 作者类职务（拆分与名称映射共用一份清单）：2001 作者 / 2002 作画 /
+/// 2003 插图 / 2007 原作 / 2009 人物原案 / 2010 脚本。
+const AUTHOR_POSITION_IDS: [i32; 6] = [2001, 2002, 2003, 2007, 2009, 2010];
+
 /// Next 人物关联 → PersonInfo（archive 离线路径同构）：一个 person 的多个职务
 /// 拆成多条；笔名/别名 SlimPerson 不含（archive dump 才有）置空。
-/// 入库前过完整清理链（与 infobox 作者同一套 clean_author_names：剥括号注记 +
-/// 分隔符拆分）：staffs 存在「A・B」两人合一的脏记录，只取首段会丢合作者；
-/// nameCN 常带消歧注记（"星野真（动画人）"实测），剥除后 publisher_display_name
-/// 的精确匹配才能命中。name_cn 无法可靠归属到拆分后的各段（段数可能不一致），
-/// 仅单段时保留，多段置空由显示侧回退各段原名。
+/// 拆分按职务区分：作者类记录存在「A・B」两人合一的脏数据，过完整清理链
+/// （clean_author_names：剥括号注记 + 分隔符拆分）；出版社等机构名本身含
+/// 分隔符（实测 60347：スクウェア・エニックス），只剥注记（strip_name_annotations）
+/// 不拆分，否则 publisher_display_name 对 infobox 全名的精确匹配会断。
+/// nameCN 常带消歧注记（"星野真（动画人）"实测），统一剥除；name_cn 无法可靠
+/// 归属到拆分后的各段（段数可能不一致），仅单段时保留，多段置空由显示侧回退原名。
 fn next_staff_to_persons(item: NextSubjectStaff) -> Vec<PersonInfo> {
-    let mut names = clean_author_names(&item.staff.name);
-    if names.is_empty() {
-        names.push(item.staff.name.clone());
-    }
-    let name_cn = if names.len() == 1 {
-        item.staff.name_cn.as_deref().and_then(cleaned_person_name)
-    } else {
-        None
-    };
-    let mut out = Vec::with_capacity(item.positions.len() * names.len());
+    let mut out = Vec::with_capacity(item.positions.len());
     for pos in item.positions {
-        for name in &names {
+        let position = pos.position_type.as_ref().and_then(|t| t.id);
+        let is_author = position.is_some_and(|id| AUTHOR_POSITION_IDS.contains(&id));
+        let mut names = if is_author {
+            clean_author_names(&item.staff.name)
+        } else {
+            vec![strip_name_annotations(&item.staff.name)]
+        };
+        if names.is_empty() {
+            names.push(item.staff.name.clone());
+        }
+        // name_cn 只剥注记不拆分：机构中文名也含间隔号（史克威尔·艾尼克斯）
+        let name_cn = if names.len() == 1 {
+            item.staff.name_cn.as_deref().and_then(|cn| {
+                let stripped = strip_name_annotations(cn);
+                (!stripped.is_empty()).then_some(stripped)
+            })
+        } else {
+            None
+        };
+        for name in names {
             out.push(PersonInfo {
                 person_id: item.staff.id,
-                name: name.clone(),
+                name,
                 name_cn: name_cn.clone(),
                 pen_name: None,
                 person_type: item.staff.person_type,
                 career: item.staff.career.clone(),
-                position: pos.position_type.as_ref().and_then(|t| t.id),
+                position,
                 appear_eps: pos.appear_eps.clone(),
                 aliases: Vec::new(),
             });
@@ -1776,14 +1791,14 @@ fn offline_person_authors(
     out
 }
 
-/// 作者显示名映射（在线模式）：persons 中作者类职务（2001/2002/2003/2007/2009/2010）
+/// 作者显示名映射（在线模式）：persons 中作者类职务（AUTHOR_POSITION_IDS）
 /// 按 name 或 name_cn 精确匹配时用 person_display_name（name_cn 优先），
 /// 未匹配保持原名（对齐出版社 publisher_display_name 语义）。
 fn author_display_name(persons: &[PersonInfo], name: &str, use_chinese_names: bool) -> String {
-    for p in persons
-        .iter()
-        .filter(|p| matches!(p.position, Some(2001 | 2002 | 2003 | 2007 | 2009 | 2010)))
-    {
+    for p in persons.iter().filter(|p| {
+        p.position
+            .is_some_and(|id| AUTHOR_POSITION_IDS.contains(&id))
+    }) {
         if p.name == name || p.name_cn.as_deref() == Some(name) {
             return person_display_name(p, use_chinese_names);
         }
@@ -1938,17 +1953,22 @@ fn extract_authors(
     authors
 }
 
+/// 剥除人名括号注记（《》【】()[]，如「（原作）」「（动画人）」），不拆分。
+/// staffs 机构名（出版社/杂志）与 nameCN 只需这步；作者名再叠拆分。
+fn strip_name_annotations(value: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"[《【（\[\(（][^》】）\]\)）]*[》】）\]\)）]").unwrap()
+    });
+    re.replace_all(value, "").trim().to_string()
+}
+
 /// bangumi 人名统一清理链：剥括号注记（《》【】()[]，如「（原作）」），
 /// 按 `/ ／ 、 _ → ・ : × & , ，` 拆分多值，trim + 去空。在线 infobox 作者与
 /// 离线 person 显示名（cleaned_person_name 取首个非空项）共用；出版社多值拆分
 /// 保持独立的 PUBLISHER_SPLIT_CHARS（对齐脚本行为，不剥括号注记）。
 fn clean_author_names(value: &str) -> Vec<String> {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"[《【（\[\(（][^》】）\]\)）]*[》】）\]\)）]").unwrap()
-    });
-    let no_brackets = re.replace_all(value, "");
-    no_brackets
+    strip_name_annotations(value)
         .split(['/', '／', '、', '_', '→', '・', ':', '×', '&', ',', '，'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -2817,19 +2837,24 @@ mod tests {
                            "type": 1, "career": []},
                  "positions": [
                      {"type": {"id": 2001, "en": "Author", "cn": "作者"}, "summary": "", "appearEps": ""}
+                 ]},
+                {"staff": {"id": 497, "name": "スクウェア・エニックス", "nameCN": "史克威尔·艾尼克斯",
+                           "type": 2, "career": ["producer"]},
+                 "positions": [
+                     {"type": {"id": 2004, "en": "Publisher", "cn": "出版社"}, "summary": "", "appearEps": ""}
                  ]}
             ],
-            "total": 8
+            "total": 9
         }"#;
         let page: NextStaffsResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(page.total, Some(8));
+        assert_eq!(page.total, Some(9));
         let persons: Vec<PersonInfo> = page
             .data
             .into_iter()
             .flat_map(next_staff_to_persons)
             .collect();
-        // 多职务拆分：作者 2001 + 原作 2007 + 出版社 2004 + 合并记录拆 2 = 5 条
-        assert_eq!(persons.len(), 5);
+        // 多职务拆分：作者 2001 + 原作 2007 + 出版社 2004 + 合并记录拆 2 + 出版社 2004 = 6 条
+        assert_eq!(persons.len(), 6);
         assert_eq!(persons[0].position, Some(2001));
         // 入库前清理：nameCN 的消歧注记（"尾田荣一郎（漫画家）"）被剥除
         assert_eq!(persons[0].name_cn.as_deref(), Some("尾田荣一郎"));
@@ -2850,6 +2875,16 @@ mod tests {
         assert_eq!(split[1].name, "古屋庵");
         assert!(split.iter().all(|p| p.name_cn.is_none()));
         assert!(split.iter().all(|p| p.position == Some(2001)));
+        // 60347 实测回归：出版社名本身含 ・（スクウェア・エニックス）——机构名不拆，
+        // 中文名保留；infobox 全名精确匹配命中 → 显示中文名
+        let se: Vec<&PersonInfo> = persons.iter().filter(|p| p.person_id == 497).collect();
+        assert_eq!(se.len(), 1);
+        assert_eq!(se[0].name, "スクウェア・エニックス");
+        assert_eq!(se[0].name_cn.as_deref(), Some("史克威尔·艾尼克斯"));
+        assert_eq!(
+            publisher_display_name(&persons, "スクウェア・エニックス", true),
+            "史克威尔·艾尼克斯"
+        );
     }
 
     /// Next relations 响应 → BangumiSubjectRelation：relation.cn 透出"单行本"。
