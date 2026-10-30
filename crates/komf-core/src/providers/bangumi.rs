@@ -189,26 +189,38 @@ pub struct NextStaffPositionType {
 
 /// Next 人物关联 → PersonInfo（archive 离线路径同构）：一个 person 的多个职务
 /// 拆成多条；笔名/别名 SlimPerson 不含（archive dump 才有）置空。
-/// 入库前过清理链（与显示侧 person_display_name 同一套 clean_author_names）：
-/// API 的 nameCN 常带消歧注记（"星野真（动画人）"实测），提前剥括号注记让
-/// publisher_display_name 的精确匹配不吃注记的亏（显示侧再清理是幂等的）。
+/// 入库前过完整清理链（与 infobox 作者同一套 clean_author_names：剥括号注记 +
+/// 分隔符拆分）：staffs 存在「A・B」两人合一的脏记录，只取首段会丢合作者；
+/// nameCN 常带消歧注记（"星野真（动画人）"实测），剥除后 publisher_display_name
+/// 的精确匹配才能命中。name_cn 无法可靠归属到拆分后的各段（段数可能不一致），
+/// 仅单段时保留，多段置空由显示侧回退各段原名。
 fn next_staff_to_persons(item: NextSubjectStaff) -> Vec<PersonInfo> {
-    let name = cleaned_person_name(&item.staff.name).unwrap_or_else(|| item.staff.name.clone());
-    let name_cn = item.staff.name_cn.as_deref().and_then(cleaned_person_name);
-    item.positions
-        .into_iter()
-        .map(|pos| PersonInfo {
-            person_id: item.staff.id,
-            name: name.clone(),
-            name_cn: name_cn.clone(),
-            pen_name: None,
-            person_type: item.staff.person_type,
-            career: item.staff.career.clone(),
-            position: pos.position_type.as_ref().and_then(|t| t.id),
-            appear_eps: pos.appear_eps,
-            aliases: Vec::new(),
-        })
-        .collect()
+    let mut names = clean_author_names(&item.staff.name);
+    if names.is_empty() {
+        names.push(item.staff.name.clone());
+    }
+    let name_cn = if names.len() == 1 {
+        item.staff.name_cn.as_deref().and_then(cleaned_person_name)
+    } else {
+        None
+    };
+    let mut out = Vec::with_capacity(item.positions.len() * names.len());
+    for pos in item.positions {
+        for name in &names {
+            out.push(PersonInfo {
+                person_id: item.staff.id,
+                name: name.clone(),
+                name_cn: name_cn.clone(),
+                pen_name: None,
+                person_type: item.staff.person_type,
+                career: item.staff.career.clone(),
+                position: pos.position_type.as_ref().and_then(|t| t.id),
+                appear_eps: pos.appear_eps.clone(),
+                aliases: Vec::new(),
+            });
+        }
+    }
+    out
 }
 
 /// Next infobox（恒为 [{key, values:[{k?, v}]}]）→ v0 形态：单值且无 k 折叠为
@@ -2725,6 +2737,11 @@ mod tests {
                            "type": 2, "career": ["producer"]},
                  "positions": [
                      {"type": {"id": 2004, "en": "Publisher", "cn": "出版社"}, "summary": "", "appearEps": ""}
+                 ]},
+                {"staff": {"id": 99, "name": "るーすぼーい・古屋庵", "nameCN": "",
+                           "type": 1, "career": []},
+                 "positions": [
+                     {"type": {"id": 2001, "en": "Author", "cn": "作者"}, "summary": "", "appearEps": ""}
                  ]}
             ],
             "total": 8
@@ -2736,8 +2753,8 @@ mod tests {
             .into_iter()
             .flat_map(next_staff_to_persons)
             .collect();
-        // 多职务拆分：作者 2001 + 原作 2007 两条
-        assert_eq!(persons.len(), 3);
+        // 多职务拆分：作者 2001 + 原作 2007 + 出版社 2004 + 合并记录拆 2 = 5 条
+        assert_eq!(persons.len(), 5);
         assert_eq!(persons[0].position, Some(2001));
         // 入库前清理：nameCN 的消歧注记（"尾田荣一郎（漫画家）"）被剥除
         assert_eq!(persons[0].name_cn.as_deref(), Some("尾田荣一郎"));
@@ -2751,6 +2768,13 @@ mod tests {
         // infobox 的「集英社」，清理后的 name_cn「集英社」匹配 → 返回显示名
         // （不清理则 name_cn="集英社（出版社）" 永远匹配不上）
         assert_eq!(publisher_display_name(&persons, "集英社", true), "集英社");
+        // 「A・B」两人合一的脏记录拆成两个独立作者；name_cn 无法归属各段 → 置空
+        let split: Vec<&PersonInfo> = persons.iter().filter(|p| p.person_id == 99).collect();
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].name, "るーすぼーい");
+        assert_eq!(split[1].name, "古屋庵");
+        assert!(split.iter().all(|p| p.name_cn.is_none()));
+        assert!(split.iter().all(|p| p.position == Some(2001)));
     }
 
     /// Next relations 响应 → BangumiSubjectRelation：relation.cn 透出"单行本"。
