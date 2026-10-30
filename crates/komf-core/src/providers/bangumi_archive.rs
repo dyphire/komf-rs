@@ -271,6 +271,9 @@ impl ArchiveSubject {
             eps_info: None,
             age_rating: None,
             nsfw: self.nsfw,
+            series: self.series,
+            // archive dump 无 seriesEntry 概念（单行本关系走 relations 表）
+            series_entry: None,
         }
     }
 
