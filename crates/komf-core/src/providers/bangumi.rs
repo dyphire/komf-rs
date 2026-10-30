@@ -711,6 +711,29 @@ impl BangumiMetadataMapper {
         thumbnail: Option<Image>,
         persons: &[PersonInfo],
     ) -> ProviderSeriesMetadata {
+        self.to_series_metadata_persons_inner(subject, book_relations, thumbnail, persons, false)
+    }
+
+    /// 在线 person 增强版：作者实体仍从 infobox 提取（staffs 覆盖不全，无独立
+    /// person 记录的作者不能漏），persons 仅作 name_cn 显示名映射（与出版社同一边界）。
+    pub fn to_series_metadata_persons_online(
+        &self,
+        subject: &BangumiSubject,
+        book_relations: &[BangumiSubjectRelation],
+        thumbnail: Option<Image>,
+        persons: &[PersonInfo],
+    ) -> ProviderSeriesMetadata {
+        self.to_series_metadata_persons_inner(subject, book_relations, thumbnail, persons, true)
+    }
+
+    fn to_series_metadata_persons_inner(
+        &self,
+        subject: &BangumiSubject,
+        book_relations: &[BangumiSubjectRelation],
+        thumbnail: Option<Image>,
+        persons: &[PersonInfo],
+        persons_name_mapping_only: bool,
+    ) -> ProviderSeriesMetadata {
         let cfg = &self.series_metadata_config;
 
         // Kotlin: infoBox = subject.infobox?.associate { it.key to it }
@@ -880,6 +903,7 @@ impl BangumiMetadataMapper {
                 &self.author_roles,
                 &self.artist_roles,
                 self.use_chinese_names,
+                persons_name_mapping_only,
             )
         } else {
             Vec::new()
@@ -1016,6 +1040,26 @@ impl BangumiMetadataMapper {
         thumbnail: Option<Image>,
         persons: &[PersonInfo],
     ) -> ProviderBookMetadata {
+        self.to_book_metadata_persons_inner(book, thumbnail, persons, false)
+    }
+
+    /// 在线 person 增强版（同系列：infobox 为作者实体来源，persons 仅名称映射）。
+    pub fn to_book_metadata_persons_online(
+        &self,
+        book: &BangumiSubject,
+        thumbnail: Option<Image>,
+        persons: &[PersonInfo],
+    ) -> ProviderBookMetadata {
+        self.to_book_metadata_persons_inner(book, thumbnail, persons, true)
+    }
+
+    fn to_book_metadata_persons_inner(
+        &self,
+        book: &BangumiSubject,
+        thumbnail: Option<Image>,
+        persons: &[PersonInfo],
+        persons_name_mapping_only: bool,
+    ) -> ProviderBookMetadata {
         let cfg = &self.book_metadata_config;
 
         let info_box: std::collections::HashMap<&str, &serde_json::Value> = book
@@ -1082,6 +1126,7 @@ impl BangumiMetadataMapper {
                     &self.author_roles,
                     &self.artist_roles,
                     self.use_chinese_names,
+                    persons_name_mapping_only,
                 )
             } else {
                 Vec::new()
@@ -1731,16 +1776,43 @@ fn offline_person_authors(
     out
 }
 
-/// 作者解析：persons 为空 → infobox 解析；persons 非空但无作者类关联
-/// （仅出版社/杂志等 producer，position 2001/2002/2003/2007/2009/2010 全缺）→
-/// 回退 infobox「原作/作画/作者/脚本」解析，避免 Archive 数据缺作者关联时 authors 为空。
+/// 作者显示名映射（在线模式）：persons 中作者类职务（2001/2002/2003/2007/2009/2010）
+/// 按 name 或 name_cn 精确匹配时用 person_display_name（name_cn 优先），
+/// 未匹配保持原名（对齐出版社 publisher_display_name 语义）。
+fn author_display_name(persons: &[PersonInfo], name: &str, use_chinese_names: bool) -> String {
+    for p in persons
+        .iter()
+        .filter(|p| matches!(p.position, Some(2001 | 2002 | 2003 | 2007 | 2009 | 2010)))
+    {
+        if p.name == name || p.name_cn.as_deref() == Some(name) {
+            return person_display_name(p, use_chinese_names);
+        }
+    }
+    name.to_string()
+}
+
+/// 作者解析两种模式：
+/// - archive（persons_name_mapping_only=false）：persons 为实体来源（dump 关联完整），
+///   无作者类关联（position 2001/2002/2003/2007/2009/2010 全缺）时回退 infobox 解析；
+/// - 在线（true）：作者实体仍从 infobox 提取——staffs 覆盖不全，无独立 person
+///   记录的作者不能漏；persons 仅作 name_cn 显示名映射（与出版社同一边界）。
 fn resolve_authors(
     subject: &BangumiSubject,
     persons: &[PersonInfo],
     author_roles: &[AuthorRole],
     artist_roles: &[AuthorRole],
     use_chinese_names: bool,
+    persons_name_mapping_only: bool,
 ) -> Vec<Author> {
+    if persons_name_mapping_only {
+        return extract_authors(subject, author_roles, artist_roles)
+            .into_iter()
+            .map(|a| Author {
+                name: author_display_name(persons, &a.name, use_chinese_names),
+                role: a.role,
+            })
+            .collect();
+    }
     if persons.is_empty() {
         return extract_authors(subject, author_roles, artist_roles);
     }
@@ -2072,8 +2144,9 @@ impl MetadataProvider for BangumiMetadataProvider {
             .into_iter()
             .filter(|r| r.r#type == Some(1) && r.relation.as_deref() == Some("单行本"))
             .collect::<Vec<_>>();
-        // 结构化人物关联（增强性数据，失败不阻塞）：作者实体化 + name_cn 显示名映射，
-        // 与 archive 离线路径同一语义；出版社分类仍由 infobox 键决定。
+        // 结构化人物关联（增强性数据，失败不阻塞）：仅作 name_cn 显示名映射——
+        // 作者实体仍从 infobox 提取（staffs 覆盖不全，无 person 记录的作者不能漏），
+        // 出版社分类同样由 infobox 键决定。
         let persons = self.client.get_subject_staffs(id).await.unwrap_or_default();
         let thumbnail = if self.fetch_series_covers {
             self.client.get_thumbnail(&subject, 60 * 1024, None).await?
@@ -2082,7 +2155,7 @@ impl MetadataProvider for BangumiMetadataProvider {
         };
         Ok(self
             .metadata_mapper
-            .to_series_metadata_persons(&subject, &relations, thumbnail, &persons))
+            .to_series_metadata_persons_online(&subject, &relations, thumbnail, &persons))
     }
 
     async fn get_series_cover(
@@ -2165,7 +2238,7 @@ impl MetadataProvider for BangumiMetadataProvider {
         };
         Ok(self
             .metadata_mapper
-            .to_book_metadata_persons(&book, thumbnail, &persons))
+            .to_book_metadata_persons_online(&book, thumbnail, &persons))
     }
 
     async fn search_series(
@@ -2453,7 +2526,8 @@ impl MetadataProvider for BangumiMetadataProvider {
             .into_iter()
             .filter(|r| r.r#type == Some(1) && r.relation.as_deref() == Some("单行本"))
             .collect::<Vec<_>>();
-        // 结构化人物关联（增强性数据，失败不阻塞；同 get_series_metadata 在线分支）
+        // 结构化人物关联（增强性数据，失败不阻塞；同 get_series_metadata 在线分支：
+        // 仅名称映射，作者实体仍从 infobox 提取）
         let persons = self
             .client
             .get_subject_staffs(subject.id)
@@ -2464,9 +2538,10 @@ impl MetadataProvider for BangumiMetadataProvider {
         } else {
             None
         };
-        Ok(Some(self.metadata_mapper.to_series_metadata_persons(
-            &subject, &relations, thumbnail, &persons,
-        )))
+        Ok(Some(
+            self.metadata_mapper
+                .to_series_metadata_persons_online(&subject, &relations, thumbnail, &persons),
+        ))
     }
 }
 
@@ -4002,6 +4077,63 @@ mod tests {
         // 版本名「3月的狮子」与 name_cn 相同 → 被排除；「三月的獅子」繁体与已写入的
         // 简体「三月的狮子」简繁相同 → t2s 判重命中 → 保留简体（先写入者），不重复写入
         assert_eq!(localized, vec!["March comes in like a lion", "三月的狮子"]);
+    }
+
+    /// 在线模式（persons 仅名称映射）：作者实体从 infobox 提取——staffs 无记录的
+    /// infobox 作者不漏；staffs 里 infobox 没有的人物不出现；命中的按 name_cn
+    /// 映射显示名（staffChineseNames 语义）。
+    #[test]
+    fn online_persons_map_names_only() {
+        let mapper = BangumiMetadataMapper::new(
+            crate::config::SeriesMetadataConfig::default(),
+            crate::config::BookMetadataConfig::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            vec![],
+        );
+        // infobox：作者=藤本タツキ（有 person 记录），原作=无名氏（无 person 记录）
+        let subject: BangumiSubject = serde_json::from_str(
+            r#"{"id":1,"name":"X","name_cn":null,"summary":null,"tags":[],"infobox":[{"key":"作者","value":"藤本タツキ"},{"key":"原作","value":"无名氏"}]}"#,
+        )
+        .unwrap();
+        let persons = vec![
+            // person 覆盖 藤本タツキ（name_cn 映射目标）
+            PersonInfo {
+                person_id: 23155,
+                name: "藤本タツキ".to_string(),
+                name_cn: Some("藤本树".to_string()),
+                position: Some(2001),
+                ..PersonInfo::default()
+            },
+            // person 里 infobox 没有的人物（staffs 独有）——不应出现在结果里
+            PersonInfo {
+                person_id: 1,
+                name: "无关人士".to_string(),
+                name_cn: None,
+                position: Some(2002),
+                ..PersonInfo::default()
+            },
+        ];
+        let md = mapper.to_series_metadata_persons_online(&subject, &[], None, &persons);
+        assert_eq!(
+            md.metadata.authors,
+            vec![
+                // 命中 person → name_cn 映射（作者 → author_roles + artist_roles）
+                Author {
+                    name: "藤本树".to_string(),
+                    role: AuthorRole::Writer
+                },
+                Author {
+                    name: "藤本树".to_string(),
+                    role: AuthorRole::Penciller
+                },
+                // 无 person 记录的 infobox 作者保留（不漏）
+                Author {
+                    name: "无名氏".to_string(),
+                    role: AuthorRole::Writer
+                },
+            ]
+        );
     }
 
     /// 离线 persons：作者/出版社 name_cn 优先（仅离线路径；在线保持 infobox 现状）。
