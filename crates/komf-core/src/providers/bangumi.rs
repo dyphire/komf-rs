@@ -760,8 +760,8 @@ impl BangumiMetadataMapper {
             .then(|| {
                 let status_val = ["状态", "连载状态", "刊行状态"]
                     .iter()
-                    .find_map(|k| info_box.get(*k).and_then(|v| v.as_str()));
-                let mut status = status_val.and_then(classify_bangumi_status).or_else(|| {
+                    .find_map(|k| info_box.get(*k).and_then(|v| infobox_text(v)));
+                let mut status = status_val.as_deref().and_then(classify_bangumi_status).or_else(|| {
                     subject
                         .tags
                         .iter()
@@ -773,7 +773,7 @@ impl BangumiMetadataMapper {
                 // 非空即视为已完结（在线无此键，不受影响）。
                 let serial_ended = info_box
                     .get("连载结束")
-                    .and_then(|v| v.as_str())
+                    .and_then(|v| infobox_text(v))
                     .map(|s| !s.trim().is_empty())
                     .unwrap_or(false);
                 let ended = info_box.contains_key("结束")
@@ -1315,6 +1315,27 @@ fn regex_capture(text: &str, pattern: &str) -> Option<Vec<String>> {
     )
 }
 
+/// 从 infobox 值提取文本，兼容在线 `/p1` API 的 `{v}` 数组形态与纯字符串。
+fn infobox_text(v: &serde_json::Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = v.as_array() {
+        if let Some(first) = arr.first() {
+            if let Some(s) = first.get("v").and_then(|x| x.as_str()) {
+                return Some(s.to_string());
+            }
+            if let Some(s) = first.as_str() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    if let Some(s) = v.get("v").and_then(|x| x.as_str()) {
+        return Some(s.to_string());
+    }
+    None
+}
+
 /// 遍历键变体（繁简）取首个命中数字。
 fn info_box_count(
     info_box: &std::collections::HashMap<&str, &serde_json::Value>,
@@ -1329,8 +1350,8 @@ fn info_box_count(
 fn infobox_count(v: &serde_json::Value) -> Option<i32> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"\d+").unwrap());
-    let s = v.as_str()?;
-    re.find(s)?.as_str().parse::<i32>().ok()
+    let s = infobox_text(v)?;
+    re.find(&s)?.as_str().parse::<i32>().ok()
 }
 
 /// 组合式 age_rating：API age_rating 字段优先（0→0 全年龄、1→15、2→18）；
