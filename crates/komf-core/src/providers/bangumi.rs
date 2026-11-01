@@ -1893,12 +1893,12 @@ fn strip_name_annotations(value: &str) -> String {
 }
 
 /// bangumi 人名统一清理链：剥括号注记（《》【】()[]，如「（原作）」），
-/// 按 `/ ／ 、 _ → ・ : × & , ，` 拆分多值，trim + 去空。在线 infobox 作者与
+/// 按 `/ ／ 、 _ → : × & , ，` 拆分多值，trim + 去空。在线 infobox 作者与
 /// 离线 person 显示名（cleaned_person_name 取首个非空项）共用；出版社多值拆分
 /// 保持独立的 PUBLISHER_SPLIT_CHARS（对齐脚本行为，不剥括号注记）。
 fn clean_author_names(value: &str) -> Vec<String> {
     strip_name_annotations(value)
-        .split(['/', '／', '、', '_', '→', '・', ':', '×', '&', ',', '，'])
+        .split(['/', '／', '、', '_', '→', ':', '×', '&', ',', '，'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
@@ -2781,8 +2781,8 @@ mod tests {
             .into_iter()
             .flat_map(next_staff_to_persons)
             .collect();
-        // 多职务拆分：作者 2001 + 原作 2007 + 出版社 2004 + 合并记录拆 2 + 出版社 2004 = 6 条
-        assert_eq!(persons.len(), 6);
+        // 多职务拆分：作者 2001 + 原作 2007 + 出版社 2004 + 合并记录(不拆) + 出版社 2004 = 5 条
+        assert_eq!(persons.len(), 5);
         assert_eq!(persons[0].position, Some(2001));
         // 入库前清理：nameCN 的消歧注记（"尾田荣一郎（漫画家）"）被剥除
         assert_eq!(persons[0].name_cn.as_deref(), Some("尾田荣一郎"));
@@ -2796,13 +2796,12 @@ mod tests {
         // infobox 的「集英社」，清理后的 name_cn「集英社」匹配 → 返回显示名
         // （不清理则 name_cn="集英社（出版社）" 永远匹配不上）
         assert_eq!(publisher_display_name(&persons, "集英社", true), "集英社");
-        // 「A・B」两人合一的脏记录拆成两个独立作者；name_cn 无法归属各段 → 置空
+        // ・ 不再是人名分隔符，合并记录保持整名
         let split: Vec<&PersonInfo> = persons.iter().filter(|p| p.person_id == 99).collect();
-        assert_eq!(split.len(), 2);
-        assert_eq!(split[0].name, "るーすぼーい");
-        assert_eq!(split[1].name, "古屋庵");
-        assert!(split.iter().all(|p| p.name_cn.is_none()));
-        assert!(split.iter().all(|p| p.position == Some(2001)));
+        assert_eq!(split.len(), 1);
+        assert_eq!(split[0].name, "るーすぼーい・古屋庵");
+        assert!(split[0].name_cn.is_none());
+        assert_eq!(split[0].position, Some(2001));
         // 60347 实测回归：出版社名本身含 ・（スクウェア・エニックス）——机构名不拆，
         // 中文名保留；infobox 全名精确匹配命中 → 显示中文名
         let se: Vec<&PersonInfo> = persons.iter().filter(|p| p.person_id == 497).collect();

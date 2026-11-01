@@ -880,7 +880,7 @@ fn clean_author_names(value: &str) -> Vec<String> {
     });
     let no_brackets = re.replace_all(value, "");
     no_brackets
-        .split(['/', '／', '、', '_', '→', '・', ':', '×', '&', ',', '，'])
+        .split(['/', '／', '、', '_', '→', ':', '×', '&', ',', '，'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
