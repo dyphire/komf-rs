@@ -193,10 +193,7 @@ const AUTHOR_POSITION_IDS: [i32; 6] = [2001, 2002, 2003, 2007, 2009, 2010];
 
 /// Next 人物关联 → PersonInfo（archive 离线路径同构）：一个 person 的多个职务
 /// 拆成多条；笔名/别名 SlimPerson 不含（archive dump 才有）置空。
-/// 拆分按职务区分：作者类记录存在「A・B」两人合一的脏数据，过完整清理链
-/// （clean_author_names：剥括号注记 + 分隔符拆分）；出版社等机构名本身含
-/// 分隔符（实测 60347：スクウェア・エニックス），只剥注记（strip_name_annotations）
-/// 不拆分，否则 publisher_display_name 对 infobox 全名的精确匹配会断。
+/// （clean_staff_names：剥括号注记 + 分隔符拆分）；出版社等机构名本身含
 /// nameCN 常带消歧注记（"星野真（动画人）"实测），统一剥除；name_cn 无法可靠
 /// 归属到拆分后的各段（段数可能不一致），仅单段时保留，多段置空由显示侧回退原名。
 fn next_staff_to_persons(item: NextSubjectStaff) -> Vec<PersonInfo> {
@@ -204,11 +201,7 @@ fn next_staff_to_persons(item: NextSubjectStaff) -> Vec<PersonInfo> {
     for pos in item.positions {
         let position = pos.position_type.as_ref().and_then(|t| t.id);
         let is_author = position.is_some_and(|id| AUTHOR_POSITION_IDS.contains(&id));
-        let mut names = if is_author {
-            clean_author_names(&item.staff.name)
-        } else {
-            vec![strip_name_annotations(&item.staff.name)]
-        };
+        let mut names = clean_staff_names(&item.staff.name);
         if names.is_empty() {
             names.push(item.staff.name.clone());
         }
@@ -1617,10 +1610,10 @@ fn media_type_platform(media_type: crate::model::MediaType) -> Option<&'static s
     }
 }
 
-/// person 显示名候选清理：与在线 infobox 作者清理（clean_author_names）同一套
+/// person 显示名候选清理：与在线 infobox 作者清理（clean_staff_names）同一套
 /// 规则（剥括号注记、分隔符拆分、trim、去空）；person 是单人实体，只取首个非空项。
 fn cleaned_person_name(raw: &str) -> Option<String> {
-    clean_author_names(raw).into_iter().next()
+    clean_staff_names(raw).into_iter().next()
 }
 
 /// person 显示名：笔名（别名块「笔名|xxx」子项）最高优先；其后 use_chinese_names
@@ -1813,7 +1806,7 @@ fn extract_authors(
 
     let mut authors: Vec<Author> = Vec::new();
     let push_cleaned = |authors: &mut Vec<Author>, name: &str, role: AuthorRole| {
-        for cleaned in clean_author_names(name) {
+        for cleaned in clean_staff_names(name) {
             if !authors.iter().any(|a| a.name == cleaned && a.role == role) {
                 authors.push(Author {
                     name: cleaned,
@@ -1917,7 +1910,7 @@ fn strip_name_annotations(value: &str) -> String {
 /// 按 `/ ／ 、 _ → : × & , ，` 拆分多值，trim + 去空。在线 infobox 作者与
 /// 离线 person 显示名（cleaned_person_name 取首个非空项）共用；出版社多值拆分
 /// 保持独立的 PUBLISHER_SPLIT_CHARS（对齐脚本行为，不剥括号注记）。
-fn clean_author_names(value: &str) -> Vec<String> {
+fn clean_staff_names(value: &str) -> Vec<String> {
     strip_name_annotations(value)
         .split(['/', '／', '、', '_', '→', ':', '×', '&', ',', '，'])
         .map(str::trim)
@@ -3498,17 +3491,17 @@ mod tests {
     }
 
     #[test]
-    fn clean_author_names_splits_and_strips() {
-        assert_eq!(clean_author_names("尾田荣一郎（原作）"), vec!["尾田荣一郎"]);
+    fn clean_staff_names_splits_and_strips() {
+        assert_eq!(clean_staff_names("尾田荣一郎（原作）"), vec!["尾田荣一郎"]);
         assert_eq!(
-            clean_author_names("荒木飞吕彦/ 岸边露伴"),
+            clean_staff_names("荒木飞吕彦/ 岸边露伴"),
             vec!["荒木飞吕彦", "岸边露伴"]
         );
         assert_eq!(
-            clean_author_names(" 手冢治虫 、 藤子·F·不二雄 "),
+            clean_staff_names(" 手冢治虫 、 藤子·F·不二雄 "),
             vec!["手冢治虫", "藤子·F·不二雄"]
         );
-        assert_eq!(clean_author_names("（仅注释）"), Vec::<String>::new());
+        assert_eq!(clean_staff_names("（仅注释）"), Vec::<String>::new());
     }
 
     #[test]
