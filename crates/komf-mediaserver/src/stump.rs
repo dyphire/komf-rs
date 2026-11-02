@@ -1600,11 +1600,7 @@ impl MediaServerClient for StumpMediaServerClientAdapter {
         Ok(())
     }
 
-    async fn reset_book_metadata(
-        &self,
-        book: &MediaServerBook,
-        _book_number: Option<i32>,
-    ) -> Result<(), MediaServerError> {
+    async fn reset_book_metadata(&self, book: &MediaServerBook) -> Result<(), MediaServerError> {
         // Stump 无 resetMediaMetadata，用 updateMediaMetadata 置空可清字段
         let input = build_media_reset_input(book);
         self.client.update_media_metadata(&book.id.0, &input).await

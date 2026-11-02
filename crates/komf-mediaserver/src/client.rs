@@ -115,11 +115,7 @@ pub trait MediaServerClient: Send + Sync {
         thumbnail_id: &MediaServerThumbnailId,
     ) -> Result<(), MediaServerError>;
 
-    async fn reset_book_metadata(
-        &self,
-        book: &MediaServerBook,
-        book_number: Option<i32>,
-    ) -> Result<(), MediaServerError>;
+    async fn reset_book_metadata(&self, book: &MediaServerBook) -> Result<(), MediaServerError>;
     async fn reset_series_metadata(
         &self,
         series: &MediaServerSeries,

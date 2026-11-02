@@ -841,22 +841,18 @@ pub fn series_metadata_reset_request(
 }
 
 /// 书籍元数据重置请求 —— 对应 Kotlin `bookMetadataResetRequest`。
+/// 注意：Kotlin 原版会把 number/numberSort 重置为按文件名自然排序的枚举序号（1..N），
+/// 这会覆盖 Komga 现有编号（来自刮削提供方或用户手动调整），导致整个系列重排。
+/// 本实现始终省略 number/numberSort 字段（尊重 lock 的同一思路），保留现有书籍顺序。
 pub fn book_metadata_reset_request(
     name: &str,
-    book_number: Option<i32>,
     metadata: &MediaServerBookMetadata,
 ) -> KomgaBookMetadataUpdateRequest {
-    let number_value = book_number
-        .map(|n| Some(Some(n.to_string())))
-        .unwrap_or(Some(None));
-    let number_sort_value = book_number
-        .map(|n| Some(Some(n as f64)))
-        .unwrap_or(Some(None));
     KomgaBookMetadataUpdateRequest {
         title: unless_locked(metadata.title_lock, Some(Some(name.to_string()))),
         summary: unless_locked(metadata.summary_lock, Some(Some(String::new()))),
-        number: unless_locked(metadata.number_lock, number_value),
-        number_sort: unless_locked(metadata.number_sort_lock, number_sort_value),
+        number: None,
+        number_sort: None,
         release_date: unless_locked(metadata.release_date_lock, Some(None)),
         authors: unless_locked(metadata.authors_lock, Some(Some(Vec::new()))),
         tags: unless_locked(metadata.tags_lock, Some(Some(Vec::new()))),
@@ -1388,12 +1384,8 @@ impl MediaServerClient for KomgaClient {
         Ok(())
     }
 
-    async fn reset_book_metadata(
-        &self,
-        book: &MediaServerBook,
-        book_number: Option<i32>,
-    ) -> Result<(), MediaServerError> {
-        let request = book_metadata_reset_request(&book.name, book_number, &book.metadata);
+    async fn reset_book_metadata(&self, book: &MediaServerBook) -> Result<(), MediaServerError> {
+        let request = book_metadata_reset_request(&book.name, &book.metadata);
         let response = self
             .send(
                 self.http
@@ -1784,16 +1776,9 @@ mod tests {
     fn book_reset_request_skips_locked_fields() {
         let mut md = MediaServerBookMetadata::default();
         md.title_lock = true;
-        md.number_lock = true;
-        md.number_sort_lock = true;
-        let req = book_metadata_reset_request("My Book", Some(3), &md);
+        let req = book_metadata_reset_request("My Book", &md);
         let v = json(&req);
         assert!(v.get("title").is_none(), "locked title must be omitted");
-        assert!(v.get("number").is_none(), "locked number must be omitted");
-        assert!(
-            v.get("numberSort").is_none(),
-            "locked numberSort must be omitted"
-        );
         assert_eq!(v["summary"], "");
         assert_eq!(v["authors"], serde_json::json!([]));
         assert!(v.get("titleLock").is_none(), "lock fields always omitted");
@@ -1801,13 +1786,10 @@ mod tests {
 
     #[test]
     fn book_reset_request_omits_none_fields() {
-        let req =
-            book_metadata_reset_request("Chapter 1", Some(12), &MediaServerBookMetadata::default());
+        let req = book_metadata_reset_request("Chapter 1", &MediaServerBookMetadata::default());
         let v = json(&req);
         assert_eq!(v["title"], "Chapter 1");
         assert_eq!(v["summary"], "");
-        assert_eq!(v["number"], "12");
-        assert_eq!(v["numberSort"], 12.0);
         assert_eq!(v["authors"], serde_json::json!([]));
         assert_eq!(v["tags"], serde_json::json!([]));
         assert_eq!(v["links"], serde_json::json!([]));
@@ -1819,12 +1801,16 @@ mod tests {
                 v.get(key)
             );
         }
-        // bookNumber 为 null 时 number/numberSort 同样输出 null（Kotlin PatchValue.None）
-        let req_none =
-            book_metadata_reset_request("Oneshot", None, &MediaServerBookMetadata::default());
-        let v2 = json(&req_none);
-        assert_eq!(v2.get("number"), Some(&serde_json::Value::Null));
-        assert_eq!(v2.get("numberSort"), Some(&serde_json::Value::Null));
+        // number/numberSort 一律省略：重置不重排书籍，保留 Komga 现有编号与顺序
+        //（有意偏离 Kotlin 原版按文件名重编号的行为）。
+        assert!(
+            v.get("number").is_none(),
+            "number must be omitted to preserve book order"
+        );
+        assert!(
+            v.get("numberSort").is_none(),
+            "numberSort must be omitted to preserve book order"
+        );
     }
 
     // ---------- 更新请求 ----------
