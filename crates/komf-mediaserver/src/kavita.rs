@@ -2190,11 +2190,7 @@ impl MediaServerClient for KavitaMediaServerClientAdapter {
         Ok(())
     }
 
-    async fn reset_book_metadata(
-        &self,
-        book: &MediaServerBook,
-        _book_number: Option<i32>,
-    ) -> Result<(), MediaServerError> {
+    async fn reset_book_metadata(&self, book: &MediaServerBook) -> Result<(), MediaServerError> {
         // 对齐 Kotlin：invalid Kavita chapter id。
         let id: i32 = parse_kavita_id(&book.id.0, "chapter")?;
         self.client.reset_chapter_lock(id).await

@@ -173,9 +173,10 @@ impl MetadataUpdater {
             .reset_series_metadata(&series)
             .await?;
 
-        let mut books = self.media_server_client.get_books(series_id).await?;
-        books.sort_by(|a, b| case_insensitive_nat_sort(&a.name, &b.name));
-        for (index, book) in books.iter().enumerate() {
+        // 注意：不再按文件名重排/重编号书籍（Kotlin 原版行为会覆盖现有 numberSort
+        // 导致系列重排）；重置仅清空元数据字段，保留 Komga 现有书籍顺序。
+        let books = self.media_server_client.get_books(series_id).await?;
+        for book in &books {
             if remove_comic_info {
                 // 对齐 Kotlin：removeComicInfo 内部 rethrow → job FAILED（HTTP 层 422）。
                 // 同步文件 IO 移入阻塞线程池，避免占用 async executor。
@@ -188,8 +189,7 @@ impl MetadataUpdater {
                     })?
                     .map_err(|e| MediaServerError::ComicInfo(e.to_string()))?;
             }
-            self.reset_book_metadata(book, Some(index as i32 + 1))
-                .await?;
+            self.reset_book_metadata(book).await?;
         }
 
         self.replace_series_thumbnail(series_id, None).await?;
@@ -199,14 +199,8 @@ impl MetadataUpdater {
         Ok(())
     }
 
-    async fn reset_book_metadata(
-        &self,
-        book: &MediaServerBook,
-        sort_number: Option<i32>,
-    ) -> Result<(), MediaServerError> {
-        self.media_server_client
-            .reset_book_metadata(book, sort_number)
-            .await?;
+    async fn reset_book_metadata(&self, book: &MediaServerBook) -> Result<(), MediaServerError> {
+        self.media_server_client.reset_book_metadata(book).await?;
         self.replace_book_thumbnail(&book.id, None).await?;
         let _ = self
             .repository

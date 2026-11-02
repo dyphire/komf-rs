@@ -3208,11 +3208,7 @@ mod job_lifecycle_tests {
         ) -> Result<(), MediaServerError> {
             unimplemented!()
         }
-        async fn reset_book_metadata(
-            &self,
-            _book: &MediaServerBook,
-            _book_number: Option<i32>,
-        ) -> Result<(), MediaServerError> {
+        async fn reset_book_metadata(&self, _book: &MediaServerBook) -> Result<(), MediaServerError> {
             unimplemented!()
         }
         async fn reset_series_metadata(
