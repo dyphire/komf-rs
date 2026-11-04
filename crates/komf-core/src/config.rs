@@ -476,6 +476,8 @@ fn default_db_update_interval() -> u64 {
 }
 
 /// BookWalker 配置（独立结构，含本地数据库定时更新间隔）。
+/// 标签白名单为 Bangumi 独有特性，BookWalker 不提供（曾保留 tagWhitelist 字段但
+/// provider 从未消费，已移除以免误导配置）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookWalkerConfig {
@@ -495,10 +497,6 @@ pub struct BookWalkerConfig {
     pub author_roles: Vec<AuthorRole>,
     #[serde(default = "default_artist_roles")]
     pub artist_roles: Vec<AuthorRole>,
-    #[serde(default)]
-    pub tag_whitelist: Vec<String>,
-    #[serde(default)]
-    pub tag_whitelist_file: Option<String>,
     /// 本地数据库定时更新间隔（小时）；0 = 仅手动下载（默认 24）。
     #[serde(default = "default_db_update_interval")]
     pub update_interval_hours: u64,
@@ -515,8 +513,6 @@ impl Default for BookWalkerConfig {
             media_type: MediaType::Manga,
             author_roles: default_writer_roles(),
             artist_roles: default_artist_roles(),
-            tag_whitelist: Vec::new(),
-            tag_whitelist_file: None,
             update_interval_hours: default_db_update_interval(),
         }
     }

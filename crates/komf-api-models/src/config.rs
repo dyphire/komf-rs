@@ -323,6 +323,8 @@ pub struct ProviderConfigDto {
 }
 
 /// BookWalker 独立 DTO（含数据库定时更新间隔）。
+/// `tag_whitelist` / `tag_whitelist_file` 为脚本兼容字段（脚本对每个 provider 读取/
+/// 回写；标签白名单为 Bangumi 独有特性，核心配置无对应项，读取恒为空、写入被忽略）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BookWalkerConfigDto {

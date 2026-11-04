@@ -315,6 +315,36 @@ fn release_date_from(dt: Option<chrono::DateTime<chrono::Utc>>) -> Option<Releas
     ))
 }
 
+/// 匹配候选标题：主标题 + 每个别名（各自独立候选；`NameSimilarityMatcher::matches`
+/// 为 any 语义，命中其一即算匹配，与 AniList 等 provider 一致）。
+///
+/// Kotlin 原版 `it.title + it.altTitles` 把别名列表拼成单个 blob 字符串
+/// （"标题[别名1, 别名2]"）作为唯一候选，与 query 整体算编辑距离：别名尾巴动辄
+/// 数十字符，远超阈值（≤3），导致有别名的系列（真实库约占 92%）几乎永远无法
+/// 通过自动匹配判定——别名只参与了 FTS 召回，未参与判定。
+fn match_candidates(series: &BookWalkerSeries) -> Vec<String> {
+    std::iter::once(series.title.clone())
+        .chain(series.alt_titles.iter().cloned())
+        .collect()
+}
+
+/// 从链接解析系列 id（`resolve_link_id` 的实现，Rust 扩展，Kotlin 原版无此功能）。
+///
+/// 仅匹配 `bookwalker.com/series/<id>`（provider 生成的链接形态，实测可达）。
+/// bookwalker.com.tw / bookwalker.jp 的系列 URL 使用数字 id，与全局库的
+/// CNT_<ULID> 体系不互通，无法解析，故不匹配。
+fn resolve_link_id_from(query: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?:www\.)?bookwalker\.com/series/([^/?#]+)").ok()?;
+    re.captures(query).map(|c| {
+        let id = c.get(1).unwrap().as_str();
+        if id.starts_with("CNT_") {
+            id.to_string()
+        } else {
+            format!("CNT_{id}")
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 数据访问 —— 对应 `BookWalkerSeriesRepository.kt`
 // ---------------------------------------------------------------------------
@@ -809,13 +839,20 @@ impl BookWalkerSeriesRepository {
     }
 
     /// 对应 `getSeriesBooks`：products LEFT JOIN images LEFT JOIN product_external_ids(type=3)。
+    ///
+    /// 与 Kotlin 的差异（有意改进）：卷（level=2）与话（level=3）的 display_order
+    /// 各自独立编号，混排会产生同号冲突（真实库 293 个系列同时有卷和话，存在
+    /// 704 组 display_order 冲突），导致 totalBookCount 虚高、按号匹配错贴。
+    /// 有卷的系列只取卷；无卷的系列（真实库 4142 个）保留话，其他 level 原样放行。
     pub fn get_series_books(&self, series_id: &str) -> Result<Vec<BookWalkerBook>, ProviderError> {
         let conn = self.open()?;
         let sql = format!(
             "SELECT {} FROM products p \
              LEFT JOIN images i ON p.image_id = i.id \
              LEFT JOIN product_external_ids e ON p.id = e.product_id AND e.type = 3 \
-             WHERE p.series_id = ?1",
+             WHERE p.series_id = ?1 \
+               AND (p.level != 3 OR NOT EXISTS ( \
+                    SELECT 1 FROM products v WHERE v.series_id = ?1 AND v.level = 2))",
             Self::BOOK_COLUMNS
         );
         self.fetch_books(
@@ -1193,16 +1230,7 @@ impl BookWalkerMetadataProvider {
 #[async_trait::async_trait]
 impl MetadataProvider for BookWalkerMetadataProvider {
     fn resolve_link_id(&self, query: &str) -> Option<String> {
-        let re =
-            regex::Regex::new(r"(?:bookwalker\.com\.tw|bookwalker\.jp)/series/([^/?#]+)").ok()?;
-        re.captures(query).map(|c| {
-            let id = c.get(1).unwrap().as_str();
-            if id.starts_with("CNT_") {
-                id.to_string()
-            } else {
-                format!("CNT_{id}")
-            }
-        })
+        resolve_link_id_from(query)
     }
     fn provider_name(&self) -> CoreProviders {
         CoreProviders::BookWalker
@@ -1301,12 +1329,11 @@ impl MetadataProvider for BookWalkerMetadataProvider {
         })
         .await
         .map_err(|e| ProviderError::message(format!("BookWalker search task: {e}")))??;
-        // Kotlin: `it.title + it.altTitles`（List.toString() → "[a, b]"），单元素候选集合
+        // 主标题 + 每个别名作为独立候选（修复 Kotlin blob 拼接缺陷，见 match_candidates）
         let matched = results.iter().find(|s| {
-            let candidate = format!("{}[{}]", s.title, s.alt_titles.join(", "));
             self.name_matcher.matches(
                 &match_query.normalized_series_name(),
-                &match_query.normalize_titles(&[candidate]),
+                &match_query.normalize_titles(&match_candidates(s)),
             )
         });
         let Some(series) = matched else {
@@ -2394,6 +2421,114 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "CNT_7");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 匹配判定：主标题与每个别名作为独立候选（修复 Kotlin blob 拼接缺陷）。
+    #[test]
+    fn match_candidates_match_title_or_any_alt_title() {
+        let series = test_series(); // "Main Title" + ["Alt One", "Alt Two"]
+        let matcher = NameSimilarityMatcher::default();
+
+        // 主标题精确命中
+        let query = crate::model::MatchQuery::new("Main Title".to_string(), None, None, None);
+        assert!(matcher.matches(
+            &query.normalized_series_name(),
+            &query.normalize_titles(&match_candidates(&series))
+        ));
+
+        // 别名精确命中
+        let query = crate::model::MatchQuery::new("Alt Two".to_string(), None, None, None);
+        assert!(matcher.matches(
+            &query.normalized_series_name(),
+            &query.normalize_titles(&match_candidates(&series))
+        ));
+
+        // 回归对照：Kotlin blob 拼法下，即使主标题完全相等，别名尾巴贡献的
+        // 编辑距离（此处 19）也远超阈值（10 字符标题 → 3），判定失败
+        let query = crate::model::MatchQuery::new("Main Title".to_string(), None, None, None);
+        let blob = format!("{}[{}]", series.title, series.alt_titles.join(", "));
+        assert!(!matcher.matches(
+            &query.normalized_series_name(),
+            &query.normalize_titles(&[blob])
+        ));
+    }
+
+    /// resolve_link_id：仅识别 bookwalker.com/series/<id>（全局库 CNT_ 体系）；
+    /// JP/TW 站的数字系列 id 与全局库不互通，不匹配。
+    #[test]
+    fn resolve_link_id_parses_global_series_urls() {
+        // provider 自生成的链接形态（实测 200）
+        assert_eq!(
+            resolve_link_id_from("https://bookwalker.com/series/2PAHAA5VR0BG"),
+            Some("CNT_2PAHAA5VR0BG".to_string())
+        );
+        // www 前缀 / 已带 CNT_ 前缀 / 带 query 均正常
+        assert_eq!(
+            resolve_link_id_from("https://www.bookwalker.com/series/CNT_2PAHAA5VR0BG?utm_source=x"),
+            Some("CNT_2PAHAA5VR0BG".to_string())
+        );
+        // JP/TW 站系列 id 是数字体系，与全局库 CNT_<ULID> 不互通 → 不匹配
+        assert_eq!(resolve_link_id_from("https://bookwalker.jp/series/243901/"), None);
+        assert_eq!(
+            resolve_link_id_from("https://www.bookwalker.com.tw/series/12345"),
+            None
+        );
+        // 无关链接
+        assert_eq!(resolve_link_id_from("https://example.com/series/abc"), None);
+    }
+
+    /// 有卷的系列只取卷（卷/话 display_order 独立编号，混排同号冲突）；
+    /// 无卷的系列保留话。
+    #[test]
+    fn get_series_books_prefers_volumes_over_chapters() {
+        let dir = std::env::temp_dir().join(format!("komf-bw-lvl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("bkwk-db.sqlite");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE images (id TEXT PRIMARY KEY, name TEXT, mime TEXT, width INTEGER, height INTEGER); \
+             CREATE TABLE products (id TEXT PRIMARY KEY, content_id TEXT, series_id TEXT, \
+             parent_content_id TEXT, level INTEGER, content_type INTEGER, product_type INTEGER, \
+             title TEXT, alt_titles TEXT, subtitle TEXT, display_title TEXT, display_title_short TEXT, \
+             description TEXT, description_short TEXT, image_id TEXT, display_order REAL, listed_at TEXT, \
+             label_id TEXT, geoblock_id TEXT, display_name TEXT, copyright TEXT, on_presale_at TEXT, \
+             on_sale_at TEXT, off_sale_at TEXT, add_on INTEGER, add_on_campaign_only INTEGER); \
+             CREATE TABLE product_external_ids (id TEXT PRIMARY KEY, product_id TEXT, source TEXT, \
+             type INTEGER, external_id TEXT, external_id_original TEXT); \
+             CREATE TABLE product_contributors (product_id TEXT, contributor_id TEXT, role INTEGER, \
+             name_override TEXT); \
+             CREATE TABLE contributors (id TEXT PRIMARY KEY, name TEXT, name_alt TEXT);",
+        )
+        .unwrap();
+        // series A：卷(order 1.0) + 话(order 1.0) 同号冲突 → 只取卷
+        conn.execute_batch(
+            "INSERT INTO products (id, content_id, series_id, level, content_type, product_type, \
+             title, alt_titles, subtitle, display_title, display_title_short, description, \
+             description_short, display_order, add_on, add_on_campaign_only) VALUES \
+             ('CNT_AV1', 'CNT_AV1', 'CNT_A', 2, 1, 1, 'Vol 1', '[]', '', 'Vol. 1', '', '', '', 1.0, 0, 0), \
+             ('CNT_AC1', 'CNT_AC1', 'CNT_A', 3, 1, 1, 'Ch 1', '[]', '', 'Chapter 1', '', '', '', 1.0, 0, 0), \
+             ('CNT_BC1', 'CNT_BC1', 'CNT_B', 3, 1, 1, 'Ch 1', '[]', '', 'Chapter 1', '', '', '', 1.0, 0, 0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let repo = BookWalkerSeriesRepository::new(&db_path);
+
+        // 有卷：只取卷
+        let books = repo.get_series_books("CNT_A").unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].id, "CNT_AV1");
+        assert_eq!(books[0].level, 2);
+
+        // 无卷：保留话
+        let books = repo.get_series_books("CNT_B").unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].id, "CNT_BC1");
+        assert_eq!(books[0].level, 3);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
