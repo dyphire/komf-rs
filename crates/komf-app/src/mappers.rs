@@ -665,7 +665,7 @@ fn to_provider_dto(config: &ProviderConfig) -> ProviderConfigDto {
     }
 }
 
-/// EHentai 独立 DTO（含 preferredLanguages）；tagWhitelist 输出空数组（脚本兼容）。
+/// BookWalker 独立 DTO（含数据库定时更新间隔）；tagWhitelist 为脚本兼容字段，输出空数组。
 fn to_book_walker_dto(config: &BookWalkerConfig) -> BookWalkerConfigDto {
     BookWalkerConfigDto {
         priority: Some(config.priority),
@@ -690,8 +690,9 @@ fn to_book_walker_dto(config: &BookWalkerConfig) -> BookWalkerConfigDto {
                 .map(|r| to_author_role_dto(*r))
                 .collect(),
         ),
-        tag_whitelist: Some(config.tag_whitelist.clone()),
-        tag_whitelist_file: config.tag_whitelist_file.clone(),
+        // 脚本兼容字段：标签白名单为 Bangumi 独有，BookWalker 恒输出空。
+        tag_whitelist: Some(Vec::new()),
+        tag_whitelist_file: None,
         update_interval_hours: Some(config.update_interval_hours),
     }
 }
@@ -1378,14 +1379,7 @@ fn from_book_walker_dto(dto: &BookWalkerConfigDto, base: &BookWalkerConfig) -> B
             .as_ref()
             .map(|r| r.iter().map(|r| from_author_role_dto(*r)).collect())
             .unwrap_or_else(|| base.artist_roles.clone()),
-        tag_whitelist: dto
-            .tag_whitelist
-            .clone()
-            .unwrap_or_else(|| base.tag_whitelist.clone()),
-        tag_whitelist_file: dto
-            .tag_whitelist_file
-            .clone()
-            .or_else(|| base.tag_whitelist_file.clone()),
+        // tag_whitelist / tag_whitelist_file 为脚本兼容字段，核心配置无对应项，忽略。
         update_interval_hours: dto
             .update_interval_hours
             .unwrap_or(base.update_interval_hours),
