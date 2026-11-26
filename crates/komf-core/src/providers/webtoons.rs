@@ -15,7 +15,10 @@ use crate::util::{NameSimilarityMatcher, TtlCache};
 
 const BASE_URL: &str = "https://www.webtoons.com";
 const MOBILE_BASE_URL: &str = "https://m.webtoons.com";
-const IMAGE_BASE_URL: &str = "https://webtoon-phinf.pstatic.net";
+// webtoon-phinf.pstatic.net 有防盗链：无 Referer 或 Referer 非 webtoons.com 时返回 403，
+// WebUI / kmrs 以 no-referrer 直接加载搜索结果缩略图会失败。swebtoon-phinf 为同一图床、
+// 不校验 Referer（服务端下载章节缩略图同样可用）。
+const IMAGE_BASE_URL: &str = "https://swebtoon-phinf.pstatic.net";
 
 // ---------------------------------------------------------------------------
 // 模型 —— 对应 Kotlin model/*.kt
@@ -1210,6 +1213,33 @@ mod tests {
         assert_eq!(map("COMPLETED"), Status::Completed);
         assert_eq!(map("END"), Status::Completed);
         assert_eq!(map("something else"), Status::Unknown);
+    }
+
+    #[test]
+    fn search_result_thumbnail_uses_referer_free_host() {
+        let title = Title {
+            title_no: 6540,
+            title: "t".to_string(),
+            title_group_name: Some("t".to_string()),
+            represent_genre: Some("ROMANCE".to_string()),
+            thumbnail_mobile: "/20240716_1/thumb.jpg".to_string(),
+            unsuitable_for_children: false,
+            picture_author_name: None,
+            writing_author_name: "a".to_string(),
+            last_episode_register_ymdt: 0,
+            read_count: 0,
+        };
+        let mapper = WebtoonsMetadataMapper::new(
+            Default::default(),
+            vec![],
+            vec![],
+            WebtoonsLanguage::ZhHant,
+        );
+        let results = mapper.to_series_search_result(&(vec![title], vec![]));
+        assert_eq!(
+            results[0].image_url.as_deref(),
+            Some("https://swebtoon-phinf.pstatic.net/20240716_1/thumb.jpg")
+        );
     }
 
     #[test]
