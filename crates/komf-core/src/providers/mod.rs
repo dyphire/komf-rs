@@ -682,8 +682,8 @@ fn apply_cover_switches(config: &mut ProvidersConfig, covers: CoverFetchSwitches
     config.yen_press.book_metadata.thumbnail &= books;
     config.viz.series_metadata.thumbnail &= series;
     config.viz.book_metadata.thumbnail &= books;
-    config.webtoons.series_metadata.thumbnail &= series;
-    config.webtoons.book_metadata.thumbnail &= books;
+    config.webtoons.provider.series_metadata.thumbnail &= series;
+    config.webtoons.provider.book_metadata.thumbnail &= books;
     config.e_hentai.series_metadata.thumbnail &= series;
     config.e_hentai.book_metadata.thumbnail &= books;
 }
@@ -848,7 +848,7 @@ fn create_metadata_providers(
     {
         providers.push(RegisteredProvider {
             provider: Arc::new(p),
-            priority: config.webtoons.priority,
+            priority: config.webtoons.provider.priority,
         });
     }
     // EHentai —— 对应 Kotlin PR #284 createEHentaiMetadataProvider
@@ -1137,9 +1137,10 @@ mod tests {
                 comic_vine,
                 book_walker,
                 yen_press,
-                viz,
-                webtoons
+                viz
             );
+            config.webtoons.provider.series_metadata = series_on.clone();
+            config.webtoons.provider.book_metadata = books_on.clone();
             config.ani_list.series_metadata = series_on.clone();
             config.manga_baka.series_metadata = series_on.clone();
             config.bangumi.provider.series_metadata = series_on.clone();

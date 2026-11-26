@@ -441,6 +441,9 @@ function ProviderList(props: {
                       <SwitchField label={t('f.staffChineseNames')} value={cur.archive?.staffChineseNames} onChange={(v) => upd([...base, 'archive', 'staffChineseNames'], v)} />
                     </>
                   )}
+                  {key === 'webtoons' && (
+                    <Field label={t('f.webtoonsLanguage')}><select value={cur.language ?? 'en'} onChange={(e) => upd([...base, 'language'], e.target.value)}>{[['en', 'English'], ['zh-hant', '繁體中文（台灣）'], ['th', 'ไทย'], ['id', 'Bahasa Indonesia'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></Field>
+                  )}
                   {key === 'bookWalker' && (
                     <Field label={t('f.updateIntervalHours')}><input type="number" min="0" value={cur.updateIntervalHours ?? 24} onChange={(e) => upd([...base, 'updateIntervalHours'], Number(e.target.value))} /></Field>
                   )}

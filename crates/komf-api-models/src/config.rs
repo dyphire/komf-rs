@@ -301,7 +301,7 @@ pub struct ProvidersConfigDto {
     pub viz: Option<ProviderConfigDto>,
     pub bangumi: Option<BangumiConfigDto>,
     pub hentag: Option<ProviderConfigDto>,
-    pub webtoons: Option<ProviderConfigDto>,
+    pub webtoons: Option<WebtoonsConfigDto>,
     pub e_hentai: Option<EHentaiConfigDto>,
 }
 
@@ -390,6 +390,60 @@ pub struct EHentaiArchiveConfigDto {
     pub idle_release_secs: Option<u64>,
     pub search_category_filter: Option<Vec<String>>,
     pub search_uploader_filter: Option<Vec<String>>,
+}
+
+/// Webtoons 配置 DTO：通用 ProviderConfigDto 字段 + 语言站台 `language`
+/// （`en` / `zh-hant` / `th` / `id` / `es` / `fr` / `de`，缺省 en）。
+/// 与 BangumiConfigDto 同理显式展开字段，不用 flatten（三态 null 限制）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WebtoonsConfigDto {
+    pub priority: Option<i32>,
+    pub enabled: Option<bool>,
+    pub series_metadata: Option<SeriesMetadataConfigDto>,
+    pub book_metadata: Option<BookMetadataConfigDto>,
+    #[serde(default, deserialize_with = "deserialize_tri_state")]
+    pub name_matching_mode: Option<Option<KomfNameMatchingMode>>,
+    pub media_type: Option<KomfMediaType>,
+    pub author_roles: Option<Vec<KomfAuthorRole>>,
+    pub artist_roles: Option<Vec<KomfAuthorRole>>,
+    pub tag_whitelist: Option<Vec<String>>,
+    pub tag_whitelist_file: Option<String>,
+    pub language: Option<String>,
+}
+
+impl WebtoonsConfigDto {
+    /// 通用字段视图（复用 ProviderConfigDto 的 patch 逻辑）。
+    pub fn to_provider_dto(&self) -> ProviderConfigDto {
+        ProviderConfigDto {
+            priority: self.priority,
+            enabled: self.enabled,
+            series_metadata: self.series_metadata.clone(),
+            book_metadata: self.book_metadata.clone(),
+            name_matching_mode: self.name_matching_mode,
+            media_type: self.media_type,
+            author_roles: self.author_roles.clone(),
+            artist_roles: self.artist_roles.clone(),
+            tag_whitelist: self.tag_whitelist.clone(),
+            tag_whitelist_file: self.tag_whitelist_file.clone(),
+        }
+    }
+
+    pub fn from_provider_dto(dto: ProviderConfigDto, language: Option<String>) -> Self {
+        Self {
+            priority: dto.priority,
+            enabled: dto.enabled,
+            series_metadata: dto.series_metadata,
+            book_metadata: dto.book_metadata,
+            name_matching_mode: dto.name_matching_mode,
+            media_type: dto.media_type,
+            author_roles: dto.author_roles,
+            artist_roles: dto.artist_roles,
+            tag_whitelist: dto.tag_whitelist,
+            tag_whitelist_file: dto.tag_whitelist_file,
+            language,
+        }
+    }
 }
 
 /// Bangumi 配置 DTO：通用 ProviderConfigDto 字段 + archive 离线数据源段。

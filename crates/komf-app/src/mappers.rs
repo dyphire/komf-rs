@@ -572,7 +572,10 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             }),
         }),
         hentag: Some(default_provider_config_dto()),
-        webtoons: Some(to_provider_dto(&config.webtoons)),
+        webtoons: Some(WebtoonsConfigDto::from_provider_dto(
+            to_provider_dto(&config.webtoons.provider),
+            Some(config.webtoons.language.path_code().to_string()),
+        )),
         e_hentai: Some(to_ehentai_dto(&config.e_hentai)),
     }
 }
@@ -1294,7 +1297,23 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
         webtoons: dto
             .webtoons
             .as_ref()
-            .map(|d| from_provider_dto(d, &base.webtoons))
+            .map(|d| komf_core::config::WebtoonsConfig {
+                provider: from_provider_dto(&d.to_provider_dto(), &base.webtoons.provider),
+                // 未知语言码忽略并保持原值（PATCH 不因单字段失败）
+                language: d
+                    .language
+                    .as_deref()
+                    .and_then(|code| {
+                        let parsed = komf_core::config::WebtoonsLanguage::from_path_code(code);
+                        if parsed.is_none() {
+                            tracing::warn!(
+                                "unsupported webtoons language '{code}', keeping current"
+                            );
+                        }
+                        parsed
+                    })
+                    .unwrap_or(base.webtoons.language),
+            })
             .unwrap_or_else(|| base.webtoons.clone()),
         e_hentai: dto
             .e_hentai

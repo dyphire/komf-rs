@@ -256,6 +256,7 @@ const dict: Record<string, { zh: string; en: string }> = {
   'f.updateIntervalHours': { zh: '自动更新间隔(小时)', en: 'Update interval (hours)' },
   'f.archiveEnabled': { zh: '启用离线归档', en: 'Enable offline archive (archive.enabled)' },
   'f.searchDomain': { zh: '搜索域名', en: 'Search domain (searchDomain)' },
+  'f.webtoonsLanguage': { zh: '语言站台', en: 'Site language (language)' },
   'f.titlePriority': { zh: '标题优先级', en: 'Title priority (titlePriority)' },
   'f.gidOnlyMatch': { zh: '仅 gid 精确匹配', en: 'GID-only matching' },
   'f.tagTranslationEnabled': { zh: '启用标签翻译', en: 'Enable tag translation' },
