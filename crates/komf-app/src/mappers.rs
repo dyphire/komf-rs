@@ -1299,19 +1299,12 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
             .as_ref()
             .map(|d| komf_core::config::WebtoonsConfig {
                 provider: from_provider_dto(&d.to_provider_dto(), &base.webtoons.provider),
-                // 未知语言码忽略并保持原值（PATCH 不因单字段失败）
+                // 缺省/null 保持原值；未知语言码已由 config_routes::validate_update
+                // 以 400 拒绝，此处不会出现
                 language: d
                     .language
                     .as_deref()
-                    .and_then(|code| {
-                        let parsed = komf_core::config::WebtoonsLanguage::from_path_code(code);
-                        if parsed.is_none() {
-                            tracing::warn!(
-                                "unsupported webtoons language '{code}', keeping current"
-                            );
-                        }
-                        parsed
-                    })
+                    .and_then(komf_core::config::WebtoonsLanguage::parse)
                     .unwrap_or(base.webtoons.language),
             })
             .unwrap_or_else(|| base.webtoons.clone()),

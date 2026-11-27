@@ -55,10 +55,38 @@ async fn get_config(State(state): State<SharedState>) -> impl IntoResponse {
     ))
 }
 
+/// 套用前校验 PATCH 中无法静默处理的字段：目前为 Webtoons `language`
+/// （默认与各库 provider）。未知语言码返回 400，而不是忽略后回 204。
+fn validate_update(request: &KomfConfigUpdateRequest) -> Result<(), String> {
+    let Some(providers) = request.metadata_providers.as_ref() else {
+        return Ok(());
+    };
+    let library = providers
+        .library_providers
+        .iter()
+        .flatten()
+        .filter_map(|(_, p)| p.as_ref());
+    for config in providers.default_providers.iter().chain(library) {
+        let code = config.webtoons.as_ref().and_then(|w| w.language.as_deref());
+        if let Some(code) = code {
+            if komf_core::config::WebtoonsLanguage::parse(code).is_none() {
+                return Err(format!(
+                    "unknown webtoons language '{code}', expected one of: {}",
+                    komf_core::config::WebtoonsLanguage::supported_codes()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn update_config(
     State(state): State<SharedState>,
     Json(request): Json<KomfConfigUpdateRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<KomfErrorResponse>)> {
+    if let Err(message) = validate_update(&request) {
+        return Err((StatusCode::BAD_REQUEST, Json(KomfErrorResponse { message })));
+    }
     let updated = {
         let state = state.read().unwrap();
         mappers::apply_config_update(state.config.clone(), &request)
@@ -144,6 +172,33 @@ fn download_to_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(json: &str) -> KomfConfigUpdateRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// 未知 Webtoons 语言码（默认或库级）→ 拒绝；别名、null、省略 → 放行。
+    #[test]
+    fn validate_update_rejects_unknown_webtoons_language() {
+        for ok in [
+            r#"{}"#,
+            r#"{"metadataProviders":{"defaultProviders":{"webtoons":{"language":"zh_TW"}}}}"#,
+            r#"{"metadataProviders":{"defaultProviders":{"webtoons":{"language":null}}}}"#,
+            r#"{"metadataProviders":{"defaultProviders":{"webtoons":{"enabled":true}}}}"#,
+        ] {
+            assert!(validate_update(&request(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            r#"{"metadataProviders":{"defaultProviders":{"webtoons":{"language":"ja"}}}}"#,
+            r#"{"metadataProviders":{"libraryProviders":{"lib1":{"webtoons":{"language":"ja"}}}}}"#,
+        ] {
+            let err = validate_update(&request(bad)).unwrap_err();
+            assert!(
+                err.contains("unknown webtoons language 'ja'"),
+                "{bad}: {err}"
+            );
+        }
+    }
 
     /// jsonl 流：逐行输出 ProgressEvent，遇 FinishedEvent 结束。
     #[tokio::test]

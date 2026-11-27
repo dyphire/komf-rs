@@ -167,8 +167,6 @@ where
     }
 }
 
-/// Bangumi 配置：平铺继承 ProviderConfig 通用字段（兼容既有 yaml），
-/// 另含 archive 离线数据源配置段。
 /// Webtoons 配置：通用 ProviderConfig 字段 + 语言站台（`language`，缺省 en）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,30 +177,43 @@ pub struct WebtoonsConfig {
     pub language: WebtoonsLanguage,
 }
 
-/// Webtoons.com 的语言站台。序列化值即网址路径首段（如 `zh-hant`）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Webtoons.com 的语言站台。序列化值即网址路径首段（如 `zh-hant`）；
+/// 反序列化（YAML）与 API PATCH 共用 [`WebtoonsLanguage::parse`]，接受的写法一致。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 pub enum WebtoonsLanguage {
     #[default]
-    #[serde(rename = "en", alias = "EN")]
+    #[serde(rename = "en")]
     En,
-    #[serde(
-        rename = "zh-hant",
-        alias = "ZH_HANT",
-        alias = "zh-Hant",
-        alias = "zh-TW",
-        alias = "zh_TW"
-    )]
+    #[serde(rename = "zh-hant")]
     ZhHant,
-    #[serde(rename = "th", alias = "TH")]
+    #[serde(rename = "th")]
     Th,
-    #[serde(rename = "id", alias = "ID")]
+    #[serde(rename = "id")]
     Id,
-    #[serde(rename = "es", alias = "ES")]
+    #[serde(rename = "es")]
     Es,
-    #[serde(rename = "fr", alias = "FR")]
+    #[serde(rename = "fr")]
     Fr,
-    #[serde(rename = "de", alias = "DE")]
+    #[serde(rename = "de")]
     De,
+}
+
+impl<'de> Deserialize<'de> for WebtoonsLanguage {
+    /// `null` 视同缺省（en）；未知语言码报错并列出可选值。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match Option::<String>::deserialize(deserializer)? {
+            None => Ok(Self::default()),
+            Some(code) => Self::parse(&code).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown webtoons language '{code}', expected one of: {}",
+                    Self::supported_codes()
+                ))
+            }),
+        }
+    }
 }
 
 impl WebtoonsLanguage {
@@ -245,10 +256,23 @@ impl WebtoonsLanguage {
         }
     }
 
-    pub fn from_path_code(code: &str) -> Option<Self> {
+    /// 唯一的语言码解析入口（YAML / API / 网址路径共用）：大小写不敏感，`_` 视同 `-`；
+    /// 除规范路径码外，zh-hant 另接受 `zh-tw`（`zh_TW` 为站点 locale 写法）。
+    pub fn parse(code: &str) -> Option<Self> {
+        let normalized = code.trim().to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "zh-tw" => Some(Self::ZhHant),
+            other => Self::ALL.into_iter().find(|l| l.path_code() == other),
+        }
+    }
+
+    /// 供错误信息使用的可选值列表（`en, zh-hant, ...`）。
+    pub fn supported_codes() -> String {
         Self::ALL
-            .into_iter()
-            .find(|l| l.path_code().eq_ignore_ascii_case(code))
+            .iter()
+            .map(|l| l.path_code())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// 从网址或路径（如 `/zh-hant/fantasy/xxx/list?title_no=1`）取出语言。
@@ -258,10 +282,12 @@ impl WebtoonsLanguage {
             .map(|(_, rest)| rest)
             .unwrap_or(url_or_path);
         let first = path.trim_start_matches('/').split(['/', '?']).next()?;
-        Self::from_path_code(first)
+        Self::parse(first)
     }
 }
 
+/// Bangumi 配置：平铺继承 ProviderConfig 通用字段（兼容既有 yaml），
+/// 另含 archive 离线数据源配置段。
 /// 作者/出版社中文名（archive.staffChineseNames，缺省 false=日文原名）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -890,6 +916,16 @@ mod tests {
         let cfg: ProvidersConfig = serde_yaml::from_str("webtoons:\n  enabled: true\n").unwrap();
         assert_eq!(cfg.webtoons.language, WebtoonsLanguage::En);
 
+        // YAML 与 API 共用解析器：别名可用，null 视同缺省，未知值报错
+        let cfg: ProvidersConfig = serde_yaml::from_str("webtoons:\n  language: zh_TW\n").unwrap();
+        assert_eq!(cfg.webtoons.language, WebtoonsLanguage::ZhHant);
+        let cfg: ProvidersConfig = serde_yaml::from_str("webtoons:\n  language: null\n").unwrap();
+        assert_eq!(cfg.webtoons.language, WebtoonsLanguage::En);
+        let err = serde_yaml::from_str::<ProvidersConfig>("webtoons:\n  language: ja\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown webtoons language 'ja'"), "{err}");
+
         // 整段缺省 → 保持原默认 priority 130
         let cfg = ProvidersConfig::default();
         assert_eq!(cfg.webtoons.provider.priority, 130);
@@ -900,11 +936,27 @@ mod tests {
     fn webtoons_language_codes() {
         assert_eq!(WebtoonsLanguage::ZhHant.cookie_locale(), "zh_TW");
         assert_eq!(WebtoonsLanguage::ZhHant.language_tag(), "zh-Hant");
+        for code in [
+            "zh-hant",
+            "ZH-HANT",
+            "ZH_HANT",
+            "zh-Hant",
+            "zh-TW",
+            "zh_TW",
+            " zh-hant ",
+        ] {
+            assert_eq!(
+                WebtoonsLanguage::parse(code),
+                Some(WebtoonsLanguage::ZhHant),
+                "{code}"
+            );
+        }
+        assert_eq!(WebtoonsLanguage::parse("EN"), Some(WebtoonsLanguage::En));
+        assert_eq!(WebtoonsLanguage::parse("ja"), None);
         assert_eq!(
-            WebtoonsLanguage::from_path_code("ZH-HANT"),
-            Some(WebtoonsLanguage::ZhHant)
+            WebtoonsLanguage::supported_codes(),
+            "en, zh-hant, th, id, es, fr, de"
         );
-        assert_eq!(WebtoonsLanguage::from_path_code("ja"), None);
         assert_eq!(
             serde_yaml::to_string(&WebtoonsLanguage::ZhHant)
                 .unwrap()

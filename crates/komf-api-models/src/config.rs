@@ -756,6 +756,21 @@ pub enum DownloadProgress {
 mod tests {
     use super::*;
 
+    /// WebtoonsConfigDto 手动展开了 ProviderConfigDto 的字段（tri-state null 不能 flatten）；
+    /// ProviderConfigDto 新增字段时此测试提醒同步。
+    #[test]
+    fn webtoons_dto_mirrors_provider_dto_fields() {
+        fn keys<T: Serialize + Default>() -> std::collections::BTreeSet<String> {
+            match serde_json::to_value(T::default()).unwrap() {
+                serde_json::Value::Object(map) => map.keys().cloned().collect(),
+                _ => unreachable!(),
+            }
+        }
+        let mut provider = keys::<ProviderConfigDto>();
+        provider.insert("language".to_string());
+        assert_eq!(keys::<WebtoonsConfigDto>(), provider);
+    }
+
     #[test]
     fn discord_webhooks_accepts_array_and_index_object() {
         // Kotlin main 契约：数组
