@@ -351,6 +351,11 @@ metadataProviders:
     webtoons:
       priority: 130
       enabled: false
+      language: en                  # 语言站台：en / zh-hant（台湾，亦接受 zh-TW / zh_TW）/ th / id / es / fr / de
+                                    #   决定搜索站台与作品网址；搜索词需用该站台语言的书名。
+                                    #   写入的 metadata language / 标题语言 = 站台语言（zh-hant → zh-Hant），
+                                    #   即该译本的语言而非原作语言；作品网址自带语言时以网址为准。
+                                    #   API PATCH 传 null 或省略 = 保持原值，恢复缺省需显式传 en
     eHentai:
       priority: 10
       enabled: false                # 需可访问 e-hentai.org（常需代理）；exhentai 另需 cookie

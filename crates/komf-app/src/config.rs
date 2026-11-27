@@ -194,7 +194,7 @@ fn warn_about_disabled_providers(config: &AppConfig) {
         || providers.bangumi.provider.enabled
         || providers.comic_vine.enabled
         || providers.manga_baka.enabled
-        || providers.webtoons.enabled;
+        || providers.webtoons.provider.enabled;
     if !any_enabled && config.metadata_providers.library_providers.is_empty() {
         tracing::warn!("No metadata providers enabled. You will not be able to get new metadata");
     }

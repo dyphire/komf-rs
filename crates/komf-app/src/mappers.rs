@@ -572,7 +572,10 @@ fn to_providers_dto(config: &ProvidersConfig) -> ProvidersConfigDto {
             }),
         }),
         hentag: Some(default_provider_config_dto()),
-        webtoons: Some(to_provider_dto(&config.webtoons)),
+        webtoons: Some(WebtoonsConfigDto::from_provider_dto(
+            to_provider_dto(&config.webtoons.provider),
+            Some(config.webtoons.language.path_code().to_string()),
+        )),
         e_hentai: Some(to_ehentai_dto(&config.e_hentai)),
     }
 }
@@ -1294,7 +1297,16 @@ fn from_providers_dto(dto: &ProvidersConfigDto, base: &ProvidersConfig) -> Provi
         webtoons: dto
             .webtoons
             .as_ref()
-            .map(|d| from_provider_dto(d, &base.webtoons))
+            .map(|d| komf_core::config::WebtoonsConfig {
+                provider: from_provider_dto(&d.to_provider_dto(), &base.webtoons.provider),
+                // 缺省/null 保持原值；未知语言码已由 config_routes::validate_update
+                // 以 400 拒绝，此处不会出现
+                language: d
+                    .language
+                    .as_deref()
+                    .and_then(komf_core::config::WebtoonsLanguage::parse)
+                    .unwrap_or(base.webtoons.language),
+            })
             .unwrap_or_else(|| base.webtoons.clone()),
         e_hentai: dto
             .e_hentai

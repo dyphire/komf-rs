@@ -4,7 +4,7 @@ use scraper::{Element, ElementRef, Html, Selector};
 use serde::Deserialize;
 use std::time::Duration;
 
-use crate::config::ProviderConfig;
+use crate::config::{WebtoonsConfig, WebtoonsLanguage};
 use crate::model::{
     Author, AuthorRole, BookMetadata, BookRange, Image, MatchQuery, ProviderBookId,
     ProviderBookMetadata, ProviderSeriesId, ProviderSeriesMetadata, SeriesBook, SeriesMetadata,
@@ -15,7 +15,10 @@ use crate::util::{NameSimilarityMatcher, TtlCache};
 
 const BASE_URL: &str = "https://www.webtoons.com";
 const MOBILE_BASE_URL: &str = "https://m.webtoons.com";
-const IMAGE_BASE_URL: &str = "https://webtoon-phinf.pstatic.net";
+// webtoon-phinf.pstatic.net 有防盗链：无 Referer 或 Referer 非 webtoons.com 时返回 403，
+// WebUI / kmrs 以 no-referrer 直接加载搜索结果缩略图会失败。swebtoon-phinf 为同一图床、
+// 不校验 Referer（服务端下载章节缩略图同样可用）。
+const IMAGE_BASE_URL: &str = "https://swebtoon-phinf.pstatic.net";
 
 // ---------------------------------------------------------------------------
 // 模型 —— 对应 Kotlin model/*.kt
@@ -44,9 +47,10 @@ pub struct WebtoonsSeries {
     thumbnail_url: Option<String>,
     genres: Vec<String>,
     status: Status,
-    author: Option<PersonInfo>,
-    adapted_by: Option<PersonInfo>,
-    artist: Option<PersonInfo>,
+    /// 同一标签可有多人（如 `編劇` ×2），按页面顺序保留。
+    author: Vec<PersonInfo>,
+    adapted_by: Vec<PersonInfo>,
+    artist: Vec<PersonInfo>,
     views: String,
     subscribers: String,
     chapters: Option<Vec<Episode>>,
@@ -107,7 +111,7 @@ pub struct Title {
 }
 
 impl Title {
-    fn get_original_url(&self) -> Option<String> {
+    fn get_original_url(&self, language: WebtoonsLanguage) -> Option<String> {
         let genre = self.represent_genre.as_deref()?;
         if genre.is_empty() {
             return None;
@@ -117,29 +121,31 @@ impl Title {
             .clone()
             .unwrap_or_else(|| seo_encoding(&self.title));
         Some(format!(
-            "{BASE_URL}/en/{genre}/{title_group_name}/list?title_no={}",
+            "{BASE_URL}/{}/{genre}/{title_group_name}/list?title_no={}",
+            language.path_code(),
             self.title_no
         ))
     }
 
-    fn get_canvas_url(&self) -> String {
+    fn get_canvas_url(&self, language: WebtoonsLanguage) -> String {
         let title_group_name = self
             .title_group_name
             .clone()
             .unwrap_or_else(|| seo_encoding(&self.title));
         format!(
-            "{BASE_URL}/en/canvas/{title_group_name}/list?title_no={}",
+            "{BASE_URL}/{}/canvas/{title_group_name}/list?title_no={}",
+            language.path_code(),
             self.title_no
         )
     }
 
-    fn get_original_id(&self) -> Option<WebtoonsSeriesId> {
-        let original_url = self.get_original_url()?;
+    fn get_original_id(&self, language: WebtoonsLanguage) -> Option<WebtoonsSeriesId> {
+        let original_url = self.get_original_url(language)?;
         Some(WebtoonsSeriesId(encoded_path_and_query(&original_url)))
     }
 
-    fn get_canvas_id(&self) -> WebtoonsSeriesId {
-        WebtoonsSeriesId(encoded_path_and_query(&self.get_canvas_url()))
+    fn get_canvas_id(&self, language: WebtoonsLanguage) -> WebtoonsSeriesId {
+        WebtoonsSeriesId(encoded_path_and_query(&self.get_canvas_url(language)))
     }
 }
 
@@ -288,20 +294,10 @@ impl WebtoonsParser {
             .as_ref()
             .and_then(|el| el_first(el, "p.summary"))
             .map(|el| elem_text(&el));
-        let status_text = info_element
+        let day_info = info_element
             .as_ref()
-            .and_then(|el| el_first(el, "p.day_info"))
-            .map(|el| elem_text(&el))
-            .unwrap_or_default();
-        let status = match status_text.as_str() {
-            s if s.contains("UP") || s.contains("EVERY") || s.contains("NOUVEAU") => {
-                Status::Ongoing
-            }
-            s if s.contains("END") || s.contains("COMPLETED") || s.contains("TERMINÉ") => {
-                Status::Completed
-            }
-            _ => Status::Unknown,
-        };
+            .and_then(|el| el_first(el, "p.day_info"));
+        let status = parse_status(day_info.as_ref());
         let image_url = doc_first(&document, "head meta[property=\"og:image\"]")
             .and_then(|el| el.attr("content"))
             .map(|s| s.to_string());
@@ -315,16 +311,8 @@ impl WebtoonsParser {
             })
             .unwrap_or_default();
 
-        let (author, adapted_by, artist): (
-            Option<PersonInfo>,
-            Option<PersonInfo>,
-            Option<PersonInfo>,
-        ) = if let Some(people) = people_element.as_ref() {
-            (
-                get_person_info(people, "Original work by"),
-                get_person_info(people, "Adapted by"),
-                get_person_info(people, "Art by"),
-            )
+        let (author, adapted_by, artist) = if let Some(people) = people_element.as_ref() {
+            resolve_credits(people)
         } else {
             let author_backup = detail_element
                 .as_ref()
@@ -348,15 +336,15 @@ impl WebtoonsParser {
                 None => author_name.clone(),
             };
             (
-                Some(PersonInfo {
+                vec![PersonInfo {
                     name: author_name,
                     description: None,
-                }),
-                None,
-                Some(PersonInfo {
+                }],
+                Vec::new(),
+                vec![PersonInfo {
                     name: artist_name,
                     description: None,
-                }),
+                }],
             )
         };
 
@@ -410,12 +398,105 @@ fn get_document_url(document: &Html) -> String {
         .to_string()
 }
 
+// 作者信息弹层 `<p class="by">` 的标签文字，随语言站台不同（en / zh-hant）
+const ORIGINAL_LABELS: &[&str] = &["Original work by", "原作"];
+const WRITER_LABELS: &[&str] = &["Written by", "Story by", "編劇"];
+const ADAPTED_LABELS: &[&str] = &["Adapted by", "改編"];
+const ART_LABELS: &[&str] = &["Art by", "繪圖", "作畫"];
+const CREATOR_LABELS: &[&str] = &["Created by", "作家"];
+
+/// 连载状态：优先看各语言站台共用的图标 class（`txt_ico_up` / `txt_ico_completed`），
+/// 与页面语言无关；取不到时回退到文字匹配。
+fn parse_status(day_info: Option<&ElementRef>) -> Status {
+    let Some(day_info) = day_info else {
+        return Status::Unknown;
+    };
+    if el_first(day_info, ".txt_ico_completed").is_some() {
+        return Status::Completed;
+    }
+    if el_first(day_info, ".txt_ico_up").is_some() {
+        return Status::Ongoing;
+    }
+    status_from_text(&elem_text(day_info))
+}
+
+fn status_from_text(text: &str) -> Status {
+    match text {
+        s if s.contains("UP")
+            || s.contains("EVERY")
+            || s.contains("NOUVEAU")
+            || s.contains("更新") =>
+        {
+            Status::Ongoing
+        }
+        s if s.contains("END")
+            || s.contains("COMPLETED")
+            || s.contains("TERMINÉ")
+            || s.contains("完結") =>
+        {
+            Status::Completed
+        }
+        _ => Status::Unknown,
+    }
+}
+
+/// 作者信息弹层 → (作者, 改编, 作画)。各站台标签语义（en / zh-hant 实测）：
+///
+/// - `Original work by` / `原作`：原作者 → 作者
+/// - `Written by` / `編劇`：编剧。有原作时即改编者（zh-hant `編劇` 对应 en `Adapted by`，
+///   如全知讀者視角 UMI），否则为作者
+/// - `Adapted by` / `改編`：改编者
+/// - `Art by` / `繪圖`：作画
+/// - `Created by` / `作家`：泛指创作者，**恒计入作者**；无作画标签时同时计为作画
+///   （神之塔 `作家 SIU` = 编绘一体）
+///
+/// 每个标签可有多人（9342：`編劇` Dan Geung + INKO），全部保留，按姓名去重。
+fn resolve_credits(people: &ElementRef) -> (Vec<PersonInfo>, Vec<PersonInfo>, Vec<PersonInfo>) {
+    let original = get_people(people, ORIGINAL_LABELS);
+    let script = get_people(people, WRITER_LABELS);
+    let creator = get_people(people, CREATOR_LABELS);
+    let art = get_people(people, ART_LABELS);
+
+    let (authors, adapters) = if original.is_empty() {
+        (
+            [script, creator.clone()].concat(),
+            get_people(people, ADAPTED_LABELS),
+        )
+    } else {
+        (
+            [original, creator.clone()].concat(),
+            [get_people(people, ADAPTED_LABELS), script].concat(),
+        )
+    };
+    let artists = if art.is_empty() { creator } else { art };
+    (
+        dedup_people(authors),
+        dedup_people(adapters),
+        dedup_people(artists),
+    )
+}
+
+fn dedup_people(people: Vec<PersonInfo>) -> Vec<PersonInfo> {
+    let mut seen = std::collections::HashSet::new();
+    people
+        .into_iter()
+        .filter(|p| !p.name.is_empty() && seen.insert(p.name.clone()))
+        .collect()
+}
+
 /// Kotlin `p.by:contains($text) + h3.title`（scraper 不支持 :contains，手动模拟）。
-fn get_person_info(people_element: &ElementRef, text: &str) -> Option<PersonInfo> {
-    let p_by = sel("p.by")?;
-    let p_desc = sel("p.desc")?;
-    for el in people_element.select(&p_by) {
-        if elem_text(&el).contains(text) {
+/// `labels` 为各语言站台的候选标签，命中任一即可；同一标签的多人全部返回。
+fn get_people(people_element: &ElementRef, labels: &[&str]) -> Vec<PersonInfo> {
+    let (Some(p_by), Some(p_desc)) = (sel("p.by"), sel("p.desc")) else {
+        return Vec::new();
+    };
+    people_element
+        .select(&p_by)
+        .filter(|el| {
+            let label = elem_text(el);
+            labels.iter().any(|text| label.contains(text))
+        })
+        .filter_map(|el| {
             let title = el
                 .next_sibling_element()
                 .filter(|s| s.value().name() == "h3")?;
@@ -426,13 +507,12 @@ fn get_person_info(people_element: &ElementRef, text: &str) -> Option<PersonInfo
                 .and_then(ElementRef::wrap)
                 .and_then(|parent| parent.select(&p_desc).next())
                 .map(|d| elem_text(&d));
-            return Some(PersonInfo {
+            Some(PersonInfo {
                 name: elem_text(&title),
                 description,
-            });
-        }
-    }
-    None
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -444,27 +524,40 @@ pub struct WebtoonsClient {
     base_headers: reqwest::header::HeaderMap,
     mobile_headers: reqwest::header::HeaderMap,
     parser: WebtoonsParser,
+    /// 语言站台（决定 locale cookie、搜索结果网址与 metadata 语言）。
+    language: WebtoonsLanguage,
     /// 匀速限流（对齐原版 rateLimiter(1, 1s)，即 1 秒/许可）。
     limiter: crate::rate_limiter::ThroughputLimiter,
 }
 
 impl WebtoonsClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        let mut base_headers = reqwest::header::HeaderMap::new();
+    pub fn new(http: reqwest::Client, language: WebtoonsLanguage) -> Self {
+        use reqwest::header::{HeaderMap, HeaderValue, COOKIE, REFERER};
+        // locale cookie 决定移动版搜索 API 返回哪个语言站台的作品；
+        // ageGatePass / needGDPR 对齐 Kotlin 原版（跳过年龄确认与 GDPR 弹窗）。
+        let cookies = format!(
+            "ageGatePass=true; locale={}; needGDPR=false",
+            language.cookie_locale()
+        );
+        let cookie_value =
+            HeaderValue::from_str(&cookies).expect("webtoons cookie header is ASCII");
+
+        let mut base_headers = HeaderMap::new();
         base_headers.insert(
-            reqwest::header::REFERER,
-            reqwest::header::HeaderValue::from_static("https://www.webtoons.com/en"),
+            REFERER,
+            HeaderValue::from_str(&format!("{BASE_URL}/{}", language.path_code()))
+                .expect("webtoons referer is ASCII"),
         );
-        let mut mobile_headers = reqwest::header::HeaderMap::new();
-        mobile_headers.insert(
-            reqwest::header::REFERER,
-            reqwest::header::HeaderValue::from_static(MOBILE_BASE_URL),
-        );
+        base_headers.insert(COOKIE, cookie_value.clone());
+        let mut mobile_headers = HeaderMap::new();
+        mobile_headers.insert(REFERER, HeaderValue::from_static(MOBILE_BASE_URL));
+        mobile_headers.insert(COOKIE, cookie_value);
         Self {
             http,
             base_headers,
             mobile_headers,
             parser: WebtoonsParser,
+            language,
             limiter: crate::rate_limiter::ThroughputLimiter::new(
                 1,
                 std::time::Duration::from_secs(1),
@@ -536,12 +629,18 @@ impl WebtoonsClient {
                 id.0
             ))
         })?;
+        let mut query = vec![("pageSize", "99999")];
+        if chapters_path == "canvas" {
+            // 对齐 Tachiyomi 扩展：canvas 章节列表需指定阅读语言
+            let language = WebtoonsLanguage::from_url_path(&id.0).unwrap_or(self.language);
+            query.push(("readingLanguageCode", language.path_code()));
+        }
         let response = self
             .http
             .get(format!(
                 "{MOBILE_BASE_URL}/api/v1/{chapters_path}/{title_no}/episodes"
             ))
-            .query(&[("pageSize", "99999")])
+            .query(&query)
             .headers(self.mobile_headers.clone())
             .send()
             .await?;
@@ -655,6 +754,7 @@ pub struct WebtoonsMetadataMapper {
     metadata_config: crate::config::SeriesMetadataConfig,
     author_roles: Vec<AuthorRole>,
     artist_roles: Vec<AuthorRole>,
+    language: WebtoonsLanguage,
 }
 
 impl WebtoonsMetadataMapper {
@@ -662,11 +762,13 @@ impl WebtoonsMetadataMapper {
         metadata_config: crate::config::SeriesMetadataConfig,
         author_roles: Vec<AuthorRole>,
         artist_roles: Vec<AuthorRole>,
+        language: WebtoonsLanguage,
     ) -> Self {
         Self {
             metadata_config,
             author_roles,
             artist_roles,
+            language,
         }
     }
 
@@ -676,8 +778,8 @@ impl WebtoonsMetadataMapper {
     ) -> Vec<SeriesSearchResult> {
         let mut out = Vec::new();
         for title in &results.0 {
-            let original_url = title.get_original_url();
-            let result_id = title.get_original_id();
+            let original_url = title.get_original_url(self.language);
+            let result_id = title.get_original_id(self.language);
             if original_url.is_none() || result_id.is_none() {
                 continue;
             }
@@ -694,11 +796,11 @@ impl WebtoonsMetadataMapper {
         }
         for title in &results.1 {
             out.push(SeriesSearchResult {
-                url: Some(title.get_canvas_url()),
+                url: Some(title.get_canvas_url(self.language)),
                 image_url: Some(format!("{IMAGE_BASE_URL}{}", title.thumbnail_mobile)),
                 title: title.title.clone(),
                 provider: CoreProviders::Webtoons.as_str().to_string(),
-                result_id: title.get_canvas_id().0,
+                result_id: title.get_canvas_id(self.language).0,
                 media_type: None,
                 language: None,
                 nsfw: None,
@@ -714,45 +816,38 @@ impl WebtoonsMetadataMapper {
     ) -> ProviderSeriesMetadata {
         let cfg = &self.metadata_config;
 
-        let author: Vec<Author> = series
-            .author
-            .as_ref()
-            .map(|it| {
-                self.author_roles
-                    .iter()
-                    .map(|role| Author {
-                        name: it.name.clone(),
+        let with_roles = |people: &[PersonInfo], roles: &[AuthorRole]| -> Vec<Author> {
+            people
+                .iter()
+                .flat_map(|p| {
+                    roles.iter().map(|role| Author {
+                        name: p.name.clone(),
                         role: *role,
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let artist: Vec<Author> = series
-            .artist
-            .as_ref()
-            .map(|it| {
-                self.artist_roles
-                    .iter()
-                    .map(|role| Author {
-                        name: it.name.clone(),
-                        role: *role,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut authors = author;
-        authors.extend(artist);
-        if let Some(adapted) = series.adapted_by.as_ref() {
-            authors.push(Author {
-                name: adapted.name.clone(),
-                role: AuthorRole::Editor,
-            });
-        }
+                })
+                .collect()
+        };
+        let mut authors = with_roles(&series.author, &self.author_roles);
+        authors.extend(with_roles(&series.artist, &self.artist_roles));
+        authors.extend(with_roles(&series.adapted_by, &[AuthorRole::Editor]));
+        // 同名同角色只保留一条；编绘一体（神之塔 SIU）保留 Writer 与 Penciller 两个角色，
+        // 与搜索 API 的 writingAuthorName / pictureAuthorName 一致
+        let mut seen: Vec<(String, AuthorRole)> = Vec::new();
+        authors.retain(|a| {
+            let key = (a.name.clone(), a.role);
+            let fresh = !seen.contains(&key);
+            if fresh {
+                seen.push(key);
+            }
+            fresh
+        });
 
+        // 以作品网址的语言为准（如手动指定了其他语言站台的作品），取不到才用配置值
+        let series_language = WebtoonsLanguage::from_url_path(&series.url).unwrap_or(self.language);
         let title = SeriesTitle {
             name: series.title.clone(),
             r#type: Some(TitleType::Localized),
-            language: Some("en".to_string()),
+            language: Some(series_language.language_tag().to_string()),
         };
         let title_field = cfg.title.then_some(title.clone());
 
@@ -795,9 +890,10 @@ impl WebtoonsMetadataMapper {
             alternative_publishers: Vec::new(),
             reading_direction: None,
             age_rating: None, // Kotlin 注释掉不设置
-            // Kotlin: language = "en"（MetadataConfigApplier 按 cfg.language 裁剪）
+            // Kotlin: language = "en"（MetadataConfigApplier 按 cfg.language 裁剪）；
+            // 此处改为按语言站台输出（zh-hant → zh-Hant）
             language: if cfg.language {
-                Some("en".to_string())
+                Some(series_language.language_tag().to_string())
             } else {
                 None
             },
@@ -884,20 +980,23 @@ pub struct WebtoonsMetadataProvider {
 }
 
 pub fn create_provider(
-    config: &ProviderConfig,
+    webtoons_config: &WebtoonsConfig,
     default_name_matcher: NameSimilarityMatcher,
     http_client: &reqwest::Client,
 ) -> Option<WebtoonsMetadataProvider> {
+    let config = &webtoons_config.provider;
     if !config.enabled {
         return None;
     }
+    let language = webtoons_config.language;
     let name_matcher = config.name_matching_mode.unwrap_or(default_name_matcher);
     Some(WebtoonsMetadataProvider {
-        client: WebtoonsClient::new(http_client.clone()),
+        client: WebtoonsClient::new(http_client.clone(), language),
         metadata_mapper: WebtoonsMetadataMapper::new(
             config.series_metadata.clone(),
             config.author_roles.clone(),
             config.artist_roles.clone(),
+            language,
         ),
         name_matcher,
         fetch_series_covers: config.series_metadata.thumbnail,
@@ -1098,17 +1197,25 @@ mod tests {
             read_count: 0,
         };
         assert_eq!(
-            title.get_original_url().as_deref(),
+            title.get_original_url(WebtoonsLanguage::En).as_deref(),
             Some("https://www.webtoons.com/en/fantasy/tower-of-god/list?title_no=10101")
         );
         assert_eq!(
-            title.get_canvas_url(),
+            title.get_canvas_url(WebtoonsLanguage::En),
             "https://www.webtoons.com/en/canvas/tower-of-god/list?title_no=10101"
+        );
+        assert_eq!(
+            title.get_original_url(WebtoonsLanguage::ZhHant).as_deref(),
+            Some("https://www.webtoons.com/zh-hant/fantasy/tower-of-god/list?title_no=10101")
+        );
+        assert_eq!(
+            title.get_canvas_url(WebtoonsLanguage::ZhHant),
+            "https://www.webtoons.com/zh-hant/canvas/tower-of-god/list?title_no=10101"
         );
         // representGenre 空 -> original null
         let mut title2 = title.clone();
         title2.represent_genre = Some(String::new());
-        assert_eq!(title2.get_original_url(), None);
+        assert_eq!(title2.get_original_url(WebtoonsLanguage::En), None);
     }
 
     #[test]
@@ -1125,19 +1232,40 @@ mod tests {
 
     #[test]
     fn status_mapping() {
-        let map = |s: &str| match s {
-            x if x.contains("UP") || x.contains("EVERY") || x.contains("NOUVEAU") => {
-                Status::Ongoing
-            }
-            x if x.contains("END") || x.contains("COMPLETED") || x.contains("TERMINÉ") => {
-                Status::Completed
-            }
-            _ => Status::Unknown,
-        };
+        let map = status_from_text;
         assert_eq!(map("MON, UPDATED EVERY MON"), Status::Ongoing);
+        assert_eq!(map("更新 在週二更新"), Status::Ongoing);
+        assert_eq!(map("完結"), Status::Completed);
         assert_eq!(map("COMPLETED"), Status::Completed);
         assert_eq!(map("END"), Status::Completed);
         assert_eq!(map("something else"), Status::Unknown);
+    }
+
+    #[test]
+    fn search_result_thumbnail_uses_referer_free_host() {
+        let title = Title {
+            title_no: 6540,
+            title: "t".to_string(),
+            title_group_name: Some("t".to_string()),
+            represent_genre: Some("ROMANCE".to_string()),
+            thumbnail_mobile: "/20240716_1/thumb.jpg".to_string(),
+            unsuitable_for_children: false,
+            picture_author_name: None,
+            writing_author_name: "a".to_string(),
+            last_episode_register_ymdt: 0,
+            read_count: 0,
+        };
+        let mapper = WebtoonsMetadataMapper::new(
+            Default::default(),
+            vec![],
+            vec![],
+            WebtoonsLanguage::ZhHant,
+        );
+        let results = mapper.to_series_search_result(&(vec![title], vec![]));
+        assert_eq!(
+            results[0].image_url.as_deref(),
+            Some("https://swebtoon-phinf.pstatic.net/20240716_1/thumb.jpg")
+        );
     }
 
     #[test]
@@ -1155,5 +1283,239 @@ mod tests {
             episode.get_id().0,
             "/en/fantasy/tower-of-god/10?title_no=10101"
         );
+    }
+
+    /// 台湾版（zh-hant）页面结构，取自 www.webtoons.com/zh-hant 实际页面并精简。
+    const ZH_HANT_ONGOING: &str = r#"<html><head>
+<meta property="og:url" content="https://www.webtoons.com/zh-hant/fantasy/abundance-goddess-genius-wretched-apostle/list?title_no=9349" />
+<meta property="og:image" content="https://webtoon-phinf.pstatic.net/thumb.jpg?type=crop540_540" />
+</head><body><div id="wrap">
+<div class="detail_header type_white"><div class="info">
+<h2 class="genre g_fantasy">奇幻冒險</h2>
+<h1 class="subj">豐饒女神與天才使徒</h1>
+<div class="author_area"> Saint Nine , gomsanta <button type="button" class="ico_info2 _btnAuthorInfo">作家資訊</button></div>
+</div></div>
+<div id="_asideDetail">
+<p class="day_info"><span class="txt_ico_up">更新</span>在週二更新</p>
+<p class="summary">地球毀滅後，需要仰賴回歸者從異世界取回的生命力。</p>
+</div>
+<div class="ly_wrap _authorInfoLayer"><div class="ly_box ly_creator"><div class="ly_creator_in _authorInnerContent">
+<div class="ly_creator_item"><p class="by">作家</p><h3 class="title"> Saint Nine </h3><p class="desc"></p></div>
+<div class="ly_creator_item"><p class="by">原作</p><h3 class="title"> gomsanta </h3><p class="desc"></p></div>
+</div></div></div>
+</div></body></html>"#;
+
+    const ZH_HANT_COMPLETED: &str = r#"<html><head>
+<meta property="og:url" content="https://www.webtoons.com/zh-hant/romance-m/for-daphne/list?title_no=9342" />
+</head><body><div id="wrap">
+<div class="detail_header"><div class="info"><h2 class="genre">愛情</h2><h1 class="subj">女神們的故事：獻給達芙妮</h1></div></div>
+<div id="_asideDetail"><p class="day_info"><span class="txt_ico_completed"></span>完結</p><p class="summary">x</p></div>
+<div class="ly_wrap _authorInfoLayer"><div class="ly_creator_in _authorInnerContent">
+<div><p class="by">原作</p><h3 class="title">3_jokseom</h3></div>
+<div><p class="by">編劇</p><h3 class="title">Dan Geung</h3></div>
+<div><p class="by">編劇</p><h3 class="title">INKO</h3></div>
+<div><p class="by">繪圖</p><h3 class="title">KKAM</h3></div>
+</div></div>
+</div></body></html>"#;
+
+    /// 只有作者弹层的最小页面（标签, 姓名）。
+    fn credits_page(credits: &[(&str, &str)]) -> String {
+        let people: String = credits
+            .iter()
+            .map(|(by, name)| {
+                format!(r#"<div><p class="by">{by}</p><h3 class="title">{name}</h3></div>"#)
+            })
+            .collect();
+        format!(
+            r#"<html><head><meta property="og:url" content="https://www.webtoons.com/en/x/y/list?title_no=1" /></head>
+<body><div id="wrap"><h1 class="subj">t</h1><div class="ly_wrap _authorInfoLayer"><div class="_authorInnerContent">{people}</div></div></div></body></html>"#
+        )
+    }
+
+    fn names(people: &[PersonInfo]) -> Vec<&str> {
+        people.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    fn authors_of(series: &WebtoonsSeries) -> Vec<String> {
+        WebtoonsMetadataMapper::new(
+            Default::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            WebtoonsLanguage::En,
+        )
+        .to_series_metadata(series, None)
+        .metadata
+        .authors
+        .iter()
+        .map(|a| format!("{}/{:?}", a.name, a.role))
+        .collect()
+    }
+
+    #[test]
+    fn parse_zh_hant_ongoing_series() {
+        let series = WebtoonsParser.parse_series(ZH_HANT_ONGOING);
+        assert_eq!(series.title, "豐饒女神與天才使徒");
+        assert_eq!(series.status, Status::Ongoing);
+        assert_eq!(series.genres, vec!["奇幻冒險".to_string()]);
+        // 作家（泛指创作者）恒计入作者；无 繪圖 时同时计为作画。
+        // en 站同作（9672）：Art by Saint Nine / Original work by gomsanta
+        assert_eq!(names(&series.author), ["gomsanta", "Saint Nine"]);
+        assert_eq!(names(&series.artist), ["Saint Nine"]);
+        assert!(series.adapted_by.is_empty());
+        assert_eq!(
+            series.id.0,
+            "/zh-hant/fantasy/abundance-goddess-genius-wretched-apostle/list?title_no=9349"
+        );
+        assert_eq!(
+            authors_of(&series),
+            [
+                "gomsanta/Writer",
+                "Saint Nine/Writer",
+                "Saint Nine/Penciller"
+            ]
+        );
+
+        let mapper = WebtoonsMetadataMapper::new(
+            Default::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            WebtoonsLanguage::En,
+        );
+        let metadata = mapper.to_series_metadata(&series, None).metadata;
+        // 配置为 en，但作品网址是 zh-hant → 语言以网址为准
+        assert_eq!(metadata.language.as_deref(), Some("zh-Hant"));
+        assert_eq!(metadata.status, Some(SeriesStatus::Ongoing));
+    }
+
+    #[test]
+    fn parse_zh_hant_completed_series_keeps_all_co_credits() {
+        let series = WebtoonsParser.parse_series(ZH_HANT_COMPLETED);
+        assert_eq!(series.status, Status::Completed);
+        assert_eq!(names(&series.author), ["3_jokseom"]);
+        // 同一标签两位編劇都保留；有原作时 編劇 即改编者
+        assert_eq!(names(&series.adapted_by), ["Dan Geung", "INKO"]);
+        assert_eq!(names(&series.artist), ["KKAM"]);
+        assert_eq!(
+            authors_of(&series),
+            [
+                "3_jokseom/Writer",
+                "KKAM/Penciller",
+                "Dan Geung/Editor",
+                "INKO/Editor"
+            ]
+        );
+    }
+
+    #[test]
+    fn credit_label_semantics() {
+        // en 全知读者：Original + Adapted + Art
+        let s = WebtoonsParser.parse_series(&credits_page(&[
+            ("Original work by", "singNsong"),
+            ("Adapted by", "UMI"),
+            ("Art by", "Sleepy-C"),
+        ]));
+        assert_eq!(
+            (names(&s.author), names(&s.adapted_by), names(&s.artist)),
+            (vec!["singNsong"], vec!["UMI"], vec!["Sleepy-C"])
+        );
+
+        // zh-hant 同作：編劇 UMI 在有原作时即改编者
+        let s = WebtoonsParser.parse_series(&credits_page(&[
+            ("編劇", "UMI"),
+            ("繪圖", "Sleepy-C"),
+            ("原作", "singNsong"),
+        ]));
+        assert_eq!(
+            (names(&s.author), names(&s.adapted_by), names(&s.artist)),
+            (vec!["singNsong"], vec!["UMI"], vec!["Sleepy-C"])
+        );
+
+        // 无原作：編劇 即作者，改編 另计
+        let s = WebtoonsParser.parse_series(&credits_page(&[
+            ("編劇", "Alphatart"),
+            ("繪圖", "SUMPUL"),
+            ("改編", "HereLee"),
+        ]));
+        assert_eq!(
+            (names(&s.author), names(&s.adapted_by), names(&s.artist)),
+            (vec!["Alphatart"], vec!["HereLee"], vec!["SUMPUL"])
+        );
+
+        // en 9672：Created by 计入作者，不覆盖 Art by
+        let s = WebtoonsParser.parse_series(&credits_page(&[
+            ("Created by", "YES WORKS"),
+            ("Art by", "Saint Nine"),
+            ("Original work by", "gomsanta"),
+        ]));
+        assert_eq!(
+            (names(&s.author), names(&s.artist)),
+            (vec!["gomsanta", "YES WORKS"], vec!["Saint Nine"])
+        );
+    }
+
+    #[test]
+    fn single_creator_gets_each_role_once() {
+        // 神之塔：只有 Created by SIU → 编绘一体，Writer 与 Penciller 各一条（无重复）
+        let s = WebtoonsParser.parse_series(&credits_page(&[("Created by", "SIU")]));
+        assert_eq!(authors_of(&s), ["SIU/Writer", "SIU/Penciller"]);
+        // 页面重复列出同一人时去重
+        let s = WebtoonsParser.parse_series(&credits_page(&[("作家", "SIU"), ("作家", "SIU")]));
+        assert_eq!(authors_of(&s), ["SIU/Writer", "SIU/Penciller"]);
+    }
+
+    #[test]
+    fn language_from_url_path() {
+        assert_eq!(
+            WebtoonsLanguage::from_url_path("/zh-hant/fantasy/x/list?title_no=1"),
+            Some(WebtoonsLanguage::ZhHant)
+        );
+        assert_eq!(
+            WebtoonsLanguage::from_url_path("https://www.webtoons.com/en/canvas/x/list?title_no=1"),
+            Some(WebtoonsLanguage::En)
+        );
+        assert_eq!(
+            WebtoonsLanguage::from_url_path("/episodeList?titleNo=1"),
+            None
+        );
+    }
+
+    /// 实网联调（默认忽略）：`cargo test -p komf-core webtoons_zh_hant_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn webtoons_zh_hant_live() {
+        let client = WebtoonsClient::new(reqwest::Client::new(), WebtoonsLanguage::ZhHant);
+        let mapper = WebtoonsMetadataMapper::new(
+            Default::default(),
+            vec![AuthorRole::Writer],
+            vec![AuthorRole::Penciller],
+            WebtoonsLanguage::ZhHant,
+        );
+        let results = mapper.to_series_search_result(&client.search_series("女神").await.unwrap());
+        assert!(!results.is_empty());
+        for r in results.iter().take(3) {
+            println!("{} | {}", r.title, r.result_id);
+        }
+        let series = client
+            .get_series_with_chapters(&WebtoonsSeriesId(results[0].result_id.clone()))
+            .await
+            .unwrap();
+        let metadata = mapper.to_series_metadata(&series, None).metadata;
+        println!(
+            "title={:?} lang={:?} status={:?} authors={:?} genres={:?} chapters={}",
+            metadata.title.map(|t| t.name),
+            metadata.language,
+            metadata.status,
+            metadata
+                .authors
+                .iter()
+                .map(|a| format!("{}/{:?}", a.name, a.role))
+                .collect::<Vec<_>>(),
+            metadata.genres,
+            series.chapters.as_ref().map(|c| c.len()).unwrap_or(0)
+        );
+        assert!(results[0].result_id.starts_with("/zh-hant/"));
+        assert_eq!(metadata.language.as_deref(), Some("zh-Hant"));
+        assert!(metadata.status.is_some());
+        assert!(!metadata.authors.is_empty());
     }
 }

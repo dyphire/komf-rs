@@ -46,10 +46,13 @@ async fn main() {
         (
             "Webtoons",
             komf_core::providers::webtoons::create_provider(
-                &ProviderConfig {
-                    priority: 1,
-                    enabled: true,
-                    ..Default::default()
+                &komf_core::config::WebtoonsConfig {
+                    provider: ProviderConfig {
+                        priority: 1,
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    language: Default::default(),
                 },
                 matcher,
                 &http,
