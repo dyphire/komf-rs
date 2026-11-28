@@ -101,7 +101,7 @@ jobs:
             binary_source: komf-app.exe
             binary_name: komf-app.exe
             docker_runtime: false
-          - runner: macos-14
+          - runner: macos-latest
             platform: macos
             artifact_suffix: macos-arm64
             release_package_name: release-package-macos-arm64
